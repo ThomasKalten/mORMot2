@@ -2,6 +2,10 @@
 
 *An Open Source Client-Server ToolBox aka ORM/SOA/MVC framework in modern Object Pascal*
 
+This version contains patches so the framework can be compiled for Android with Delphi.
+It is in an alpha state - not all features will be tested. 
+Some will not be portable without deeper knowledge of the Delphi runtime/compiler, since mormot uses such knowledge for the implementation of special features.
+
 ![Happy mORMot](doc/happymormot.png)
 
 (c) 2008-2025 Synopse Informatique - Arnaud Bouchez
