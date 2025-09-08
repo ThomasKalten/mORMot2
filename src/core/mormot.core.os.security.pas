@@ -5488,7 +5488,8 @@ begin
     inc(p, length(Group));
   end;
   if p - pointer(result) <> length(result) then
-    raise EOSSecurity.Create('TSecurityDescriptor.ToBinary'); // paranoid
+    raise EOSSecurity.Create('TSecurityDescriptor.ToBinary') // paranoid
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif}
 end;
 
 const
@@ -6744,7 +6745,9 @@ begin
     end;
   if not result then
     // OS API call failed -> fallback to our TLecuyer gsl_rng_taus2 generator
-    SharedRandom.Fill(pointer(Buffer), Len);
+    SharedRandom.Fill(pointer(Buffer), Len)
+  else if Len >= SizeOf(SystemEntropy.LiveFeed) then
+    crcblock(@SystemEntropy.LiveFeed, pointer(Buffer)); // shuffle live state
 end;
 
 { TWinCryptoApi }
@@ -6924,7 +6927,7 @@ const
     // note: string[32] to ensure there is a #0 terminator for all items
     'SeCreateTokenPrivilege',          // wspCreateToken
     'SeAssignPrimaryTokenPrivilege',   // wspAssignPrimaryToken
-    'SeLockMemoryPrivilege',           // wspLockMemory
+    'SeLockMemoryPrivilege',           // wspLockMemory - e.g. MEM_LARGE_PAGES
     'SeIncreaseQuotaPrivilege',        // wspIncreaseQuota
     'SeUnsolicitedInputPrivilege',     // wspUnsolicitedInput
     'SeMachineAccountPrivilege',       // wspMachineAccount

@@ -206,7 +206,7 @@
         <DCC_RangeChecking>true</DCC_RangeChecking>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_1_Android)'!=''">
-        <VerInfo_Keys>package=com.embarcadero.$(MSBuildProjectName);label=$(MSBuildProjectName);versionCode=1;versionName=1.0.0;persistent=False;restoreAnyVersion=False;installLocation=auto;largeHeap=False;theme=TitleBar;hardwareAccelerated=true;apiKey=;LastCompiledTime=2025.05.21 18:24:51;minSdkVersion=23;targetSdkVersion=35</VerInfo_Keys>
+        <VerInfo_Keys>package=com.embarcadero.$(MSBuildProjectName);label=$(MSBuildProjectName);versionCode=1;versionName=1.0.0;persistent=False;restoreAnyVersion=False;installLocation=auto;largeHeap=False;theme=TitleBar;hardwareAccelerated=true;apiKey=;LastCompiledTime=2025.09.08 12:45:41;minSdkVersion=23;targetSdkVersion=35</VerInfo_Keys>
         <DCC_LegacyIFEND>true</DCC_LegacyIFEND>
         <VerInfo_Build>1</VerInfo_Build>
         <Debugger_DebugSourcePath>L:\mORMot2\src\core\;L:\mORMot2\src\db\;L:\mORMot2\src\net\;$(Debugger_DebugSourcePath)</Debugger_DebugSourcePath>

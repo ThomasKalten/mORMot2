@@ -1785,11 +1785,11 @@ const
 
 var
   buf: RawByteString;
-  u, pw, exp: RawUtf8;
+  u, pw, nfo, exp: RawUtf8;
   iv: Int64;
   P: PAnsiChar;
   unalign: PtrInt;
-  n, rounds, rnd: integer;
+  n, rnd: integer;
   i64: Int64;
   logN, blocksize, parallel, r,
   exp321, exp322, exp323, exp324, exp325, exp326: cardinal;
@@ -1797,7 +1797,7 @@ var
   hasher: TSynHasher;
   h, h2: THashAlgo;
   s, s2: TSignAlgo;
-  mcf: TModularCryptFormat;
+  mcf, mcf2: TModularCryptFormat;
   timer: TPrecisionTimer;
 begin
   // validate THashAlgo and TSignAlgo recognition
@@ -2031,13 +2031,13 @@ begin
     if OpenSslVersion >= OPENSSL3_VERNUM then
       TestSCript(@OpenSslSCrypt, 'OpenSslSCrypt');
   {$endif USE_OPENSSL}
-  TestSCript(@SCryptPascal, 'SCryptPascal');
+  TestSCript(@RawSCrypt, 'RawSCrypt');
   r := SCryptRounds; // default values
   SCryptRoundsDecode(r, logN, blocksize, parallel);
-  Check(r = $8000e000);
+  Check(r = $8000e001);
   CheckEqual(logN, 16);
   CheckEqual(blocksize, 8);
-  CheckEqual(parallel, 1);
+  CheckEqual(parallel, 2);
   exp := '$scrypt$ln=4,r=8,p=1$QNx4N454ppMeKmDjxyrhsh7Q/PYBQw$zeGG+tsAueRzkvXfE1/F58KOKFEFfI0KpBYwE/3ZUWg';
   Check(ModularCryptVerify('password', exp) = mcfSCrypt);
   Check(ModularCryptVerify('pAssword', exp) = mcfInvalid);
@@ -2047,22 +2047,14 @@ begin
   // validate "Modular Crypt" formats
   for mcf := mcfMd5Crypt to high(mcf) do
   begin
-    timer.Start;
-    rounds := 0;
     for n := 1 to 10 do
     begin
       RandomByteString(n * 7, pw); // should reach at least 64 bytes = 512-bit
       case mcf of
         mcfMd5Crypt:
-          begin
-            rnd := 1000; // fixed number
-            inc(rounds, 3000);
-          end;
+          rnd := 1000; // fixed number
         mcfBCrypt, mcfBCryptSha256:
-          begin
-            rnd := 4 + n shr 2; // cost = 4..5 is enough here
-            inc(rounds, 3 * (1 shl rnd));
-          end;
+          rnd := 4 + n shr 2; // cost = 4..5 is enough here
         mcfSCrypt:
           begin
             rnd := SCryptRounds(4 + (n shr 2), 8, n);
@@ -2070,13 +2062,9 @@ begin
             CheckEqual(logN, 4 + (n shr 2));
             CheckEqual(blocksize, 8);
             CheckEqual(parallel, n);
-            inc(rounds, (1 shl logN) * parallel);
           end;
       else
-        begin
-          rnd := 1000 + n;
-          inc(rounds, 3 * rnd);
-        end;
+        rnd := 1000 + n;
       end;
       u := ModularCryptHash(mcf, pw, rnd, {saltsize=}n);
       Check(u <> '');
@@ -2086,15 +2074,39 @@ begin
         mcfBCrypt:
           CheckEqual(PosEx(Make(['$', UInt2DigitsToShort(rnd), '$']), u), 4);
       end;
-      Check(ModularCryptIdentify(u) = mcf);
+      nfo := '';
+      Check(ModularCryptIdentify(u, @nfo) = mcf);
       Check(ModularCryptVerify(pw, u) = mcf);
-      if u = '' then
-        continue; // avoid GPF
-      dec(PByteArray(u)[length(u) - 5]);
-      Check(ModularCryptVerify(pw, u) = mcfInvalid);
+      Check(nfo <> '');
+      Check(StartWithExact(u, nfo));
+      Check(ModularCryptIdentify(nfo) = mcf);
+      CheckEqual(u, ModularCryptHash(nfo, pw)); // simulate client side re-hash
+      if u <> '' then // avoid GPF
+      begin
+        dec(PByteArray(u)[length(u) - 5]);
+        Check(ModularCryptVerify(pw, u) = mcfInvalid);
+      end;
+      u := ModularCryptFakeInfo(pw, mcf);
+      nfo := '';
+      mcf2 := ModularCryptIdentify(u, @nfo);
+      if mcf = mcfMd5Crypt then
+        CheckUtf8(mcf2 in mcfValid, u) // random format
+      else
+        Check(mcf2 = mcf);
+      CheckEqual(nfo, u);
+      CheckEqual(ModularCryptFakeInfo(pw, mcf), u, 'consistent fake');
     end;
-    if not fOwner.MultiThread then
-      NotifyTestSpeed('% rounds', [ToText(mcf)^], rounds, 0, @timer);
+  end;
+  for mcf := mcfMd5Crypt to high(mcf) do
+  begin
+    timer.Start; // output password hash with default values
+    u := ModularCryptHash(mcf, 'password');
+    NotifyProgress([TrimLeftLowerCaseShort(ToText(mcf)), '=', timer.Stop]);
+    Check(ModularCryptIdentify(u, @nfo) = mcf);
+    Check(nfo <> '');
+    Check(StartWithExact(u, nfo));
+    Check(ModularCryptIdentify(nfo) = mcf);
+    //ConsoleWrite([CRLF,'ModularCryptHash(''',nfo,''',''password'')=''',u,''');']);
   end;
   // reference vectors from https://en.wikipedia.org/wiki/Mask_generation_function
   buf := 'foo';
@@ -2532,19 +2544,6 @@ begin
   {$ifdef CPUINTEL}
   backup := CpuFeatures;
   {$endif CPUINTEL}
-  Check(AesTablesTest, 'Internal Tables');
-  tab := AesTables;
-  CheckEqual(tab[0],  $50a7f451);
-  CheckEqual(tab[99],  0);
-  CheckEqual(tab[255],  $4257b8d0);
-  CheckEqual(tab[$300 + 0],  $5150a7f4);  // @tab[$300] = @TD3
-  CheckEqual(tab[$300 + 255],  $d04257b8);
-  CheckEqual(tab[$400 + 0],  $a56363c6);  // @tab[$400] = @TE0
-  CheckEqual(tab[$400 + 255],  $3a16162c);
-  CheckEqual(tab[$500 + 0],  $6363c6a5);  // @tab[$500] = @TE1
-  CheckEqual(tab[$500 + 255],  $16162c3a);
-  CheckEqual(tab[$700 + 0],  $c6a56363);  // @tab[$700] = @TE3
-  CheckEqual(tab[$700 + 255],  $2c3a1616);
   CheckEqual(SizeOf(TMd5Buf), SizeOf(TMd5Digest));
   CheckEqual(1 shl AesBlockShift, SizeOf(TAesBlock));
   CheckEqual(SizeOf(TAes), AES_CONTEXT_SIZE);
@@ -2637,6 +2636,20 @@ begin
       '603DEB1015CA71BE2B73AEF0857D77811F352C073B6108D72D9810A30914DFF4',
       '601EC313775789A5B7A7F504BBF3D228F443E3CA4D62B59ACA84E990CACAF5C5' +
       '2B0930DAA23DE94CE87017BA2D84988DDFC9C58DB67AADA613C2DD08457941A6');
+    // check AES internal tables access
+    Check(AesTablesTest, 'Internal Tables');
+    tab := AesTables;
+    CheckEqual(tab[0],  $50a7f451);
+    CheckEqual(tab[99],  0);
+    CheckEqual(tab[255],  $4257b8d0);
+    CheckEqual(tab[$300 + 0],  $5150a7f4);  // @tab[$300] = @TD3
+    CheckEqual(tab[$300 + 255],  $d04257b8);
+    CheckEqual(tab[$400 + 0],  $a56363c6);  // @tab[$400] = @TE0
+    CheckEqual(tab[$400 + 255],  $3a16162c);
+    CheckEqual(tab[$500 + 0],  $6363c6a5);  // @tab[$500] = @TE1
+    CheckEqual(tab[$500 + 255],  $16162c3a);
+    CheckEqual(tab[$700 + 0],  $c6a56363);  // @tab[$700] = @TE3
+    CheckEqual(tab[$700 + 255],  $2c3a1616);
     // check both mORMot and OpenSSL against our reference vectors
     {%H-}Timer[noaesni].Init;
     for k := 0 to 2 do
@@ -2906,7 +2919,8 @@ begin
       cts.iv := iv.b;
       s2 := cts.DecryptCts(crypted);
       CheckEqual(s2, orig);
-      CheckEqual(cts.DecryptCts(cts.EncryptCts(orig, true), true), orig);
+      s3 := cts.EncryptCts(orig, true);
+      CheckEqual(cts.DecryptCts(s3, true), orig);
     end;
   finally
     cts.Free;
@@ -3174,7 +3188,7 @@ end;
 const
   // AesNiHash128() responses with fixed byte-increasing AesNiHashAntiFuzzTable
   // - to validate one identical algorithm on both i386 and x64 platforms
-  AESNIHASH_REF128: PAnsiChar = '00000000000000000000000000000000' +
+  AESNIHASH_REF128: PAnsiChar =     '00000000000000000000000000000000' +
     'ebcaa5d9d3111481ca62776f7cc716d5078f6490103c58d95b5e16001d40cf6b' +
     '9b0e47ebccb12f80270b0d17caafa8e1e64ef4b87ee4dd8743650db1ac9d59b0' +
     '345407a79f54f73c6a8120cd19ec289750bc08c882e7f30a72295534c6d5ad1c' +
@@ -3232,11 +3246,10 @@ begin
   // validate AesNiHash128() against reference vectors
   // - should be done FIRST with no process in the background
   if Assigned(AesNiHash128) and
-     not CheckFailed(not fBackgroundRun.Waiting, 'no background run') and
-     not CheckFailed(Assigned(AesNiHashAntiFuzzTable)) then
+     not CheckFailed(not fBackgroundRun.Waiting, 'no background run') then
   begin
-    bak := AesNiHashAntiFuzzTable^;
-    AesNiHashAntiFuzzTable^ := PHash512(@bytes)^; // replace to get AESNIHASH_REF
+    Move512(@bak, AesNiHashAntiFuzzTable);
+    Move512(AesNiHashAntiFuzzTable, @bytes); // replace to get AESNIHASH_REF
     ref := AESNIHASH_REF128;
     ref32 := @AESNIHASH_REF32;
     n := 0;
@@ -3259,7 +3272,7 @@ begin
         inc(n, 7);
     until n > 250;
     CheckEqual(n, 251);
-    AesNiHashAntiFuzzTable^ := bak; // needed to preserve existing hash tables
+    Move512(AesNiHashAntiFuzzTable, @bak); // preserve existing hash tables
   end;
   // validate 32-bit, 64-bit and 128-bit crc functions in the background
   Run(CrcSlow, nil, 'crc', {threaded=}true, {notify=}false);
@@ -4497,7 +4510,7 @@ begin
   timer.Start;
   c := TRsa.GenerateNew; // with RSA_DEFAULT_GENERATION_* values
   try
-    NotifyTestSpeed('RS256 generate', -1, 0, @timer, {onlylog=}true);
+    NotifyTestSpeed('RS256 generate', -1, 0, @timer, fOwner.MultiThread);
     if CheckFailed(c <> nil, 'TimeOut') then
       exit;
     CheckEqual(c.ModulusBits, RSA_DEFAULT_GENERATION_BITS);

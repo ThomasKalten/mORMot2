@@ -251,6 +251,10 @@ type
     EndOfObject: AnsiChar;
     /// true if the last parsing succeeded - used in inherited TJsonParserContext
     Valid: boolean;
+    /// decode a JSON field name in-place into Value/ValueLen
+    // - returns true if Value/ValueLen has been set with a non void identifier
+    function GetJsonFieldName: boolean;
+      {$ifdef HASINLINE} inline; {$endif}
     /// decode a JSON field value in-place from an UTF-8 encoded text buffer
     // - warning: will decode in the Json buffer memory itself (no memory copy
     // nor allocation), for faster process - so take care that it is not shared
@@ -1774,14 +1778,15 @@ type
   TJsonParserContext = record
   public
     Get: TGetJsonField;
-    function  GetJson: PUtf8Char;     {$ifdef HASINLINE} inline; {$endif}
-    procedure SetJson(P: PUtf8Char);  {$ifdef HASINLINE} inline; {$endif}
-    function  Value: PUtf8Char;       {$ifdef HASINLINE} inline; {$endif}
-    function  ValueLen: PtrInt;       {$ifdef HASINLINE} inline; {$endif}
-    function  WasString: boolean;     {$ifdef HASINLINE} inline; {$endif}
-    function  EndOfObject: AnsiChar;  {$ifdef HASINLINE} inline; {$endif}
-    function  GetValid: boolean;      {$ifdef HASINLINE} inline; {$endif}
-    procedure SetValid(v: boolean);   {$ifdef HASINLINE} inline; {$endif}
+    function  GetJson: PUtf8Char;       {$ifdef HASINLINE} inline; {$endif}
+    procedure SetJson(P: PUtf8Char);    {$ifdef HASINLINE} inline; {$endif}
+    function  Value: PUtf8Char;         {$ifdef HASINLINE} inline; {$endif}
+    function  ValueLen: PtrInt;         {$ifdef HASINLINE} inline; {$endif}
+    function  WasString: boolean;       {$ifdef HASINLINE} inline; {$endif}
+    function  EndOfObject: AnsiChar;    {$ifdef HASINLINE} inline; {$endif}
+    function  GetValid: boolean;        {$ifdef HASINLINE} inline; {$endif}
+    procedure SetValid(v: boolean);     {$ifdef HASINLINE} inline; {$endif}
+    function GetJsonFieldName: boolean; {$ifdef HASINLINE} inline; {$endif}
     property Json: PUtf8Char read GetJson  write SetJson;
     property Valid: boolean  read GetValid write SetValid;
   {$else}
@@ -1805,10 +1810,10 @@ type
     /// optional RawUtf8 values interning
     Interning: TRawUtf8Interning;
     /// initialize this unserialization context
-    procedure InitParser(P: PUtf8Char; Rtti: TRttiCustom; O: TJsonParserOptions;
-      CV: PDocVariantOptions; ObjectListItemClass: TClass;
-      RawUtf8Interning: TRawUtf8Interning);
-    /// call inherited GetJsonField() to retrieve the next JSON value
+    procedure InitParser(P: PUtf8Char; Rtti: TRttiCustom = nil;
+      O: TJsonParserOptions = []; CV: PDocVariantOptions = nil;
+      ObjectListItemClass: TClass = nil; RawUtf8Interning: TRawUtf8Interning = nil);
+    /// call inherited GetJsonField() to retrieve the next simple JSON value
     // - on success, return true and set Value/ValueLen and WasString fields
     function ParseNext: boolean;
       {$ifdef HASINLINE}inline;{$endif}
@@ -1865,8 +1870,7 @@ var
   /// some open-minded options for the JSON parser
   // - as supplied to LoadJson() with Tolerant=true
   // - won't block JSON unserialization due to some minor unexpected values
-  // - used e.g. by TObjArraySerializer.CustomReader and
-  // TInterfacedObjectFake.FakeCall/TServiceMethodExecute.ExecuteJson methods
+  // - as used e.g. by TInterfacedObjectFake and TServiceMethodExecute
   // - defined as var, not as const, to allow process-wide override
   JSONPARSER_TOLERANTOPTIONS: TJsonParserOptions =
     [jpoHandleCustomVariants, jpoIgnoreUnknownEnum,
@@ -2115,11 +2119,11 @@ procedure JsonEncodeNameSQLValue(const Name, SQLValue: RawUtf8;
 
 
 var
-  /// the options used by TObjArraySerializer, TInterfacedObjectFake and
-  // TServiceMethodExecute when serializing values as JSON
-  // - used as DEFAULT_WRITEOPTIONS[DontStoreVoidJson]
+  /// the options used when serializing values as JSON
+  // - mainly by TInterfacedObjectFake and TServiceMethodExecute
+  // - to be used as DEFAULT_WRITEOPTIONS[DontStoreVoidJson]
   // - you can modify this global variable to customize the whole process
-  DEFAULT_WRITEOPTIONS: array[boolean] of TTextWriterWriteObjectOptions = (
+  DEFAULT_WRITEOPTIONS: TTextWriterWriteObjectOptionsBoolean = (
     [woDontStoreDefault, woRawBlobAsBase64],
     [woDontStoreDefault, woDontStoreVoid, woRawBlobAsBase64]);
 
@@ -3433,6 +3437,13 @@ end;
 
 { TGetJsonField }
 
+function TGetJsonField.GetJsonFieldName: boolean;
+begin
+  Value := GetJsonPropName(Json, @ValueLen);
+  result := (Value <> nil) and
+            (Json <> nil);
+end;
+
 procedure TGetJsonField.GetJsonValue(var Text: RawUtf8);
 begin
   GetJsonField;
@@ -4260,7 +4271,9 @@ begin
     if P^ = '[' then
     begin
       {%H-}parser.Init({strict=}false, nil);
-      P := GotoNextNotSpace(P + 1);
+      repeat
+        inc(P);
+      until not (P^ in [#1..' ']);
       if P^ <> ']' then
         repeat
           if Index <= 0 then
@@ -4317,7 +4330,9 @@ begin
         PropNameLen := 0; // mark 'PropName*' search
       end;
       if P^ = '{' then
-        P := GotoNextNotSpace(P + 1);
+        repeat
+          inc(P);
+        until not (P^ in [#1..' ']);
       if P^ <> '}' then
         repeat
           GetJsonPropNameShort(P, name);
@@ -5158,7 +5173,10 @@ begin
     W.AddShort4(JSON_SQLDATE_MAGIC_QUOTE_C)
   else if PInt64(Value)^ = 0 then
   begin
-    W.AddShort4(NULL_LOW);
+    if woDateTimeNullAsVoidString in Options then
+      W.Add('"', '"') // legacy mORMot 1 format
+    else
+      W.AddShort4(NULL_LOW);
     exit;
   end
   else
@@ -7720,6 +7738,13 @@ begin
   Get.Valid := v;
 end;
 
+function TJsonParserContext.GetJsonFieldName: boolean;
+begin
+  Get.Value := GetJsonPropName(Get.Json, @Get.ValueLen);
+  result := (Get.Json  <> nil) and
+            (Get.Value <> nil);
+end;
+
 {$else}
 function TJsonParserContext.Get: PGetJsonField;
 begin
@@ -7812,7 +7837,9 @@ begin
   Json := P;
   if P^ = '[' then
   begin
-    P := GotoNextNotSpace(P + 1); // ignore trailing [
+    repeat
+      inc(P);
+    until not (P^ in [#1..' ']); // ignore trailing [
     if P^ = ']' then
     begin
       // void but valid array
@@ -7840,7 +7867,9 @@ begin
   Json := P;
   if P^ = '{' then
   begin
-    P := GotoNextNotSpace(P + 1); // ignore trailing {
+    repeat
+      inc(P);
+    until not (P^ in [#1..' ']); // ignore trailing {
     if P^ = '}' then
     begin
       // void but valid array
@@ -8278,8 +8307,7 @@ var
   j: PUtf8Char;
   root: TRttiJson;
   prop: PRttiCustomProp;
-  propname: PUtf8Char;
-  p, propnamelen: integer;
+  p: integer;
 label
   no, nxt, any;
 begin
@@ -8300,12 +8328,10 @@ no: Ctxt.Valid := false;
     prop := pointer(root.Props.List);
     for p := 1 to root.Props.Count do
     begin
-nxt:  propname := GetJsonPropName(Ctxt.Get.Json, @propnamelen);
-      if (Ctxt.Json = nil) or
-         (propname = nil) then
+nxt:  if not Ctxt.GetJsonFieldName then
         goto no;
       // O(1) optimistic process of the property name, following RTTI order
-      if prop^.NameMatch(propname, propnamelen) then
+      if prop^.NameMatch(Ctxt.Value, Ctxt.ValueLen) then
         if JsonLoadProp(Data, prop, Ctxt) then
           if Ctxt.EndOfObject = '}' then
             break
@@ -8314,12 +8340,12 @@ nxt:  propname := GetJsonPropName(Ctxt.Get.Json, @propnamelen);
         else
           break
       else if (Ctxt.Info.Kind = rkClass) and
-              (propnamelen = 9) and // fast "ClassName" case sensitive match
-              (PIntegerArray(propname)[0] =
+              (Ctxt.ValueLen = 9) and // fast "ClassName" case sensitive match
+              (PIntegerArray(Ctxt.Value)[0] =
                 ord('C') + ord('l') shl 8 + ord('a') shl 16 + ord('s') shl 24) and
-              (PIntegerArray(propname)[1] =
+              (PIntegerArray(Ctxt.Value)[1] =
                 ord('s') + ord('N') shl 8 + ord('a') shl 16 + ord('m') shl 24) and
-              (propname[8] = 'e') then
+              (Ctxt.Value[8] = 'e') then
       // woStoreClassName was used -> just ignore the class name
       begin
         Ctxt.Json := GotoNextJsonItem(Ctxt.Json, Ctxt.Get.EndOfObject);
@@ -8332,7 +8358,7 @@ nxt:  propname := GetJsonPropName(Ctxt.Get.Json, @propnamelen);
         // we didn't find the property in its natural place -> full lookup
         repeat
           prop := FindCustomProp(pointer(root.Props.List),
-            propname, propnamelen, root.Props.Count);
+            Ctxt.Value, Ctxt.ValueLen, root.Props.Count);
           if prop = nil then
             // unexpected "prop": value
             if (rcfReadIgnoreUnknownFields in root.Flags) or
@@ -8348,9 +8374,7 @@ nxt:  propname := GetJsonPropName(Ctxt.Get.Json, @propnamelen);
             goto no;
           if Ctxt.EndOfObject = '}' then
              break;
-any:      propname := GetJsonPropName(Ctxt.Get.Json, @propnamelen);
-          if (Ctxt.Json = nil) or
-             (propname = nil) then
+any:      if not Ctxt.GetJsonFieldName then
             goto no;
         until false;
         break;
@@ -12156,7 +12180,7 @@ var
 begin
   tmp.Init(value);
   try
-    ctx.InitParser(tmp.buf, SerializableInterface, [], nil, nil, nil);
+    ctx.InitParser(tmp.buf, SerializableInterface);
     FromJson(ctx);
   finally
     tmp.Done;
@@ -12372,70 +12396,77 @@ type // local type definitions for their own RTTI to be found by name
 
 procedure InitializeUnit;
 var
-  i: integer; // not PtrInt since has just been overriden
+  i: {$ifdef FPC}system.PtrInt{$else}integer{$endif}; // circumvent Delphi bug
   c: AnsiChar;
+  jc: TJsonChar;
+  p: PByteArray;
   {$ifdef FPC} dummy: RawUtf8; {$endif}
 begin
   // branchless JSON escaping - JSON_ESCAPE_NONE=0 if no JSON escape needed
-  JSON_ESCAPE[0]   := JSON_ESCAPE_ENDINGZERO; // 1 for #0 end of input
+  p := @JSON_ESCAPE;
+  p[0]   := JSON_ESCAPE_ENDINGZERO; // 1 for #0 end of input
   for i := 1 to 31 do
-    JSON_ESCAPE[i] := JSON_ESCAPE_UNICODEHEX; // 2 to escape #1..#31 as \u00xx
-  JSON_ESCAPE[8]   := ord('b');  // others contain the escaped character
-  JSON_ESCAPE[9]   := ord('t');
-  JSON_ESCAPE[10]  := ord('n');
-  JSON_ESCAPE[12]  := ord('f');
-  JSON_ESCAPE[13]  := ord('r');
-  JSON_ESCAPE[ord('\')] := ord('\');
-  JSON_ESCAPE[ord('"')] := ord('"');
+    p[i] := JSON_ESCAPE_UNICODEHEX; // 2 to escape #1..#31 as \u00xx
+  p[8]   := ord('b');  // others contain the escaped character
+  p[9]   := ord('t');
+  p[10]  := ord('n');
+  p[12]  := ord('f');
+  p[13]  := ord('r');
+  p[ord('\')] := ord('\');
+  p[ord('"')] := ord('"');
   // branchless JSON unescaping - default JSON_UNESCAPE_UNEXPECTED = #0
-  for c := #32 to #127 do
-    JSON_UNESCAPE[c] := c;
-  JSON_UNESCAPE['b'] := #8;
-  JSON_UNESCAPE['t'] := #9;
-  JSON_UNESCAPE['n'] := #10;
-  JSON_UNESCAPE['f'] := #12;
-  JSON_UNESCAPE['r'] := #13;
-  JSON_UNESCAPE['u'] := JSON_UNESCAPE_UTF16; // = #1
+  p := @JSON_UNESCAPE;
+  for i := 32 to 127 do
+    p[i] := i;
+  p[ord('b')] := 8;
+  p[ord('t')] := 9;
+  p[ord('n')] := 10;
+  p[ord('f')] := 12;
+  p[ord('r')] := 13;
+  p[ord('u')] := ord(JSON_UNESCAPE_UTF16); // = #1
   // fast JSON parsing using JSON_CHARS[] and JSON_TOKENS[] lookup tables
   for c := low(c) to high(c) do
   begin
+    jc := [];
     if c in [#0, ',', ']', '}', ':'] then
-      include(JSON_CHARS[c], jcEndOfJsonFieldOr0);
+      include(jc, jcEndOfJsonFieldOr0);
     if c in [#0, ',', ']', '}'] then
-      include(JSON_CHARS[c], jcEndOfJsonFieldNotName);
+      include(jc, jcEndOfJsonFieldNotName);
     if c in [#0, #9, #10, #13, ' ',  ',', '}', ']'] then
-      include(JSON_CHARS[c], jcEndOfJsonValueField);
+      include(jc, jcEndOfJsonValueField);
     if c in [#0, '"', '\'] then
-      include(JSON_CHARS[c], jcJsonStringMarker);
+      include(jc, jcJsonStringMarker);
     if c in ['-', '0'..'9'] then
     begin
-      include(JSON_CHARS[c], jcDigitFirstChar);
+      include(jc, jcDigitFirstChar);
       JSON_TOKENS[c] := jtFirstDigit;
     end;
     if c in ['-', '+', '0'..'9', '.', 'E', 'e'] then
-      include(JSON_CHARS[c], jcDigitFloatChar);
+      include(jc, jcDigitFloatChar);
     if c in ['_', '0'..'9', 'a'..'z', 'A'..'Z', '$'] then
-      include(JSON_CHARS[c], jcJsonIdentifierFirstChar);
+      include(jc, jcJsonIdentifierFirstChar);
     if c in ['_', '0'..'9', 'a'..'z', 'A'..'Z', '.', '[', ']', '$'] then
-      include(JSON_CHARS[c], jcJsonIdentifier);
+      include(jc, jcJsonIdentifier);
+    JSON_CHARS[c] := jc;
     if c in ['_', 'a'..'z', 'A'..'Z', '$'] then
       // exclude '0'..'9' as already in jtFirstDigit
       JSON_TOKENS[c] := jtIdentifierFirstChar;
   end;
-  JSON_TOKENS[#0 ]  := jtEndOfBuffer;
-  JSON_TOKENS['{']  := jtObjectStart;
-  JSON_TOKENS['}']  := jtObjectStop;
-  JSON_TOKENS['[']  := jtArrayStart;
-  JSON_TOKENS[']']  := jtArrayStop;
-  JSON_TOKENS[':']  := jtAssign;
-  JSON_TOKENS['=']  := jtEqual;
-  JSON_TOKENS[',']  := jtComma;
-  JSON_TOKENS[''''] := jtSingleQuote;
-  JSON_TOKENS['"']  := jtDoubleQuote;
-  JSON_TOKENS['t']  := jtTrueFirstChar;
-  JSON_TOKENS['f']  := jtFalseFirstChar;
-  JSON_TOKENS['n']  := jtNullFirstChar;
-  JSON_TOKENS['/']  := jtSlash;
+  p := @JSON_TOKENS;
+  p[ord(#0 )]  := ord(jtEndOfBuffer);
+  p[ord('{')]  := ord(jtObjectStart);
+  p[ord('}')]  := ord(jtObjectStop);
+  p[ord('[')]  := ord(jtArrayStart);
+  p[ord(']')]  := ord(jtArrayStop);
+  p[ord(':')]  := ord(jtAssign);
+  p[ord('=')]  := ord(jtEqual);
+  p[ord(',')]  := ord(jtComma);
+  p[ord('''')] := ord(jtSingleQuote);
+  p[ord('"')]  := ord(jtDoubleQuote);
+  p[ord('t')]  := ord(jtTrueFirstChar);
+  p[ord('f')]  := ord(jtFalseFirstChar);
+  p[ord('n')]  := ord(jtNullFirstChar);
+  p[ord('/')]  := ord(jtSlash);
   // initialize JSON serialization
   Rtti.GlobalClass := TRttiJson; // will ensure Rtti.Count = 0
   // now we can register some local type alias to be found by name or ASAP
