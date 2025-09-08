@@ -3534,9 +3534,11 @@ begin
       CryptPrivateKey[CAA_CKA[caa]] := TCryptPrivateKeyOpenSsl;
     end;
   CryptStoreOpenSsl := TCryptStoreAlgoOpenSsl.Implements(['x509-store']);
-  // OpenSSL is faster than mormot.crypt.other for SCrypt
-  if OpenSslVersion >= OPENSSL3_VERNUM then
+  // OpenSSL is slower than our SSE2 mormot.crypt.other.pas RawSCrypt() :)
+  {$ifndef CPUSSE2}
+  if OpenSslVersion >= OPENSSL3_VERNUM then // OpenSSL 1.1 has only macros
     SCrypt := @OpenSslSCrypt;
+  {$endif CPUSSE2}
   // we can use OpenSSL for StuffExeCertificate() stuffed certificate generation
   CreateDummyCertificate := _CreateDummyCertificate;
   // and also for X.509 parsing

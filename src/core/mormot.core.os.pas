@@ -716,6 +716,9 @@ var
     {$endif OSDARWIN}
     {$endif OSWINDOWS};
 
+  /// the current Linux Distribution, depending on its package management system
+  OS_DISTRI: TLinuxDistribution;
+
   /// the current Operating System version, as retrieved for the current process
   // - contains e.g. 'Windows Seven 64 SP1 (6.1.7601)' or 'Windows XP SP3 (5.1.2600)' or
   // 'Windows 10 64bit 22H2 (10.0.19045.4046)' or 'macOS 13 Ventura (Darwin 22.3.0)' or
@@ -730,9 +733,6 @@ var
   // - contains e.g. 'Windows Vista' or 'Ubuntu Linux 5.4.0' or
   // 'macOS 13 Ventura 22.3.0'
   OSVersionShort: RawUtf8;
-
-  /// the current Linux Distribution, depending on its package management system
-  OS_DISTRI: TLinuxDistribution;
 
   {$ifdef OSWINDOWS}
   /// on Windows, the Update Build Revision as shown with the "ver/winver" command
@@ -749,14 +749,14 @@ var
   /// some textual information about the current CPU and its known cache
   // - contains e.g. '4 x Intel(R) Core(TM) i5-7300U CPU @ 2.60GHz [3MB]'
   CpuInfoText: RawUtf8;
-  /// the on-chip cache size, in bytes, as returned by the OS
-  // - retrieved from /proc/cpuinfo "cache size" entry (L3 cache) on Linux or
-  // CpuCache[3/4].Size (from GetLogicalProcessorInformation) on Windows
-  CpuCacheSize: cardinal;
   /// the available cache information as returned by the OS
   // - e.g. 'L1=2*32KB  L2=256KB  L3=3MB' on Windows or '3072 KB' on Linux
   CpuCacheText: RawUtf8;
 
+  /// the on-chip cache size, in bytes, as returned by the OS
+  // - retrieved from /proc/cpuinfo "cache size" entry (L3 cache) on Linux or
+  // CpuCache[3/4].Size (from GetLogicalProcessorInformation) on Windows
+  CpuCacheSize: cardinal;
   /// how many hardware CPU sockets are defined on this system
   // - i.e. the number of physical CPU slots, not the number of logical CPU
   // cores as returned by SystemInfo.dwNumberOfProcessors
@@ -1084,7 +1084,34 @@ type
 
 {$endif UNICODE}
 
+{$endif OSWINDOWS}
+
 var
+  /// system and process 256-bit entropy state
+  // - could be used as 512-bit salt: followed by other system global variables
+  SystemEntropy: record
+    /// 128-bit of entropy quickly gathered during unit/process initialization
+    Startup: THash128Rec;
+    /// 128-bit shuffled each time strong randomness is retrieved from the OS
+    // - together with the intangible Startup value, ensure forward secrecy
+    LiveFeed: THash128Rec;
+  end;
+
+  /// the number of physical memory bytes available to the process
+  // - equals TMemoryInfo.memtotal as retrieved from GetMemoryInfo() at startup
+  SystemMemorySize: PtrUInt;
+
+{$ifdef OSWINDOWS}
+
+  /// the current System information, as retrieved for the current process
+  // - under a WOW64 process, it will use the GetNativeSystemInfo() new API
+  // to retrieve the real top-most system information
+  // - note that the lpMinimumApplicationAddress field is replaced by a
+  // more optimistic/realistic value ($100000 instead of default $10000)
+  // - under BSD/Linux, only contain dwPageSize and dwNumberOfProcessors fields
+  SystemInfo: TSystemInfo;
+  /// the current Windows edition, as retrieved for the current process
+  OSVersion: TWindowsVersion;
   /// is set to TRUE if the current process is a 32-bit image running under WOW64
   // - WOW64 is the x86 emulator that allows 32-bit Windows-based applications
   // to run seamlessly on 64-bit Windows
@@ -1093,22 +1120,12 @@ var
   /// is set to TRUE if the current process running through a software emulation
   // - e.g. a Win32/Win64 Intel application running via Prism on Windows for Arm
   IsWow64Emulation: boolean;
-  /// the current System information, as retrieved for the current process
-  // - under a WOW64 process, it will use the GetNativeSystemInfo() new API
-  // to retrieve the real top-most system information
-  // - note that the lpMinimumApplicationAddress field is replaced by a
-  // more optimistic/realistic value ($100000 instead of default $10000)
-  // - under BSD/Linux, only contain dwPageSize and dwNumberOfProcessors fields
-  SystemInfo: TSystemInfo;
   /// low-level Operating System information, as retrieved for the current process
   OSVersionInfo: TOSVersionInfoEx;
-  /// the current Windows edition, as retrieved for the current process
-  OSVersion: TWindowsVersion;
 
 {$else OSWINDOWS}
 
-var
-  /// emulate only some used fields of Windows' TSystemInfo
+  /// emulate only the most used fields of Windows' TSystemInfo
   SystemInfo: record
     /// retrieved from libc's getpagesize() - is expected to not be 0
     dwPageSize: cardinal;
@@ -1125,13 +1142,6 @@ var
   end;
 
 {$endif OSWINDOWS}
-
-  /// the number of physical memory bytes available to the process
-  // - equals TMemoryInfo.memtotal as retrieved from GetMemoryInfo() at startup
-  SystemMemorySize: PtrUInt;
-
-  /// 128-bit of entropy quickly gathered during unit/process initialization
-  StartupEntropy: THash128Rec;
 
 type
   /// used to retrieve version information from any EXE
@@ -2737,7 +2747,7 @@ function GetTickSec: cardinal;
   {$ifdef OSWINDOWS} {$ifdef HASINLINE} inline; {$endif} {$endif}
 
 /// returns how many seconds the system was up, accouting for time when
-// the computer is asleep
+// the computer is asleep, i.e. the time elapsed on the wall clock
 // - on Windows, computes GetTickCount64 div 1000
 // - on Linux/BSD, will use CLOCK_BOOTTIME/CLOCK_UPTIME clock
 // - on MacOS, will use mach_continuous_time() API
@@ -3548,6 +3558,13 @@ type
   /// stores information about several disk partitions
   TDiskPartitions = array of TDiskPartition;
 
+/// return a memory block aligned to 16 bytes, e.g. for proper SMID processs
+// - Size >= 128KB will call the OS mmap/VirtualAlloc to returned aligned memory
+// - do not use FreeMem() on the returned pointer, but FreeMemAligned()
+function GetMemAligned(Size: PtrUInt; FillWith: pointer = nil): pointer;
+
+/// properly release GetMemAligned() allocated memory
+procedure FreeMemAligned(p: pointer; Size: PtrUInt);
 
 const
   // 16*4KB (4KB = memory granularity) for ReserveExecutableMemory()
@@ -3887,6 +3904,11 @@ var
   /// append a TGuid into lower-cased '3f2504e0-4f89-11d3-9a0c-0305e82c3301' text
   // - this unit defaults to the RTL, but mormot.core.text.pas will override it
   AppendShortUuid: TAppendShortUuid;
+
+  /// late binding to binary encoding to Base64 or Base64-URI
+  // - as used by mormot.net.sock.pas for its NetBinToBase64() function
+  // - this unit raises an EOSException - properly injected by mormot.core.buffers.pas
+  RawToBase64: function(Bin: pointer; Bytes: PtrInt; Base64Uri: boolean): RawUtf8;
 
   /// return the RTTI text of a given enumerate as mormot.core.rtti GetEnumName()
   // - this unit defaults to minimal code, but overriden by mormot.core.rtti.pas
@@ -4790,6 +4812,7 @@ type
   /// a thread-safe Pierre L'Ecuyer gsl_rng_taus2 software random generator
   // - just wrap a TLecuyer generator with a TLighLock in a 20-24 bytes structure
   // - as used by SharedRandom to implement Random32/RandomBytes/... functions
+  // - see RandomLecuyer() from mormot.crypt.core.pas to setup a local instance
   {$ifdef USERECORDWITHMETHODS}
   TLecuyerThreadSafe = record
   {$else}
@@ -4890,6 +4913,13 @@ procedure RandomGuid(out result: TGuid); overload;
 /// compute a random UUid value from the RandomBytes() generator and RFC 4122
 function RandomGuid: TGuid; overload;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// mark a 128-bit random binary into a UUid value according to RFC 4122
+procedure MakeRandomGuid(u: PHash128);
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// check if the supplied UUid value was randomly-generated according to RFC 4122
+function IsRandomGuid(u: PHash128): boolean;
 
 /// seed the global gsl_rng_taus2 Random32/RandomBytes generator
 // - use XorEntropy() and optional entropy/entropylen as derivation source
@@ -5988,6 +6018,11 @@ function IsLocalHost(Host: PUtf8Char): boolean;
 begin
   result := (PCardinal(Host)^ = HOST_127) or // also check for c6Localhost:
             (PCardinal(Host)^ = ord(':') + ord(':') shl 8 + ord('1') shl 16);
+end;
+
+function _RawToBase64(Bin: pointer; Bytes: PtrInt; Base64Uri: boolean): RawUtf8;
+begin
+  raise EOSException.Create('No RawToBase64(): needs mormot.core.buffers.pas');
 end;
 
 
@@ -7189,8 +7224,10 @@ constructor TFileStreamEx.CreateFromHandle(aHandle: THandle;
 begin
   if not ValidHandle(aHandle) then
     raise EOSException.CreateFmt('%s.Create(%s) failed as %s',
-      [ClassNameShort(self)^, aFileName, GetErrorShort]);
-  inherited Create(aHandle); // TFileStreamFromHandle constructor which own it 
+      [ClassNameShort(self)^, aFileName, GetErrorShort])
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+    {$else} at ReturnAddress {$endif};
+  inherited Create(aHandle); // TFileStreamFromHandle constructor which own it
   fFileName := aFileName;
   fDontReleaseHandle := aDontReleaseHandle;
 end;
@@ -8202,6 +8239,43 @@ begin
   end;
 end;
 
+const
+  OS_ALIGNED = 128 shl 10; // call the OS for any block >= 128KB
+
+function GetMemAligned(Size: PtrUInt; FillWith: pointer): pointer;
+var
+  pad: PtrUInt;
+begin
+  if Size >= OS_ALIGNED then
+  begin
+    Size := (Size + 65535) and not 65535;   // default wrap to 64KB boundaries
+    result := _GetLargeMem(Size)            // mmap/VirtualAlloc is 4KB aligned
+  end
+  else // smaller blocks will just use the heap, with a padding hidden prefix
+  begin
+    GetMem(result, Size + 16); // 15 bytes for alignment + 1 byte for padding
+    pad := 16 - (PtrUInt(result) and 15);   // adjust by 1..16 bytes
+    inc(PAnsiChar(result), pad);            // Delphi Win32 only needs padding
+    PAnsiChar(result)[-1] := AnsiChar(pad); // always store the padding
+  end;
+  if FillWith <> nil then
+    MoveFast(FillWith^, result^, Size);
+end;
+
+procedure FreeMemAligned(p: pointer; Size: PtrUInt);
+begin
+  if p = nil then
+    exit;
+  if Size >= OS_ALIGNED then
+  begin
+    Size := (Size + 65535) and not 65535;   // as in GetMemAligned()
+    _FreeLargeMem(p, Size);                 // munmap or VirtualFree
+    exit;
+  end;
+  dec(PAnsiChar(p), ord(PAnsiChar(p)[-1])); // adjust back by 1..16 bytes
+  FreeMem(p);
+end;
+
 function SeemsRealObject(p: pointer): boolean;
 var
   i: PtrInt;
@@ -8810,8 +8884,10 @@ begin
     Command.Parse;
   end;
   AfterExecutableInfoChanged; // set Executable.ProgramFullSpec+Hash
-  crc32c128(@StartupEntropy, @CpuCache, SizeOf(CpuCache)); // some more entropy
-  crcblock(@StartupEntropy, @Executable.Hash);
+  // finalize SystemEntropy.Startup
+  crcblocks(@SystemEntropy.Startup, @BaseEntropy, 512 div 128); // cpuid+rdrand+rdtsc
+  crcblock(@SystemEntropy.Startup, @Executable.Hash);
+  crcblocks(@SystemEntropy.Startup, @CpuCache, SizeOf(CpuCache) div SizeOf(THash128));
 end;
 
 procedure SetExecutableVersion(aMajor, aMinor, aRelease, aBuild: integer);
@@ -9684,8 +9760,8 @@ begin
            {$ifdef OSPOSIX}
            _AfterDecodeSmbios(RawSmbios); // persist in SMB_CACHE for non-root
            {$endif OSPOSIX}
-           DefaultHasher128(@StartupEntropy, pointer(RawSmbios.Data),
-             MinPtrInt(1024, length(RawSmbios.Data))); // won't hurt
+           DefaultHasher128(@SystemEntropy.LiveFeed, pointer(RawSmbios.Data),
+             MinPtrInt(512, length(RawSmbios.Data))); // won't hurt
            exit;
          end;
       // if not root on POSIX, SMBIOS is not available
@@ -9958,35 +10034,47 @@ end;
 
 { **************** TSynLocker Threading Features }
 
+const
+  SPIN_COUNT = pred(6 shl 5); // = 191
+
 // as reference, take a look at Linus insight (TL&WR: better use futex)
 // from https://www.realworldtech.com/forum/?threadid=189711&curpostid=189755
+
 {$ifdef CPUINTEL}
+// on Intel/AMD, the pause CPU instruction would relax the core
 procedure DoPause; {$ifdef FPC} assembler; nostackframe; {$endif}
 asm
-      pause
+      pause // modern CPUs have bigger pause latency (up to 100 cycles)
 end;
 {$endif CPUINTEL}
 
-const
-  {$ifdef CPUINTEL}
-  SPIN_COUNT = 1000;
-  {$else}
-  SPIN_COUNT = 100; // since DoPause does nothing, switch to thread sooner
-  {$endif CPUINTEL}
+{$ifdef FPC_CPUARM}
+// "yield" is available since ARMv6K architecture, including ARMv7-A and ARMv8-A
+procedure DoPause; assembler; nostackframe;
+asm
+     yield // a few cycles, but helps modern CPU adjust their power requirements
+end;
+{$endif FPC_CPUARM}
 
 function DoSpin(spin: PtrUInt): PtrUInt;
-  {$ifdef CPUINTEL} {$ifdef HASINLINE} inline; {$endif} {$endif}
-  // on Intel, the pause CPU instruction would relax the core
-  // on ARM/AARCH64, the not-inlined function call makes a small delay
 begin
-  {$ifdef CPUINTEL}
-  DoPause;
-  {$endif CPUINTEL}
-  dec(spin);
-  if spin = 0 then
+  {$ifdef CPUINTELARM}
+  // adaptive spinning to reduce cache coherence traffic
+  result := (SPIN_COUNT - spin) shr 5; // 0..5 range, each 32 times
+  if result <> 0 then // no pause up to 32 times (low latency acquisition)
   begin
-    SwitchToThread; // fpnanosleep on POSIX
-    spin := SPIN_COUNT;
+    result := 1 shl pred(result); // exponential backoff: 1,2,4,8,16 x DoPause
+    repeat
+      DoPause; // called 992 times until yield to the OS
+      dec(result);
+    until result = 0;
+  end;
+  {$endif CPUINTELARM}
+  dec(spin);
+  if spin = 0 then // eventually yield to the OS for long wait
+  begin
+    SwitchToThread;     // fpnanosleep on POSIX
+    spin := SPIN_COUNT; // try again
   end;
   result := spin;
 end;
@@ -10202,7 +10290,8 @@ end;
 procedure TRWLock.AssertDone;
 begin
   if Flags <> 0 then
-    raise EOSException.CreateFmt('TRWLock Flags=%x', [Flags]);
+    raise EOSException.CreateFmt('TRWLock Flags=%x', [Flags])
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif}
 end;
 
 // dedicated asm for this most simple (and used) method
@@ -11121,11 +11210,22 @@ begin
   RandomGuid(result);
 end;
 
-procedure RandomGuid(out result: TGuid);
+procedure MakeRandomGuid(u: PHash128);
 begin // see https://datatracker.ietf.org/doc/html/rfc4122#section-4.4
+  PCardinal(@u[6])^ := (PCardinal(@u[6])^ and $ff3f0fff) or $00804000;
+  // u[7] := PtrUInt(u[7] and $0f) or $40; // version bits 12-15 = 4 (random)
+  // u[8] := PtrUInt(u[8] and $3f) or $80; // reserved bits 6-7 = 1
+end;
+
+function IsRandomGuid(u: PHash128): boolean;
+begin
+  result := (u[7] and $f0 = $40) and (u[8] and $c0 = $80);
+end;
+
+procedure RandomGuid(out result: TGuid);
+begin
   SharedRandom.Fill(@result, SizeOf(TGuid));
-  PCardinal(@result.D3)^ := (PCardinal(@result.D3)^ and $ff3f0fff) + $00804000;
-  // version bits 12-15 = 4 (random) and reserved bits 6-7 = 1
+  MakeRandomGuid(@result);
 end;
 
 {$ifndef PUREMORMOT2}
@@ -11621,6 +11721,7 @@ begin
   ShortToUuid           := _ShortToUuid;           // mormot.core.text
   AppendShortUuid       := _AppendShortUuid;
   GetEnumNameRtti       := _GetEnumNameRtti;       // mormot.core.rtti
+  RawToBase64           := _RawToBase64;           // mormot.core.buffers
 end;
 
 procedure FinalizeUnit;

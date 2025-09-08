@@ -1583,8 +1583,8 @@ end;
 
 procedure InitializeUnit;
 begin
-  SocketAPIVersion := OSVersionShort +
-    {$ifdef USEPOLL} ' poll' {$else} ' epoll' {$endif USEPOLL};
+  Join([OSVersionShort , {$ifdef USEPOLL} ' poll' {$else} ' epoll' {$endif}],
+    SocketAPIVersion);
   _gethostbynamesafe.Init;
 end;
 
