@@ -456,6 +456,7 @@ function InterlockedExchangeAdd(var aValue: Pointer; addValue: Pointer): Pointer
 
 function IndexByte(Const buf; len: SizeInt; b:byte): SizeInt;
 function Indexword(Const buf; len: SizeInt; b: word): SizeInt;
+function IndexDWord(Const buf; len: SizeInt; b: Cardinal): SizeInt;
 
 function SwapEndian(const AValue: SmallInt): SmallInt; inline; overload;
 function SwapEndian(const AValue: Word): Word; inline; overload;
@@ -1746,6 +1747,29 @@ begin
   if (len < 0) or
      PointerLess(PointerAdd(psrc, len), psrc) then
      pend:= pword(high(PtrUInt) - sizeof(word))
+  else
+     pend:= PointerAdd(psrc, len);
+  while PointerLess(psrc, pend) do
+        begin
+        if psrc^ = b then
+           begin
+           result:= SizeInt(PointerAdd(psrc, -{$IFDEF CPU64} Int64 {$ELSE} Cardinal {$ENDIF}(@buf)));
+           exit;
+           end;
+        inc(psrc);
+        end;
+  result:=-1;
+end;
+
+function IndexDWord(Const buf; len: SizeInt; b: Cardinal): SizeInt;
+var psrc, pend: pCardinal;
+begin
+  psrc:= @buf;
+  { simulate assembler implementations behaviour, which is expected }
+  { fpc_pchar_to_ansistr in astrings.inc                            }
+  if (len < 0) or
+     PointerLess(PointerAdd(psrc, len), psrc) then
+     pend:= pCardinal(high(PtrUInt) - sizeof(Cardinal))
   else
      pend:= PointerAdd(psrc, len);
   while PointerLess(psrc, pend) do

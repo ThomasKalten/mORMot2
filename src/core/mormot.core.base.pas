@@ -2941,6 +2941,7 @@ procedure LockedInc64(int64: PInt64); inline;
 
 {$endif CPUINTEL}
 
+
 /// low-level string reference counter increment (do nothing if constant)
 procedure FastStringAddRef(str: pointer);
 
@@ -4646,7 +4647,8 @@ uses
   {$WARN 4056 off : Conversion between ordinals and pointers is not portable }
 {$else}
    {$ifndef MSWINDOWS}
-   Uses mormot.core.posix.delphi;
+   Uses mormot.core.posix.delphi,
+        Posix.PThread;
    {$endif}
 {$endif FPC}
 
@@ -11052,7 +11054,6 @@ begin
   if IsProcessorFeaturePresent(PF_ARM_V8_CRC32_INSTRUCTIONS_AVAILABLE) then
     include(CpuFeatures, ahcCRC32);
 end;
-{$endif}
 {$else}
 
 procedure TestCpuFeatures;
@@ -11166,17 +11167,6 @@ procedure _Fillchar(var Dest; count: PtrInt; Value: byte);
 begin
   system.FillChar(Dest, Count, Value);
 end;
-
-{$ifndef FPC} // FPC did already define this
-procedure Div100(Y: cardinal; var res: TDiv100Rec);
-var
-  Y100: cardinal;
-begin
-  Y100 := Y div 100; // FPC will use fast reciprocal
-  res.D := Y100;
-  res.M := Y {%H-}- Y100 * 100; // avoid div twice
-end;
-{$endif FPC}
 
 {$endif ASMINTEL}
 

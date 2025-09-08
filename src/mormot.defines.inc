@@ -478,6 +478,7 @@
   {$ifdef MSWINDOWS}
 
     {$define OSWINDOWS}
+    {$define HASRTLCRITICALSECTION}
 
   {$else}
     // 'Delphi for MacOS/Linux/Mobile are not officially supported yet'
@@ -545,8 +546,6 @@
     {$endif BSD}
     {$POINTERMATH ON}
 *)
-    {$define OSWINDOWS}
-    {$define HASRTLCRITICALSECTION}
     
 
     {$define OSPOSIX}
@@ -642,6 +641,8 @@
   {$warn SYMBOL_PLATFORM OFF}
   {$warn SYMBOL_DEPRECATED OFF}   // for faVolumeID
   {$warn UNIT_PLATFORM OFF}
+
+  {$LEGACYIFEND OFF}
 
   // -----------
   // -- identify CPU Architectures
