@@ -2205,10 +2205,6 @@ end;
 
 // we bypass crt.pp since this unit cancels the SIGINT signal
 
-procedure AllocConsole;
-begin
-end;
-
 var
   ConsoleCriticalSection: TOSLock; // too early to use TOSLightLock
   TextAttr: integer = -1; // always change the color at startup
@@ -2320,8 +2316,10 @@ begin
     until false;
   end
   else
+  begin
     ReadLn;
-  ioresult;
+    ioresult;
+  end;
 end;
 {$I+}
 
@@ -4766,12 +4764,12 @@ var
   f: file;
   fd: THandle;
   pid, res, wr: cint;
-  n, l: TSsize;
+  n: TSsize;
   wait: cardinal;
   endtix: Int64;
   tmp: TBuffer64K;
 
-  function RedirectOutput(flush: boolean; var redir: RawByteString): boolean;
+  function RedirectOutput(killing: boolean; var redir: RawByteString): boolean;
   var
     u: RawUtf8;
   begin
@@ -4783,27 +4781,18 @@ var
         exit; // pipe closed or EINTR = execution finished
       if setresult and
          (n <> 0) then
-      begin
-        if redir = '' then
-          FastSetString(RawUtf8(redir), @tmp, n) // assume CP_UTF8
-        else
-        begin
-          SetLength(redir, l + n); // append
-          MoveFast(tmp, PByteArray(redir)[l], n);
-        end;
-        inc(l, n);
-      end;
+        AppendBufferToUtf8(@tmp, n, RawUtf8(redir)); // assume CP_UTF8
       if Assigned(onoutput) then
       begin
         FastSetString(u, @tmp, n); // console output is likely UTF-8 on POSIX
         if onoutput(u, pid) and
-           not flush then
+           not killing then
           endtix := 1; // returned true: force kill() on abort
       end;
     end
     else if Assigned(onoutput) and // idle
             onoutput('', pid) and
-            not flush then
+            not killing then
       endtix := 1; // returned true to abort -> kill()
     result := true;
   end;
@@ -4819,17 +4808,15 @@ begin
   if Assigned(onoutput) then
     onoutput('', pid);
   wait := 200;
-  if waitfordelayms = INFINITE then
-    endtix := 0
-  else
+  endtix := 0;
+  if waitfordelayms <> INFINITE then
   begin
-    endtix := GetTickCount64 + waitfordelayms;
     if waitfordelayms < wait then
       wait := waitfordelayms;
+    endtix := GetTickCount64 + waitfordelayms;
   end;
-  l := 0;
   repeat
-    if not RedirectOutput({flush=}false, result) then
+    if not RedirectOutput({killing=}false, result) then
       break; // pipe closed = execution finished
     if (endtix <> 0) and
        (GetTickCount64 > endtix) then
@@ -4843,8 +4830,8 @@ begin
         begin
           endtix := GetTickCount64 + RunAbortTimeoutSecs * 1000;
           repeat
-            wr := FpWaitPid(pid, @res, WNOHANG);  // 0 = no state change
-            RedirectOutput({flush=}true, result); // continue redirection
+            wr := FpWaitPid(pid, @res, WNOHANG);   // 0 = no state change
+            RedirectOutput({killing=}true, result); // continue redirection
             if (wr <> 0) or
                (GetTickCount64 > endtix) then
               break;

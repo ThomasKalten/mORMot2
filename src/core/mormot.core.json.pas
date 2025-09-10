@@ -10623,7 +10623,7 @@ procedure TRttiJson.SetParserClassType;
 var
   c: TClass;
   n: integer;
-  new: TRttiCustomNewInstance;
+  new: pointer; // = TRttiCustomNewInstance as stored in fCache.NewInstance
 begin
   // prepare ClassNewInstance() to call the expected (virtual) constructor
   new := @_New_Object; // default non-virtual TObject.Create
@@ -10638,7 +10638,8 @@ begin
       RttiSetParserTObjectWithRttiMethods(pointer(fCache.ValueClass), self);
       if n <> Props.Count then
         fFlags := fFlags + fProps.AdjustAfterAdded; // may have added a prop
-      new := @_New_SynPersistent; // virtual TSynPersistent.Create
+      if HasClassNewInstance then
+        new := nil; // e.g. set to OrmNewInstance
     end
     else if c = TInterfacedPersistent then
       new := @_New_InterfacedPersistent // virtual Create
@@ -10691,7 +10692,7 @@ begin
       end;
     vcCollection:
       begin
-        if @new = @_New_Object then
+        if new = @_New_Object then
           new := @_New_Collection; // no TInterfacedCollection above
         fCopyObject := @CopyTCollection;
         fJsonSave := @_JS_TCollection;
@@ -10717,7 +10718,8 @@ begin
     vcClonable:
       fCopyObject := @CopyTClonable; // always use TClonable.AssignTo()
   end;
-  fCache.NewInstance := @new;
+  if new <> nil then
+    fCache.NewInstance := new;
 end;
 
 function TRttiJson.SetParserType(aParser: TRttiParserType;

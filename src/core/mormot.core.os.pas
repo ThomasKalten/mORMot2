@@ -4885,6 +4885,7 @@ function RandomDouble: double;
 procedure RandomBytes(Dest: pointer; Count: integer);
 
 /// fill a RawByteString with random bytes from the gsl_rng_taus2 generator
+// - content is really binary, i.e. would contain the whole #0..#255 byte range
 // - see also e.g. RandomAnsi7() or RandomIdentifier() in mormot.core.text.pas
 function RandomByteString(Count: integer; var Dest;
   CodePage: cardinal = CP_RAWBYTESTRING): pointer;
@@ -5063,7 +5064,7 @@ function CurrentThreadNameShort: PShortString;
 /// returns the thread id and the thread name as a ShortString
 // - returns e.g. 'Thread 0001abcd [shortthreadname]'
 // - for convenient use when logging or raising an exception
-function GetCurrentThreadInfo: ShortString;
+function GetCurrentThreadInfo: TShort63;
 
 /// enter a process-wide giant lock for thread-safe shared process
 // - shall be protected as such:
@@ -5609,6 +5610,7 @@ function GetServicePid(const aServiceName: RawUtf8;
 
 /// try to gently stop a given Windows console app from its ProcessID
 // - will send a Ctrl-C event (acquiring the process console)
+// - won't wait after this event if waitseconds = 0
 function CancelProcess(pid: cardinal; waitseconds: integer): boolean;
 
 /// try to gently quit a Windows process from its ProcessID
@@ -5772,6 +5774,7 @@ type
   // - is called once when the process is started, with text='', ignoring its return
   // - on idle state (each 200ms), is called with text='' to allow execution abort
   // - the raw process ID (dword on Windows, cint on POSIX) is also supplied
+  // - see RedirectToConsole to write to the console e.g. for debugging purpose
   TOnRedirect = function(const text: RawByteString; pid: cardinal): boolean of object;
 
   /// define how RunCommand() and RunRedirect() run their sub-process
@@ -5780,10 +5783,14 @@ type
   // - roWinJobCloseChildren will setup a Windows Job to close any child
   // process(es) when the created process quits
   // - roWinNoProcessDetach will avoid creating a Windows sub-process and group
+  // - roWinNewConsole won't inherit the parent console, but have its own console
+  // - roWinKeepProcessOnTimeout won't make Ctrl+C / WM_QUIT or TerminateProcess
   TRunOptions = set of (
     roEnvAddExisting,
     roWinJobCloseChildren,
-    roWinNoProcessDetach);
+    roWinNoProcessDetach,
+    roWinNewConsole,
+    roWinKeepProcessOnTimeout);
 
 /// like SysUtils.ExecuteProcess, but allowing not to wait for the process to finish
 // - optional env value follows 'n1=v1'#0'n2=v2'#0'n3=v3'#0#0 Windows layout
@@ -5794,8 +5801,8 @@ function RunProcess(const path, arg1: TFileName; waitfor: boolean;
 
 /// like fpSystem, but cross-platform
 // - under POSIX, calls bash only if needed, after ParseCommandArgs() analysis
-// - under Windows (especially Windows 10), creating a process can be dead slow
-// https://randomascii.wordpress.com/2019/04/21/on2-in-createprocess
+// - under Windows (especially Windows 10/11), creating a process can be dead
+// slow https://randomascii.wordpress.com/2019/04/21/on2-in-createprocess
 // - waitfordelayms/processhandle/redirected/onoutput exist on Windows only -
 // and redirected is the raw byte output, which may be OEM, WinAnsi or UTF-16
 // depending on the program itself
@@ -5819,8 +5826,9 @@ function RunCommand(const cmd: TFileName; waitfor: boolean;
 // depends on the actual program so is likely to be CP_OEM but others could
 // use the system code page or even UTF-16 binary with BOM (!) - so you
 // may consider using AnsiToUtf8() with the proper code page
-// - will optionally call onoutput() to notify the new output state
-// - aborts if onoutput() callback returns true, or waitfordelayms expires
+// - abort if waitfordelayms expires
+// - will optionally call onoutput() to notify the new output state; aborts if
+// onoutput() callback returns true - see RedirectToConsole global callback
 // - optional env is Windows only, (FPC popen does not support it), and should
 // be encoded as name=value#0 pairs
 // - you can specify a wrkdir if the path specified by cmd is not good enough
@@ -5831,6 +5839,10 @@ function RunRedirect(const cmd: TFileName; exitcode: PInteger = nil;
   const wrkdir: TFileName = ''; options: TRunOptions = []): RawByteString;
 
 var
+  /// a RunRedirect() callback for console output e.g. for debugging purpose
+  // - you should call at least once AllocConsole to setup its content
+  RedirectToConsole: TOnRedirect;
+
   /// how many seconds we should wait for gracefull termination of a process
   // in RunRedirect() - or RunCommand() on Windows
   // - set 0 to disable gracefull exit, and force hard SIGKILL/TerminateProcess
@@ -5850,7 +5862,8 @@ type
   // - ramCtrlC calls CancelProcess(), i.e. send CTRL_C_EVENT
   // - ramQuit calls QuitProcess(), i.e. send WM_QUIT on all the process threads
   // - note that TerminateProcess is always called after RunAbortTimeoutSecs
-  // timeout, or if this set of methods is void
+  // timeout, or if this set of methods is void - unless the
+  // roWinKeepProcessOnTimeout option has been specified
   TRunAbortMethods = set of (ramCtrlC, ramQuit);
 var
   /// RunRedirect/RunCommand methods to gracefully terminate before TerminateProcess
@@ -8425,6 +8438,28 @@ begin
     dec(len, n);
     inc(p, n);
   end;
+end;
+
+function _ToConsole(self: TObject; const text: RawByteString; pid: cardinal): boolean;
+begin
+  result := false; // continue
+  if (text = '') or
+     not HasConsole then
+    exit;
+  ConsoleCriticalSection.Lock;
+  try
+    FileWriteAll(StdOut, pointer(text), length(text)); // no code page involved
+  finally
+    ConsoleCriticalSection.UnLock;
+  end;
+end;
+
+procedure AllocConsole;
+begin
+  TMethod(RedirectToConsole).Code := @_ToConsole;
+  {$ifdef OSWINDOWS}
+  WinAllocConsole;
+  {$endif OSWINDOWS}
 end;
 
 var
@@ -11435,10 +11470,13 @@ begin
   ShortStringToAnsi7String(_CurrentThreadName, result);
 end;
 
-function GetCurrentThreadInfo: ShortString;
+function GetCurrentThreadInfo: TShort63;
 begin
-  result := ShortString(format('Thread %x [%s]',
-    [PtrUInt(GetCurrentThreadId), _CurrentThreadName]));
+  result := 'Thread ';
+  AppendShortIntHex(PtrUInt(GetCurrentThreadId), result);
+  AppendShortTwoChars(ord(' ') + ord('[') shl 8, @result);
+  AppendShort(_CurrentThreadName, result);
+  AppendShortChar(']', @result);
 end;
 
 
