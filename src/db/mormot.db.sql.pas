@@ -3066,6 +3066,10 @@ type
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+uses  Mormot.core.posix.delphi;
+{$endif DELPHIPOSIX}
+
 
 { ************ General SQL Processing Functions }
 

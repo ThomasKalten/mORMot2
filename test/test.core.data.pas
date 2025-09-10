@@ -975,23 +975,10 @@ begin
     JSONPARSER_TOLERANTOPTIONS, []);
   for spec := 0 to High(MUSTACHE_SPECS) do
   begin
-<<<<<<< HEAD
-    mustacheJsonFileName := WorkDir + MUSTACHE_SPECS[spec] + '.json';
-    mustacheJson := StringFromFile(mustacheJsonFileName);
-    if mustacheJson = '' then
-    begin
-      mustacheJson := HttpGet(
-       AnsiString('https://raw.githubusercontent.com/mustache/spec/' +
-       'master/specs/' + StringToAnsi7(MUSTACHE_SPECS[spec]) + '.json'),
-       '', nil, false, nil, 0, {forcesocket:}false, {ignorecerterror:}true);
-      FileFromString(mustacheJson, mustacheJsonFileName);
-    end;
-=======
     mustacheJson := DownloadFile(
       'https://raw.githubusercontent.com/mustache/spec/' +
       'master/specs/' + StringToAnsi7(MUSTACHE_SPECS[spec]) + '.json',
       MUSTACHE_SPECS[spec] + '.json');
->>>>>>> upstream/master
     RecordLoadJsonInPlace(mus, pointer(mustacheJson), TypeInfo(TMustacheTests));
     Check(length(mus.tests) > 5, 'mustacheJson load');
     for i := 0 to high(mus.tests) do

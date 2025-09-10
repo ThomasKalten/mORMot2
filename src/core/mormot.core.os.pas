@@ -34,7 +34,7 @@ uses
   Windows, // needed here e.g. for redefinition/redirection of standard types
   Messages,
   {$ELSE}
-     {$ifdef ISDELPHI}
+     {$ifdef DELPHIPOSIX}
      posix.dlfcn, // first posix units, some inline overwrites in mormot.core.posix.delphi for adapation of fpc conventions
      posix.Utime,
      posix.Errno,
@@ -54,7 +54,7 @@ uses
      System.DateUtils,
      System.TimeSpan,
      mormot.core.posix.delphi,
-     {$endif ISDELPHI}
+     {$endif DELPHIPOSIX}
   {$endif OSWINDOWS}
   classes,
   contnrs,
@@ -2398,21 +2398,15 @@ const
   {$endif OSLINUXX86}
   {$endif OSLINUXX64}
 
-type
-  /// system-specific type returned by FileAge(): UTC 64-bit Epoch on POSIX
-  TFileAge = TUnixTime;
-
-  /// system-specific structure holding a non-recursive mutex
-  TOSLightMutex = TRTLCriticalSection;
-
 {$ifdef ISDELPHI}
   /// defined as in FPC RTL, to avoid dependency to Windows.pas unit
   // - note that on POSIX, a THandle is a 32-bit integer, but library or
   // resource handles are likely to map pointers, i.e. up to a 64-bit integer
+type
   TLibHandle = THandle;
 {$endif ISDELPHI}
 
-
+{$undef HAS_OSPTHREADS}
 {$ifdef OSLINUX}
   {$define OSPTHREADSLIB}    // direct pthread calls were tested on Linux only
 {$endif OSLINUX}
@@ -2443,10 +2437,8 @@ type
   /// system-specific type returned by FileAge(): UTC 64-bit Epoch on POSIX
   TFileAge = TUnixTime;
 
-  {$ifdef FPC}
   /// system-specific structure holding a non-recursive mutex
   TOSLightMutex = TRTLCriticalSection;
-  {$endif FPC}
 
 {$endif OSWINDOWS}
 
@@ -10040,7 +10032,9 @@ const
 // as reference, take a look at Linus insight (TL&WR: better use futex)
 // from https://www.realworldtech.com/forum/?threadid=189711&curpostid=189755
 
+{$undef HAS_CPU_DOPAUSE}
 {$ifdef CPUINTEL}
+{$define HAS_CPU_DOPAUSE}
 // on Intel/AMD, the pause CPU instruction would relax the core
 procedure DoPause; {$ifdef FPC} assembler; nostackframe; {$endif}
 asm
@@ -10049,6 +10043,7 @@ end;
 {$endif CPUINTEL}
 
 {$ifdef FPC_CPUARM}
+{$define HAS_CPU_DOPAUSE}
 // "yield" is available since ARMv6K architecture, including ARMv7-A and ARMv8-A
 procedure DoPause; assembler; nostackframe;
 asm
@@ -10058,7 +10053,7 @@ end;
 
 function DoSpin(spin: PtrUInt): PtrUInt;
 begin
-  {$ifdef CPUINTELARM}
+  {$ifdef HAS_CPU_DOPAUSE}
   // adaptive spinning to reduce cache coherence traffic
   result := (SPIN_COUNT - spin) shr 5; // 0..5 range, each 32 times
   if result <> 0 then // no pause up to 32 times (low latency acquisition)
@@ -10069,7 +10064,7 @@ begin
       dec(result);
     until result = 0;
   end;
-  {$endif CPUINTELARM}
+  {$endif HAS_CPU_DOPAUSE}
   dec(spin);
   if spin = 0 then // eventually yield to the OS for long wait
   begin

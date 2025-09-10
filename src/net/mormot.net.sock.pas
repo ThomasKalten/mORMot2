@@ -2307,7 +2307,9 @@ begin
     WSAETIMEDOUT,
     WSAEWOULDBLOCK,
     {$endif OSWINDOWS}
+    {$ifndef POSIX}
     WSAIOPENDING,
+    {$endif POSIX}
     WSAEINPROGRESS,
     WSATRY_AGAIN:
       result := nrRetry;

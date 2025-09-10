@@ -34,11 +34,9 @@ uses
   mormot.core.unicode,
   mormot.core.text,
   mormot.core.datetime
-  {$ifdef ISDELPHI}
-  {$ifdef POSIX}
+  {$ifdef DELPHIPOSIX}
   , Mormot.core.posix.delphi
-  {$endif POSIX}
-  {$endif ISDELPHI}
+  {$endif DELPHIPOSIX}
   ;
 
 

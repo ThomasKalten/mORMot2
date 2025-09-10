@@ -1379,6 +1379,10 @@ const
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+uses mormot.core.posix.delphi;
+{$endif DELPHIPOSIX}
+
 { ************ Thread-Safe TSynQueue and TPendingTaskList }
 
 { TSynQueue }

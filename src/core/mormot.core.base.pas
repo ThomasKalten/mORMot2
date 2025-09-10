@@ -3003,7 +3003,6 @@ procedure LockedAdd32(var Target: cardinal; Increment: cardinal);
   {$ifndef CPUINTEL} inline; {$endif}
 
 {$ifdef ISDELPHI}
-{$ifdef CPUX86}
 /// return the position of the leftmost set bit in a 32-bit value
 // - returns 255 if c equals 0
 // - mimics the FPC intrinsic, via asm on Intel or optimized pure pascal
@@ -4670,10 +4669,10 @@ uses
   // globally disable some FPC paranoid warnings - rely on x86_64 as reference
   {$WARN 4056 off : Conversion between ordinals and pointers is not portable }
 {$else}
-   {$ifndef MSWINDOWS}
+   {$ifdef OSPOSIX}
    Uses mormot.core.posix.delphi,
         Posix.PThread;
-   {$endif}
+   {$endif OSPOSIX}
 {$endif FPC}
 
 
@@ -7152,6 +7151,8 @@ begin
   res.D := Y100;
   res.M := Y {%H-}- Y100 * 100; // avoid div twice
 end;
+
+{$ifdef FPC}
 
 function ByteScanIndexPas(P: PByteArray; Count: PtrInt; Value: byte): PtrInt;
 begin
@@ -10878,23 +10879,6 @@ begin
   AtomicIncrement(Target, Increment);
 end;
 
-function bswap32(a: cardinal): cardinal;
-begin
-  result := (a shr 24) or
-            ((a and cardinal($00ff0000)) shr 8) or
-            ((a and cardinal($0000ff00)) shl 8) or
-            (a shl 24);
-end;
-
-function bswap64(const a: QWord): QWord;
-begin
-  result := (a shr 32) or (a shl 32);
-  result := ((result and QWord($ffff0000ffff0000)) shr 16) or
-            ((result and QWord($0000ffff0000ffff)) shl 16);
-  result:=  ((result and QWord($ff00ff00ff00ff00)) shr 8) or
-            ((result and QWord($00ff00ff00ff00ff)) shl 8);
-end;
-
 function BSRdword(c: cardinal): cardinal;
 const
   _debruijn32: array[0..31] of byte = (
@@ -10969,6 +10953,8 @@ begin
   InterlockedExchangeAdd(pointer(Target), pointer(Increment));
 end;
 
+{$endif ISDELPHI}
+
 function bswap32(a: cardinal): cardinal;
 begin
   result := SwapEndian(a); // use fast platform-specific function
@@ -10987,7 +10973,6 @@ begin
   result := SwapEndian(a); // use fast platform-specific function
 end;
 
-{$endif ISDELPHI}
 
 function IntegerScan(P: PCardinalArray; Count: PtrInt; Value: cardinal): PCardinal;
 begin

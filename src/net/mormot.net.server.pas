@@ -2553,7 +2553,9 @@ type
 
 
 implementation
-
+{$ifdef DELPHIPOSIX}
+Uses Mormot.core.posix.delphi;
+{$endif DELPHIPOSIX}
 
 { ******************** Abstract UDP Server }
 

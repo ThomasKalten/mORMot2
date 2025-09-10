@@ -1,4 +1,4 @@
-/// TFTP Server-Side Process 
+﻿/// TFTP Server-Side Process 
 // - this unit is a part of the Open Source Synopse mORMot framework 2,
 // licensed under a MPL/GPL/LGPL three license - see LICENSE.md
 unit mormot.net.tftp.server;
@@ -179,7 +179,9 @@ type
 
 
 implementation
-
+{$ifdef DELPHIPOSIX}
+Uses Mormot.core.posix.delphi;
+{$endif DELPHIPOSIX}
 
 { ******************** TFTP Connection Thread and State Machine }
 

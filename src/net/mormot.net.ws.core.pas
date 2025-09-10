@@ -43,11 +43,9 @@ uses
   mormot.crypt.secure, // IProtocol definition
   mormot.net.sock,
   mormot.net.http
-  {$ifndef FPC}
-  {$ifdef CPUARM}
+  {$ifdef DELPHIPOSIX}
   , mormot.core.posix.delphi
-  {$endif CPUARM}
-  {$endif FPC}
+  {$endif DELPHIPOSIX}
 
   ;
 

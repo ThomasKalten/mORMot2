@@ -98,6 +98,7 @@ type
      cChar = byte;
      cUChar = byte;
      cInt = int32;
+     PcInt = ^cInt;
      cUInt = longword;
      cuint32 = uint32;
      cuint64 = uint64;
@@ -135,6 +136,7 @@ procedure InitCriticalSection(var cs : TRTLCriticalSection); inline;
 procedure DeleteCriticalSection(var cs : TRTLCriticalSection); inline;
 procedure DoneCriticalSection(var cs : TRTLCriticalSection); inline;
 
+function TryEnterCriticalSection(const cs: TRTLCriticalSection): integer; inline;
 procedure EnterCriticalSection(const cs: TRTLCriticalSection); inline;
 procedure LeaveCriticalSection(const cs: TRTLCriticalSection); inline;
 {$endif HASRTLCRITICALSECTION}
@@ -538,6 +540,7 @@ function FpReaddir(var dirp: Dir) : pDirent; inline;
 function FpReadLink(name: PChar; linkname: PAnsiChar; maxlen: size_t): cint; inline; overload;
 function FpReadLink(const ALinkName: RawByteString): RawByteString; overload;
 function FpChdir(path: pointer): cint; inline;
+function FpRmdir(path: pointer): cint; inline;
 
 const
   FIONBIO         = $5421;
@@ -742,6 +745,7 @@ type TUid = uid_t;
      TMode = mode_t;
 
 function FpKill(pid: TPid; sig: cInt): cInt; inline;
+function FpWaitpid(pid: pid_t; stat_loc: pcint; options: cint): pid_t; inline;
 function FpUmask(cmask: TMode): TMode; inline;
 function FpFork: TPid; inline;
 function FpSetsid: TPid; inline;
@@ -753,7 +757,18 @@ function __system_property_get(name: PAnsiChar; value: PAnsiChar): longint; cdec
 
 function GetSystemProperty(Name: PAnsiChar): shortstring; inline;
 function FpUname(var name: utsname): cint; inline;
-function FPgetenv(Name: PAnsiChar): PAnsiChar; inline;
+function FpGetenv(Name: PAnsiChar): PAnsiChar; inline;
+
+// FPC Routinen
+Function WaitProcess(Pid: cint): cint;
+Function POpen(var F: text; const Prog: RawByteString; rw: char): cint; overload;
+Function POpen(var F: file; const Prog: RawByteString; rw: char): cint; overload;
+function POpen(var F: text; const Prog: UnicodeString; rw: char): cint; overload;
+function POpen(var F: file; const Prog: UnicodeString; rw: char): cint; overload;
+
+Function PClose(Var F: file): cint; overload;
+Function PClose(Var F: Text): cint; overload;
+
 
 // Processor Exception masks from FPC
 type
@@ -790,7 +805,6 @@ const
   EPOLL_CTL_DEL = 2;
   EPOLL_CTL_MOD = 3;
 
-
 implementation
 
 uses
@@ -798,6 +812,7 @@ uses
   Posix.Stdlib,
   Posix.fcntl,
   Posix.StrOpts,
+  Posix.SysWait,
   System.TimeSpan,
   System.IOUtils,
   System.DateUtils,
@@ -827,6 +842,11 @@ end;
 procedure EnterCriticalSection(const cs: TRTLCriticalSection);
 begin
   cs.Enter;
+end;
+
+function TryEnterCriticalSection(const cs: TRTLCriticalSection): integer;
+begin
+  result:= ord(cs.TryEnter);
 end;
 
 procedure LeaveCriticalSection(const cs: TRTLCriticalSection);
@@ -2161,6 +2181,12 @@ begin
   result:= __chdir(M.AsAnsi(TFileName(path), CP_UTF8).ToPointer);
 end;
 
+function FpRmdir(path: pointer): cint;
+var
+  M: TMarshaller;
+begin
+  result:= __rmdir(M.AsAnsi(TFileName(path), CP_UTF8).ToPointer);
+end;
 
 function fpgeterrno: integer;
 begin
@@ -2420,6 +2446,11 @@ begin
   result:= kill(pid, sig);
 end;
 
+function FpWaitpid(pid: pid_t; stat_loc: pcint; options: cint): pid_t;
+begin
+  result:= WaitPID(pid, PInteger(stat_loc), options);
+end;
+
 function FpUmask(cmask: TMode): TMode;
 begin
   result:= umask(cmask);
@@ -2450,10 +2481,213 @@ begin
   result:= uname(name);
 end;
 
-function FPgetenv(Name: PAnsiChar): PAnsiChar;
+function FpGetenv(Name: PAnsiChar): PAnsiChar;
 begin
   result:= getenv(Name);
 end;
+
+// Adapted from FreePascal rtl/unix/unix.pp
+Function WaitProcess(Pid: cint): cint; { like WaitPid(PID,@result,0) Handling of Signal interrupts (errno=EINTR), returning the Exitcode of Process (>=0) or -Status if terminated}
+var  r, s: cint;
+begin
+  s:= $7F00;
+  repeat
+    r:= WaitPid(Pid, @s, 0);
+    if (r = -1) and (fpgeterrno = ESysEIntr) Then
+       r:= 0;
+  until (r <> 0);
+  if (r = -1) or (r = 0) then // 0 is not a valid return and should never occur (it means status invalid when using WNOHANG)
+     result:= -1 // return -1 to indicate an error.  fpwaitpid updated it.
+  else
+     begin
+     if wifexited(s) then
+        result:= wexitstatus(s)
+     else
+        if s > 0 then  // Until now there is not use of the highest bit , but check this for the future
+           result:= -s // normal case
+        else
+           result:= s; // s<0 should not occur, but wie return also a negativ value
+     end;
+end;
+
+Function POpen_internal(var F: Text; const Prog: RawByteString; rw: char): cint; overload;
+begin
+  // HInt: in Delphy TTextRec and TFileRec do not match exactly, so using Text as param will not really work
+  // See below: a pipe is assigned to the param "F".
+  raise Exception.Create('Popen not implemented');
+end;
+
+
+Function POpen_internal(var F: file; const Prog: RawByteString; rw: char): cint; overload;
+{
+  Starts the program in 'Prog' and makes it's input or out put the
+  other end of a pipe. If rw is 'w' or 'W', then whatever is written to
+  F, will be read from stdin by the program in 'Prog'. The inverse is true
+  for 'r' or 'R' : whatever the program in 'Prog' writes to stdout, can be
+  read from 'f'.
+}
+//var
+//  pipi,
+//  pipo : file;
+//  pid  : cint;
+//  pl   : ^cint;
+//{$if not defined(FPC_USE_FPEXEC) or defined(USE_VFORK)}
+//  pp : array[0..3] of pchar;
+//  temp : string[255];
+//{$endif not FPC_USE_FPEXEC or USE_VFORK}
+//  ret  : cint;
+begin
+  raise Exception.Create('Popen not implemented');
+//  rw:=upcase(rw);
+//  if not (rw in ['R','W']) then
+//   begin
+//     FpSetErrno(ESysEnoent);
+//     exit(-1);
+//   end;
+//  ret:=AssignPipe(pipi,pipo);
+//  if ret=-1 then
+//   exit(-1);
+//{$ifdef USE_VFORK}
+//  pid:=fpvfork;
+//{$else USE_VFORK}
+//  pid:=fpfork;
+//{$endif USE_VFORK}
+//  if pid=-1 then
+//   begin
+//     close(pipi);
+//     close(pipo);
+//     exit(-1);
+//   end;
+//  if pid=0 then
+//   begin
+//   { We're in the child }
+//     if rw='W' then
+//      begin
+//        if (filerec(pipi).handle <> stdinputhandle) then
+//          begin
+//            ret:=fpdup2(filerec(pipi).handle,stdinputhandle);
+//{$ifdef USE_VFORK}
+//            fpclose(filerec(pipi).handle);
+//{$else USE_VFORK}
+//            close(pipi);
+//{$endif USE_VFORK}
+//          end;
+//{$ifdef USE_VFORK}
+//        fpclose(filerec(pipo).handle);
+//{$else USE_VFORK}
+//        close(pipo);
+//{$endif USE_VFORK}
+//        if ret=-1 then
+//         fpexit(127);
+//      end
+//     else
+//      begin
+//{$ifdef USE_VFORK}
+//        fpclose(filerec(pipi).handle);
+//{$else USE_VFORK}
+//        close(pipi);
+//{$endif USE_VFORK}
+//        if (filerec(pipo).handle <> stdoutputhandle) then
+//          begin
+//            ret:=fpdup2(filerec(pipo).handle,stdoutputhandle);
+//{$ifdef USE_VFORK}
+//            fpclose(filerec(pipo).handle);
+//{$else USE_VFORK}
+//            close(pipo);
+//{$endif USE_VFORK}
+//          end;
+//        if ret=-1 then
+//         fpexit(127);
+//      end;
+//     {$if defined(FPC_USE_FPEXEC) and not defined(USE_VFORK)}
+//     fpexecl(pchar('/bin/sh'),['-c',Prog]);
+//     {$else}
+//     temp:='/bin/sh'#0'-c'#0;
+//     pp[0]:=@temp[1];
+//     pp[1]:=@temp[9];
+//     pp[2]:=@prog[1];
+//     pp[3]:=Nil;
+//     fpExecve('/bin/sh',@pp,envp);
+//     {$endif}
+//     fpexit(127);
+//   end
+//  else
+//   begin
+//   { We're in the parent }
+//     if rw='W' then
+//      begin
+//        close(pipi);
+//        f:=pipo;
+//      end
+//     else
+//      begin
+//        close(pipo);
+//        f:=pipi;
+//      end;
+//   {Save the process ID - needed when closing }
+//     pl:=pcint(@filerec(f).userdata[2]);
+//     { avoid alignment error on sparc }
+//     move(pid,pl^,sizeof(pid));
+//   end;
+// POpen_internal:=0;
+end;
+
+Function POpen(var F: text; const Prog: RawByteString; rw: char): cint;
+var M: TMarshaller;
+begin
+  { can't do the ToSingleByteFileSystemEncodedFileName() conversion inside
+    POpen_internal, because this may destroy the temp rawbytestring result
+    of that function in the parent before the child is finished with it }
+  POpen:=POpen_internal(F, Prog, rw);
+end;
+
+Function POpen(var F: file; const Prog: RawByteString; rw: char): cint;
+begin
+  { can't do the ToSingleByteFileSystemEncodedFileName() conversion inside
+    POpen_internal, because this may destroy the temp rawbytestring result
+    of that function in the parent before the child is finished with it }
+  POpen:= POpen_internal(F, Prog, rw);
+end;
+
+function POpen(var F: text; const Prog: UnicodeString; rw: char): cint;
+var M: TMarshaller;
+begin
+  POpen:= POpen_internal(F, RawByteString(M.AsUtf8(Prog).ToPointer^), rw);
+end;
+
+function POpen(var F: file; const Prog: UnicodeString; rw: char): cint;
+var M: TMarshaller;
+begin
+  POpen:= POpen_internal(F, RawByteString(M.AsUtf8(Prog).ToPointer^), rw);
+end;
+Function PClose(Var F: file): cint;
+var
+  pl : pcint;
+  res : cint;
+  pid : cint;
+begin
+  fpclose(TFilerec(F).Handle);
+{ closed our side, Now wait for the other - this appears to be needed ?? }
+  pl:=pcint(@(TFilerec(f).userdata[2]));
+  { avoid alignment error on sparc }
+  move(pl^, pid, sizeof(pid));
+  fpwaitpid(pid, @res, 0);
+  result:= res shr 8;
+end;
+Function PClose(Var F: Text): cint;
+var
+  pl : pcint;
+  res : cint;
+  pid : cint;
+begin
+  fpclose(TTextrec(F).Handle);
+{ closed our side, Now wait for the other - this appears to be needed ?? }
+  pl:=pcint(@(TTextrec(f).userdata[2]));
+  { avoid alignment error on sparc }
+  move(pl^, pid, sizeof(pid));
+  fpwaitpid(pid, @res, 0);
+  result:= res shr 8;
+end;
 
 
 initialization

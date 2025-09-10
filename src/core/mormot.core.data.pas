@@ -3171,11 +3171,9 @@ type
 
 
 implementation
-{$ifdef ISDELPHI}
-{$ifdef POSIX}
+{$ifdef DELPHIPOSIX}
 Uses Mormot.core.posix.delphi;
-{$endif POSIX}
-{$endif ISDELPHI}
+{$endif DELPHIPOSIX}
 
 
 { ************ RTL TPersistent or Root Classes with Custom Constructor }

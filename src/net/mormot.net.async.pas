@@ -1383,7 +1383,9 @@ type
 
 
 implementation
-
+{$ifdef DELPHIPOSIX}
+Uses Mormot.core.posix.delphi;
+{$endif DELPHIPOSIX}
 
 { ******************** Low-Level Non-blocking Connections }
 

@@ -1211,6 +1211,9 @@ type
 implementation
 
 uses
+  {$ifdef DELPHIPOSIX}
+  Mormot.core.posix.delphi,
+  {$endif DELPHIPOSIX}
   mormot.orm.client; // for injection of TRestOrmClientUri.Uri field
 
 

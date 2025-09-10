@@ -233,7 +233,6 @@ implementation
 {$endif OSLINUX}
 {$else FPC}
   {$ifdef POSIX}
-//  Uses mormot.core.posix.delphi;
    Uses posix.Base;
   {$endif}
 {$endif FPC}

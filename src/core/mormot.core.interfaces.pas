@@ -2062,6 +2062,8 @@ type
     // used internally to compute the actual instance from the FakeCall()
     function SelfFromInterface: TInterfacedObjectFakeRaw;
       {$ifdef HASINLINE} inline; {$endif}
+
+    {$ifdef ASMORIG}
     {$ifdef CPUARM}
     // on ARM, the FakeStub needs to be here, for FakeCall redirection
     procedure ArmFakeStub;
@@ -2070,6 +2072,7 @@ type
     // on Aarch64, the FakeStub needs to be here, for FakeCall redirection
     procedure AArch64FakeStub;
     {$endif CPUAARCH64}
+    {$endif ASMORIG}
     function FakeQueryInterface({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
       IID: TGuid; out Obj): TIntQry; {$ifdef OSWINDOWS}stdcall{$else}cdecl{$endif};
     function Fake_AddRef: TIntCnt;   {$ifdef OSWINDOWS}stdcall{$else}cdecl{$endif};
@@ -2707,6 +2710,9 @@ const
 
 
 implementation
+{$ifdef DELPHIPOSIX}
+uses mormot.core.posix.delphi;
+{$endif DELPHIPOSIX}
 
 
 {.$define SOA_DEBUG} // write the low-level interface info as json
@@ -4962,7 +4968,7 @@ begin
   // reserve executable memory for JIT (aligned to 8 bytes)
   P := ReserveExecutableMemory(MAX_METHOD_COUNT * VMTSTUBSIZE
     {$ifdef CPUAARCH64} + ($120 shr 2) {$endif CPUAARCH64}
-    {$ifdef CPUARM}, @TInterfacedObjectFakeRaw.ArmFakeStub {$endif CPUARM});
+    {$ifdef CPUARM}{$ifdef ASMORIG} , @TInterfacedObjectFakeRaw.ArmFakeStub {$ELSE}, nil {$endif ASMORIG}{$endif CPUARM});
   // populate _FAKEVMT[] with JITted stubs
   SetLength(_FAKEVMT, MAX_METHOD_COUNT + RESERVED_VTABLE_SLOTS);
   // set IInterface RESERVED_VTABLE_SLOTS required methods
@@ -4996,8 +5002,12 @@ begin
     inc(P); // mov r12 (ip),{MethodIndex} : store method index in register
     {$endif ASMORIG}
     // branch ArmFakeStub (24bit relative, word aligned)
+    {$ifdef ASMORIG}
     stub :=
       ((PtrUInt(@TInterfacedObjectFakeRaw.ArmFakeStub) - PtrUInt(P)) shr 2) - 2;
+    {$else}
+    stub := 0;
+    {$endif ASMORIG}
     P^ := ($ea shl 24) + (stub and $00ffffff); // note: stub may be < 0
     inc(P);
     P^ := $e320f000;  // VMTSTUBSIZE = 16
@@ -6827,9 +6837,9 @@ type
     resKind: TInterfaceMethodValueType;
   end;
 
+{$ifdef FPC}
 // ARM/AARCH64 code below provided by ALF, greatly inspired by pascalscript
 {$ifdef CPUARM}
-
 procedure CallMethod(var Args: TCallMethodArgs); assembler; nostackframe;
 label
   {$ifdef HAS_FPREG}
@@ -7014,7 +7024,21 @@ asmcall_end:
 end;
 
 {$endif CPUAARCH64}
+{$else FPC} // DELPHI
+{$ifdef CPUARM}
+procedure CallMethod(var Args: TCallMethodArgs);
+begin
+  raise Exception.Create('mormot CallMethod not implemented');
+end;
+{$endif CPUARM}
 
+{$ifdef CPUAARCH64}
+procedure CallMethod(var Args: TCallMethodArgs);
+begin
+  raise Exception.Create('mormot CallMethod not implemented');
+end;
+{$endif CPUAARCH64}
+{$endif FPC}
 {$ifdef CPUX64}
 
 procedure CallMethod(var Args: TCallMethodArgs); assembler;

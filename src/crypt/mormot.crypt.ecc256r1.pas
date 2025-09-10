@@ -748,7 +748,11 @@ const
         QWord($FFFFFFFF00000000)));
 
   _1: THash256Rec = (q: (1, 0, 0, 0));
+  {$ifdef ISDELPHI} // internal compiler error with "_3"  compiling for ANDROID
+  _three: THash256Rec = (q: (3, 0, 0, 0));
+  {$else}
   _3: THash256Rec = (q: (3, 0, 0, 0));
+  {$endif ISDELPHI}
   _11: THash256Rec = (q: (QWord($0101010101010101),
                           QWord($0101010101010101),
                           QWord($0101010101010101),
@@ -1193,7 +1197,7 @@ procedure EccPointDecompress(out Point: TEccPoint; const Compressed: TEccPublicK
 begin
   _bswap256(@Point.x, @Compressed[1]);
   _modSquareP(Point.y, Point.x);           // y = x^2
-  _modSubP(Point.y, Point.y, _3);          // y = x^2 - 3
+  _modSubP(Point.y, Point.y, {$ifdef ISDELPHI} _three {$else} _3 {$endif ISDELPHI});          // y = x^2 - 3
   _modMultP(Point.y, Point.y, Point.x);    // y = x^3 - 3x
   _modAddP(Point.y, Point.y, Curve_B_32);  // y = x^3 - 3x + b
   ModSqrt(Point.y);

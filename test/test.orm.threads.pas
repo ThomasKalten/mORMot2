@@ -182,6 +182,10 @@ type
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+uses  Mormot.core.posix.delphi;
+{$endif DELPHIPOSIX}
+
 {
   Some Numbers taken on a Core i5 CPU with 2 Cores / 4 Threads:
   - Create thread pool: 1 assertion passed  3.49ms

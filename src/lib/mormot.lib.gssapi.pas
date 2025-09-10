@@ -1073,7 +1073,11 @@ var
   buf: gss_buffer_desc;
   user: gss_name_t;
   n , p, u: RawUtf8;
+  {$ifdef ISDELPHI}
+  orig: PUtf8Char;
+  {$else}
   orig: PAnsiChar;
+  {$endif ISDELPHI}
   memCcache: TShort31;
 begin
   // 1) retrieve the user information in the proper gss_name_t format

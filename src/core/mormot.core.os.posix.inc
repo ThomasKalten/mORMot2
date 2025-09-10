@@ -40,11 +40,16 @@ uses
 
 // rough preparation for Delphi compatibility - not finished at all
 uses
-  Posix.dlfcn,
-  Posix.Time,
-  Posix.SysTime,
+//  Posix.dlfcn,
+//  Posix.Time,
+//  Posix.SysTime,
+  Posix.Pthread,
+//  Posix.Unistd,
+  Posix.SysWait,
+//  Posix.Sched,
   System.IOUtils,
-  System.SyncObjs;
+  System.SyncObjs
+  ;
  
   {$MESSAGE WARN 'mORMot assumes no UNICODE on POSIX, i.e. as TFileName = PChar = PUtf8Char - this may not be 100% save for DELPHI!'}
 {$endif FPC}
@@ -56,8 +61,8 @@ function _fmt(const Fmt: string; const Args: array of const): RawUtf8;
 procedure _fmt(const Fmt: string; const Args: array of const;
   var result: RawUtf8); overload; forward;
 procedure _AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8); forward;
-function _GetNextSpaced(var P: PAnsiChar): RawUtf8; forward;
-function _GetNextCardinal(var P: PAnsiChar): PtrUInt; forward;
+function _GetNextSpaced(var P: PAnsiChar): RawUtf8; {$ifdef ISDELPHI} overload; {$endif ISDELPHI} forward;
+function _GetNextCardinal(var P: PAnsiChar): PtrUInt; {$ifdef ISDELPHI} overload; {$endif ISDELPHI} forward;
 function PosExtString(Str: PChar): PChar; forward; // to extract extension
 
 procedure WrDeb(const t: ShortString; const p; l: PtrInt); // internal use below
@@ -695,22 +700,22 @@ end;
 
 function GetCurrentThreadId: TThreadID;
 begin
-  result := system.GetCurrentThreadID();
+  result :=  {$ifdef DELPHIPOSIX}Posix.PThread. {$else} system. {$endif} GetCurrentThreadID();
 end;
 
 function TryEnterCriticalSection(var cs: TRTLCriticalSection): integer;
 begin
-  result := system.TryEnterCriticalSection(cs);
+  result := {$ifdef DELPHIPOSIX}mormot.core.posix.delphi. {$else} system. {$endif} TryEnterCriticalSection(cs);
 end;
 
 procedure EnterCriticalSection(var cs: TRTLCriticalSection);
 begin
-  system.EnterCriticalSection(cs);
+  {$ifdef DELPHIPOSIX}mormot.core.posix.delphi. {$else} system. {$endif}EnterCriticalSection(cs);
 end;
 
 procedure LeaveCriticalSection(var cs: TRTLCriticalSection);
 begin
-  system.LeaveCriticalSection(cs);
+  {$ifdef DELPHIPOSIX}mormot.core.posix.delphi. {$else} system. {$endif}LeaveCriticalSection(cs);
 end;
 
 {$endif NODIRECTTHREADMANAGER}
@@ -1467,7 +1472,11 @@ begin
   time := QWord(st.st_mtime) * MilliSecsPerSec + // no local conversion needed
           // include milliseconds information
           {$ifdef OSLINUXANDROID}
+          {$ifdef FPC}
           st.st_mtime_nsec div NanoSecsPerMilliSec;
+          {$else}
+          st.st_mtimensec div NanoSecsPerMilliSec;
+          {$endif FPC}
           {$else}
           st.st_mtimensec div NanoSecsPerMilliSec;
           {$endif OSLINUXANDROID}
@@ -1536,7 +1545,8 @@ end;
 function FileInfoByHandle(aFileHandle: THandle; FileId, FileSize: PInt64;
   LastWriteAccess, FileCreateDateTime: PUnixMSTime): boolean;
 var
-  mtime, atime, ctime: Int64;
+  mtime: TUnixMSTime;
+  atime, ctime: Int64;
   lp: TStat;
   r: integer;
 begin
@@ -1602,7 +1612,11 @@ var
 begin
   FillCharFast(dlinfo, sizeof(dlinfo), 0);
   dladdr(aAddress, @dlinfo);
+  {$ifdef ISDELPHI}
+  result:= dlinfo.dli_fname;
+  {$else}
   FastSetString(RawUtf8(result), dlinfo.dli_fname, StrLen(dlinfo.dli_fname));
+  {$endif ISDELPHI}
   if (result <> '') and
      (result[1] <> '/') then
     result := ExpandFileName(string(result));
@@ -1945,6 +1959,26 @@ begin
   result := FindNonVoidRawUtf8(pointer(_ProcFileSystems),
     pointer(typ), length(typ), length(_ProcFileSystems)) >= 0;
 end;
+
+{$ifdef ISDELPHI}
+function _GetNextSpaced(var P: PUtf8Char): RawUtf8; inline; overload;
+var PAnsi: PAnsiChar;
+begin
+  PAnsi:= PAnsiChar(P);
+  result:= _GetNextSpaced(PAnsi);
+  P:= PUTf8Char(PAnsi);
+end;
+
+function _GetNextCardinal(var P: PUTf8Char): PtrUInt; inline; overload;
+var PAnsi: PAnsiChar;
+begin
+  PAnsi:= PAnsiChar(P);
+  result:= _GetNextCardinal(PAnsi);
+  P:= PUTf8Char(PAnsi);
+end;
+
+{$endif ISDELPHI}
+
 
 function LoadProcFileSystems: boolean;
 var
@@ -2392,7 +2426,7 @@ end;
 
 function GetEnv(name: PAnsiChar; var env: RawUtf8): boolean;
 begin
-  name := BaseUnix.FPGetenv(name); // local GetEnvironmentVariable()
+  name :=  {$ifdef FPC} BaseUnix. {$endif FPC} FPGetenv(name); // local GetEnvironmentVariable()
   result := name <> nil;
   if result then
     FastSetString(env, name, StrLen(name));
@@ -2409,7 +2443,24 @@ end;
 
 function GetEnvFolder(name: PAnsiChar; var folder: TFileName;
   writable: boolean): boolean;
+{$ifdef ISDELPHI}
+var folderUtf8: RawUtf8;
+{$endif ISDELPHI}
 begin
+  {$ifdef ISDELPHI}
+  folderUtf8:= folder;
+  try
+    if GetEnv(name, folderUtf8) then
+      if writable and
+         not FileIsWritable(folderUtf8) then
+         folderUtf8:= ''
+      else
+         folderUtf8:= IncludeTrailingPathDelimiter(folderUtf8);
+    result := folderUtf8 <> '';
+  finally
+    folder:= folderUtf8;
+    end;
+  {$else}
   if GetEnv(name, RawUtf8(folder)) then
     if writable and
        not FileIsWritable(folder) then
@@ -2417,6 +2468,7 @@ begin
     else
       folder := IncludeTrailingPathDelimiter(folder);
   result := folder <> '';
+  {$endif ISDELPHI}
 end;
 
 function WritableFolder(const parent, sub: TFileName; var folder: TFileName): boolean;
@@ -2479,7 +2531,7 @@ end;
 
 function _GetSystemStoreAsPem(CertStore: TSystemCertificateStore): RawUtf8;
 var
-  files: TRawUtf8DynArray;
+  files: {$ifdef ISDELPHI} TRawByteStringDynArray {$else} TRawUtf8DynArray {$endif};
   f: PtrInt;
 begin
   // see https://go.dev/src/crypto/x509/root_unix.go as reference
@@ -2669,6 +2721,10 @@ var
     addedpath: TFileName;
     fn: PByteArray; // is a temp RawUtf8
     sub: TRawUtf8DynArray;
+    {$ifdef ISDELPHI}
+    M: TMarshaller;
+    {$endif ISDELPHI}
+
 
     procedure MakeFileName(const path: TFileName);
     var
@@ -2691,7 +2747,16 @@ var
   begin
     // read all the file or directory names of this folder
     subcount := 0;
+    {$ifdef ISDELPHI}
+    begin
+      var addedPathUtf8: RawUtf8;
+      addedPathUtf8:= RawUtf8(M.AsUTF8(addedpath).ToPointer^);
+      Join([root, subpath], addedPathUtf8);
+      addedPath:= addedPathUtf8;
+    end;
+    {$else}
     Join([root, subpath], RawUtf8(addedpath));
+    {$endif ISDELPHI}
     dir := FpOpendir(pointer(addedpath)); // faster than FindFirst()
     if dir = nil then
       exit;
@@ -2707,16 +2772,28 @@ var
         DT_UNKNOWN, // assume modern FS over BSD or Linux Kernel >= 2.6.4
         DT_REG:
           if Assigned(OnFile) and
-             not OnFile(OnFileOpaque, ent^.d_name, entlen) then
+             not OnFile(OnFileOpaque, {$ifdef ISDELPHI} PUtf8Char(@ent^.d_name[0]) {$else} ent^.d_name {$endif ISDELPHI}, entlen) then
             continue // e.g. no MatchAnyP()
           else if (not IncludeHiddenFiles) and
+                  {$ifdef ISDELPHI}
+                  (chr(ent^.d_name[0]) = '.') then
+                  {$else}
                   (ent^.d_name[0] = '.') then
+                  {$endif ISDELPHI}
             continue;
         DT_DIR:
           begin
-            if (ent^.d_name[0] = '.') and
+            if {$ifdef ISDELPHI}
+               (chr(ent^.d_name[0]) = '.') and
+               {$else}
+               (ent^.d_name[0] = '.') and
+               {$endif ISDELPHI}
                ((not IncludeHiddenFiles) or
+                {$ifdef ISDELPHI}
+                (chr(ent^.d_name[1]) = #0) or
+                {$else}
                 (ent^.d_name[1] = #0) or
+                {$endif ISDELPHI}
                 (PWord(@ent^.d_name[1])^ = ord('.'))) then
               continue; // ignore hidden or '.' or '..' folders
             if Recursive then
@@ -2735,7 +2812,7 @@ var
             if not IncludeFolders then
               continue;
             if Assigned(OnFile) and
-               not OnFile(OnFileOpaque, ent^.d_name, entlen) then
+               not OnFile(OnFileOpaque, {$ifdef ISDELPHI} PUtf8Char(@ent^.d_name[0]) {$else} ent^.d_name {$endif ISDELPHI}, entlen) then
               continue; // simulate a FindFirst(mask) as in FindFilesRtl()
           end;
       else
@@ -2774,14 +2851,24 @@ begin
      not IsAnsiCompatible(Name) then
     exit;
   if argv0len = 0 then
+    {$ifdef ISDELPHI}
+    if argValues <> nil then // Seems to be nil on Android
+       argv0len := StrLen(argValues[0]); // retrieve once to keep the max possible size
+    {$else}
     argv0len := StrLen(argv[0]); // retrieve once to keep the max possible size
+    {$endif ISDELPHI}
   {$ifdef OSLINUX} // untested (probably unsafe?) on Android
   if LinuxSetProcessName(Name) then // first try with the prctl syscall
     result := true
   else
   {$endif OSLINUX}
   try
+    {$ifdef ISDELPHI}
+    if argValues <> nil then // Seems to be nil on Android
+       MoveFast(pointer(Name)^, argValues[0]^, MinPtrInt(argv0len, length(Name)) + 1);
+    {$else}
     MoveFast(pointer(Name)^, argv[0]^, MinPtrInt(argv0len, length(Name)) + 1);
+    {$endif ISDELPHI}
     result := true;
   except
     result := false; // catch any GPF
@@ -3168,11 +3255,11 @@ begin
 end;
 
 {$ifdef CPUARM3264}
-procedure ParseHex32Add(p: PAnsiChar; var result: TIntegerDynArray);
+procedure ParseHex32Add(p: PUtf8Char; var result: TIntegerDynArray);
 var
   v: integer;
 begin
-  v := ParseHex0x(p);
+  v := ParseHex0x(PAnsiChar(p));
   if v <> 0 then
     AddInteger(result, v, {nodup=}true);
 end;
@@ -3181,7 +3268,11 @@ end;
 function ParseLine(P: PUtf8Char): PUtf8Char;
 begin
   if P <> nil then
+    {$ifdef ISDELPHI}
+    P := PUtf8Char(strscan(PAnsiChar(P), ':'));
+    {$else}
     P := strscan(P, ':');
+    {$endif ISDELPHI}
   result := P;
   if P = nil then
     exit;
@@ -3334,7 +3425,11 @@ begin
     if e = nil then
       break;
     if (e.d_type in [DT_UNKNOWN, DT_DIR]) and
+       {$ifdef ISDELPHI}
+       (chr(e.d_name[0]) in ['1'..'9']) then
+       {$else}
        (e.d_name[0] in ['1'..'9']) then
+       {$endif ISDELPHI}
     begin
       pid := GetCardinal(@e.d_name[0]);
       if IsValidPid(pid) then
@@ -3416,7 +3511,11 @@ end;
 
 function RetrieveSystemTimes(out IdleTime, KernelTime, UserTime: Int64): boolean;
 var
+  {$ifdef ISDELPHI}
+  P: PAnsiChar;
+  {$else}
   P: PUtf8Char;
+  {$endif ISDELPHI}
   tmp: TBuffer4K;
 begin
   result := false;
@@ -3435,6 +3534,7 @@ end;
 function GetMemoryInfo(out info: TMemoryInfo; withalloc: boolean): boolean;
 var
   tmp: TBuffer4K;
+  PAnsi: PAnsiChar;
   P: PUtf8Char;
 begin
   result := false;
@@ -3466,9 +3566,9 @@ begin
   // GetHeapStatus is only about current thread -> use /proc/[pid]/statm
   if LoadProcFile('/proc/self/statm', tmp) <= 0 then
     exit;
-  P := @tmp;
-  info.allocreserved := QWord(_GetNextCardinal(P)) * SystemInfo.dwPageSize; // VmSize
-  info.allocused     := QWord(_GetNextCardinal(P)) * SystemInfo.dwPageSize; // VmRSS
+  PAnsi := @tmp;
+  info.allocreserved := QWord(_GetNextCardinal(PAnsi)) * SystemInfo.dwPageSize; // VmSize
+  info.allocused     := QWord(_GetNextCardinal(PAnsi)) * SystemInfo.dwPageSize; // VmRSS
 end;
 
 procedure XorOSEntropy(var e: THash512Rec);
@@ -4427,7 +4527,11 @@ begin
   Close(output);
   AssignFile(output, '/dev/null');
   ReWrite(output);
+  {$ifdef ISDELPHI}
+  Close(ErrOutput);
+  {$else}
   Close(stderr);
+  {$endif ISDELPHI}
 end;
 
 procedure RunUntilSigTerminated(daemon: TObject; dofork: boolean;
@@ -4502,7 +4606,13 @@ function RunInternal(args: PPAnsiChar; waitfor: boolean; const env: TFileName;
 var
   pid: TPID;
   e: array[0..511] of PAnsiChar; // max 512 environment variables
+  {$ifdef ISDELPHI}
+  envpp: PPChar;
+  envppAnsi: PPAnsiChar;
+  M: TMarshaller;
+  {$else}
   envpp: PPAnsiChar;
+  {$endif ISDELPHI}
   P: PAnsiChar;
   n: PtrInt;
 begin
@@ -4513,7 +4623,8 @@ begin
   pid := FpFork;
   {$ifend}
   {$else}
-  'only FPC is supported yet';
+  {$MESSAGE warn 'only FPC is supported yet - delphi is untested'}
+  pid := Posix.UniStd.fork;
   {$endif FPC}
   if pid < 0 then
   begin
@@ -4537,18 +4648,30 @@ begin
       begin
         while envpp^ <> nil do
         begin
+          {$ifdef ISDELPHI}
+          if PosChar(PUtf8Char(M.AsUtf8(envpp^).ToPointer), #10) = nil then
+          {$else}
           if PosChar(envpp^, #10) = nil then
+          {$endif ISDELPHI}
           begin
             // filter to add only single-line variables
             if n = high(e) - 1 then
               exit;
+            {$ifdef ISDELPHI}
+            e[n] := PAnsiChar(M.AsUtf8(envpp^).ToPointer);
+            {$else}
             e[n] := envpp^;
+            {$endif ISDELPHI}
             inc(n);
           end;
           inc(envpp);
         end;
       end;
+      {$ifdef ISDELPHI}
+      P := M.AsUtf8(env).ToPointer; // env follows Windows layout 'n1=v1'#0'n2=v2'#0#0
+      {$else}
       P := pointer(env); // env follows Windows layout 'n1=v1'#0'n2=v2'#0#0
+      {$endif ISDELPHI}
       while P^ <> #0 do
       begin
         if n = high(e) - 1 then
@@ -4558,10 +4681,26 @@ begin
         inc(P, StrLen(P) + 1);
       end;
       e[n] := nil; // end with null
+      {$ifdef ISDELPHI}
+      envppAnsi := @e;
+      {$else}
       envpp := @e;
-    end;
+      {$endif ISDELPHI}
+      end
+    {$ifdef ISDELPHI}
+    else
+      begin
+      envppAnsi := @e;
+      end
+    {$endif ISDELPHI}
+    ;
+    {$ifdef ISDELPHI}
+    execve(args^, args, envppAnsi);
+    _exit(127);
+    {$else}
     FpExecve(args^, args, envpp);
     FpExit(127);
+    {$endif ISDELPHI}
   end;
   if waitfor then
   begin
@@ -4603,7 +4742,7 @@ begin
     parsed^ := err;
   if err = [] then
     // no need to spawn the shell for simple commands
-    result := RunInternal(a, waitfor, env, options)
+    result := RunInternal(@a, waitfor, env, options)
   else if err * PARSECOMMAND_ERROR <> [] then
     // no system call for clearly invalid command line
     result := -ESysEPERM

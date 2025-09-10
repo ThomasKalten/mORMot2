@@ -1,4 +1,4 @@
-{
+﻿{
   This file is a part of the Open Source Synopse mORMot framework 2,
   licensed under a MPL/GPL/LGPL three license - see LICENSE.md
 
@@ -152,6 +152,7 @@
 
   Delphi only:
     ISDELPHI ISDELPHIxxx WIN32DELPHI WIN64DELPHI DISPINVOKEBYVALUE
+    DELPHIPOSIX DELPHIANDROID
 
 ********************** Conditionals **********************)
 
@@ -562,6 +563,9 @@
     {$endif MACOS}
     {$ifdef ANDROID}
       {$define OSANDROID}
+      {$define NOEXCEPTIONINTERCEPT} // API working?
+      {$define DELPHIANDROID}
+      {$define NOSQLITE3STATIC} // Static linking on Android with some non portable features for FPC
     {$endif ANDROID}
     {$ifdef LINUX}
       {$define OSLINUX}

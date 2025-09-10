@@ -2771,6 +2771,9 @@ type
 implementation
 
 uses
+  {$ifdef DELPHIPOSIX}
+  Mormot.core.posix.delphi,
+  {$endif DELPHIPOSIX}
   // defined here to avoid any circular reference
   mormot.soa.server,
   mormot.orm.server, // defines e.g. TRestOrmServer

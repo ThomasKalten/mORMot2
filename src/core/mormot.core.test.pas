@@ -399,7 +399,7 @@ type
     /// low-level output on the console - use TSynTestCase.AddConsole instead
     procedure DoTextLn(const values: array of const); overload;
     /// low-level set the console text color - use TSynTestCase.AddConsole instead
-    procedure DoColor(aColor: TConsoleColor);
+    procedure DoColor(aColor: TConsoleColor); virtual;
     /// low-level output on the console with automatic formatting
     // - use TSynTestCase.NotifyProgress() instead
     procedure DoNotifyProgress(const value: RawUtf8; cc: TConsoleColor);
