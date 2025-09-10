@@ -729,6 +729,9 @@ type
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses System.SyncObjs; // inline expand
+{$endif DELPHIPOSIX}
 
 { ************ Shared Proxy Information }
 

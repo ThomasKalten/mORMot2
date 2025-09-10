@@ -2554,7 +2554,11 @@ type
 
 implementation
 {$ifdef DELPHIPOSIX}
-Uses Mormot.core.posix.delphi;
+uses  Posix.PThread,
+      Posix.Stdio,
+      System.SyncObjs,
+      System.Types,
+      Mormot.core.posix.delphi;
 {$endif DELPHIPOSIX}
 
 { ******************** Abstract UDP Server }

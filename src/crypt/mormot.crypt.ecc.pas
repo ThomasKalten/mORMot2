@@ -1866,7 +1866,8 @@ type
 
 implementation
 {$ifdef DELPHIPOSIX}
-Uses Mormot.core.posix.delphi;
+Uses Posix.UniStd, // inline expand
+     Mormot.core.posix.delphi;
 {$endif DELPHIPOSIX}
 
 { ***************** High-Level Certificate-based Public Key Cryptography }

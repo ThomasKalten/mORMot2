@@ -1832,6 +1832,12 @@ type
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses Posix.Pthread, // inline expand
+     System.SyncObjs, // inline expand
+     System.Types, // inline expand
+     Mormot.core.posix.delphi; // inline expand
+{$endif DELPHIPOSIX}
 
 { ************ Customize REST Execution }
 
@@ -2493,7 +2499,7 @@ begin
 end;
 
 function TRest.OneFieldValues(Table: TOrmClass;
-  const FieldName: RawUtf8; const WhereClause: RawUtf8; var Data: TInt64DynArray;
+  const FieldName: RawUtf8; const WhereClause: RawUtf8; var Data: mormot.core.base.TInt64DynArray;
   SQL: PRawUtf8): boolean;
 begin
   result := fOrm.OneFieldValues(Table, FieldName, WhereClause, Data, SQL);
@@ -4844,7 +4850,7 @@ function TOrmHistory.HistorySave(const Server: IRestOrmServer;
 var
   size, i, maxSize: PtrInt;
   firstOldIndex, firstOldOffset, firstNewIndex, firstNewOffset: integer;
-  newOffset: TIntegerDynArray;
+  newOffset: mormot.core.base.TIntegerDynArray;
   rec: TOrm;
   hist: TOrmHistory;
   W: TBufferWriter;

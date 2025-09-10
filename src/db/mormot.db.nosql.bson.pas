@@ -1312,6 +1312,9 @@ function VariantSaveMongoJson(const Value: variant; Mode: TMongoJsonMode): RawUt
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses Mormot.core.posix.delphi; // inline expand
+{$endif DELPHIPOSIX}
 
 { ************ BSON Decimal128 Value }
 

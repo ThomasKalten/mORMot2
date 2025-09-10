@@ -476,6 +476,9 @@ function SCryptMemoryUse(N, R, P: QWord): QWord;
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses Mormot.core.posix.delphi; // inline expand
+{$endif DELPHIPOSIX}
 
 { **************** Deprecated MD4 and RC4 Support }
 

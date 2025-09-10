@@ -685,6 +685,9 @@ function ToText(c: TInterfaceMockSpyCheck): PShortString; overload;
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses Posix.UniStd; // inline expand
+{$endif DELPHIPOSIX}
 
 { ************ Unit-Testing classes and functions }
 

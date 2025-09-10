@@ -685,6 +685,10 @@ function InitializeDomainAuth: boolean;
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses Posix.Pthread; // inline expand
+{$endif DELPHIPOSIX}
+
 
 { ****************** Low-Level libgssapi_krb5/libgssapi.so Library Access }
 

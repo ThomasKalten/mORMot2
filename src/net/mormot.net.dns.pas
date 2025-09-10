@@ -356,6 +356,10 @@ function DnsLdapControlers(const NameServers: RawUtf8 = '';
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses Mormot.core.posix.delphi; // inline expand
+{$endif DELPHIPOSIX}
+
 { **************** Low-Level DNS Protocol Definitions }
 
 const

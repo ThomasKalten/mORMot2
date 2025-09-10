@@ -1380,7 +1380,9 @@ const
 implementation
 
 {$ifdef DELPHIPOSIX}
-uses mormot.core.posix.delphi;
+uses  Posix.Pthread, // inline expand
+      System.Types, // inline expand
+      mormot.core.posix.delphi;
 {$endif DELPHIPOSIX}
 
 { ************ Thread-Safe TSynQueue and TPendingTaskList }

@@ -2814,6 +2814,10 @@ function WriteStringToStream(S: TStream; const Text: RawUtf8): boolean;
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses Posix.Errno; // Inline expand
+{$endif DELPHIPOSIX}
+
 {$ifdef FPC}
   // globally disable some FPC paranoid warnings - rely on x86_64 as reference
   {$WARN 4056 off : Conversion between ordinals and pointers is not portable }

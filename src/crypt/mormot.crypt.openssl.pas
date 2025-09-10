@@ -784,6 +784,9 @@ type
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses Mormot.core.posix.delphi; // inline expand
+{$endif DELPHIPOSIX}
 
 { TAesOsl }
 

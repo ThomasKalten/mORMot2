@@ -566,6 +566,9 @@ const
 implementation
 
 uses
+{$ifdef DELPHIPOSIX}
+  Posix.Pthread, // inline expand
+{$endif DELPHIPOSIX}
   mormot.orm.server;
 
 

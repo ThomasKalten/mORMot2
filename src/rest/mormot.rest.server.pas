@@ -2769,6 +2769,7 @@ implementation
 
 uses
   {$ifdef DELPHIPOSIX}
+  Posix.Pthread, // inline expand
   Mormot.core.posix.delphi,
   {$endif DELPHIPOSIX}
   // defined here to avoid any circular reference

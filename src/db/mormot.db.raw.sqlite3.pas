@@ -5580,11 +5580,20 @@ var
 
 
 implementation
-{$ifdef ISDELPHI}
-   {$ifdef ANDROID}
-    uses AndroidAPI.IOUtils;
-   {$endif}
-{$endif}
+{$ifdef DELPHIANDROID}
+    uses
+        {$ifdef DELPHIPOSIX}
+        Posix.UniStd, // inline expand
+        Posix.StdIO, // inline expand
+        {$endif DELPHIPOSIX}
+        AndroidAPI.IOUtils;
+{$else}
+   {$ifdef DELPHIPOSIX}
+    uses
+        Posix.UniStd, // inline expand
+        Posix.StdIO; // inline expand
+   {$endif DELPHIPOSIX}
+{$endif DELPHIANDROID}
 { ************ Raw SQLite3 API Constants and Functions }
 
 function SqlVarToSQlite3Context(const Res: TSqlVar;

@@ -2711,7 +2711,8 @@ const
 
 implementation
 {$ifdef DELPHIPOSIX}
-uses mormot.core.posix.delphi;
+uses  Posix.Pthread, // inline expand
+      mormot.core.posix.delphi;
 {$endif DELPHIPOSIX}
 
 
@@ -7038,7 +7039,8 @@ begin
   raise Exception.Create('mormot CallMethod not implemented');
 end;
 {$endif CPUAARCH64}
-{$endif FPC}
+{$endif FPC}
+
 {$ifdef CPUX64}
 
 procedure CallMethod(var Args: TCallMethodArgs); assembler;

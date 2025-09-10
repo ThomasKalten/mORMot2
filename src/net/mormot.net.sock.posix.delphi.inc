@@ -21,6 +21,8 @@ uses
   Posix.SysUn,
   Posix.NetinetIn,
   Posix.NetinetTCP,
+  Posix.Stdio, // inline expand
+  System.SyncObjs, // inline expand
   mormot.core.posix.delphi;
 
 {$ifdef OSLINUX}

@@ -385,6 +385,11 @@ function ToText(wep: TSocketsIOWaitEventPacket): PShortString; overload;
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses System.SyncObjs, // inline expand
+     System.Types, // inline expand
+     Mormot.core.posix.delphi; // inline expand
+{$endif DELPHIPOSIX}
 
 { ******************** TWebSocketProcessClient Processing Class }
 

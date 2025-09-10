@@ -1,4 +1,4 @@
-/// Framework Core Low-Level Memory Buffer Process
+﻿/// Framework Core Low-Level Memory Buffer Process
 // - this unit is a part of the Open Source Synopse mORMot framework 2,
 // licensed under a MPL/GPL/LGPL three license - see LICENSE.md
 unit mormot.core.buffers;
@@ -2883,6 +2883,10 @@ type
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+uses  Posix.UniStd, // Inline expand
+      Mormot.core.posix.delphi; // Inline expand
+{$endif DELPHIPOSIX}
 
 { ************ Variable Length Integer Encoding / Decoding }
 

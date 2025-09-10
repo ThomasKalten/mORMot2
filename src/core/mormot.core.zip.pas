@@ -912,6 +912,11 @@ var
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses Posix.Errno,  // inline expand
+     Posix.Unistd; // inline expand
+{$endif DELPHIPOSIX}
+
 { ************ TSynZipCompressor Stream Class }
 
 const

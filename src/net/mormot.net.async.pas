@@ -1384,7 +1384,10 @@ type
 
 implementation
 {$ifdef DELPHIPOSIX}
-Uses Mormot.core.posix.delphi;
+Uses Posix.Pthread, // inline expand
+     System.SyncObjs, // inline expand
+     System.Types, // inline expand
+     Mormot.core.posix.delphi;
 {$endif DELPHIPOSIX}
 
 { ******************** Low-Level Non-blocking Connections }

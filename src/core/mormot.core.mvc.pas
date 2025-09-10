@@ -896,6 +896,9 @@ var
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses System.SyncObjs; // inline expand
+{$endif DELPHIPOSIX}
 
 { ************ Web Views Implementation using Mustache }
 

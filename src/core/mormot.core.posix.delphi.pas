@@ -2508,7 +2508,8 @@ begin
         else
            result:= s; // s<0 should not occur, but wie return also a negativ value
      end;
-end;
+end;
+
 
 Function POpen_internal(var F: Text; const Prog: RawByteString; rw: char): cint; overload;
 begin
@@ -2633,7 +2634,6 @@ begin
 end;
 
 Function POpen(var F: text; const Prog: RawByteString; rw: char): cint;
-var M: TMarshaller;
 begin
   { can't do the ToSingleByteFileSystemEncodedFileName() conversion inside
     POpen_internal, because this may destroy the temp rawbytestring result
@@ -2659,7 +2659,8 @@ function POpen(var F: file; const Prog: UnicodeString; rw: char): cint;
 var M: TMarshaller;
 begin
   POpen:= POpen_internal(F, RawByteString(M.AsUtf8(Prog).ToPointer^), rw);
-end;
+end;
+
 Function PClose(Var F: file): cint;
 var
   pl : pcint;
@@ -2673,7 +2674,8 @@ begin
   move(pl^, pid, sizeof(pid));
   fpwaitpid(pid, @res, 0);
   result:= res shr 8;
-end;
+end;
+
 Function PClose(Var F: Text): cint;
 var
   pl : pcint;
@@ -2687,7 +2689,8 @@ begin
   move(pl^, pid, sizeof(pid));
   fpwaitpid(pid, @res, 0);
   result:= res shr 8;
-end;
+end;
+
 
 
 initialization

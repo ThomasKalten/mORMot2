@@ -2008,6 +2008,11 @@ function SendEmailSubject(const Text: string): RawUtf8;
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+uses
+    Posix.UniStd, // inline expand
+    Posix.StdIO; // inline expand
+{$endif DELPHIPOSIX}
 
 { ******************** THttpMultiPartStream for multipart/formdata HTTP POST }
 

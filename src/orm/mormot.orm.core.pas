@@ -5071,6 +5071,9 @@ type
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses System.SyncObjs; // inline expand
+{$endif DELPHIPOSIX}
 
 { -------------------- ORM Specific TOrmPropInfoRtti Classes }
 

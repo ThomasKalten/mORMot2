@@ -3067,7 +3067,9 @@ type
 implementation
 
 {$ifdef DELPHIPOSIX}
-uses  Mormot.core.posix.delphi;
+uses  Posix.PThread,
+      System.SyncObjs,
+      Mormot.core.posix.delphi;
 {$endif DELPHIPOSIX}
 
 

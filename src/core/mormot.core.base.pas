@@ -2626,7 +2626,7 @@ procedure ReadBarrier; {$ifndef CPUINTEL} inline; {$endif}
 {$endif ISDELPHI}
 
 /// fast computation of two 64-bit unsigned integers into a 128-bit value
-{$if defined(CPUINTEL) or defined(ISDELPHI)}
+{$ifdef CPUINTEL}
 procedure mul64x64(const left, right: QWord; out product: THash128Rec);
 {$else}
 procedure mul64x64({$ifdef FPC}constref{$else}const{$endif} left, right: QWord;

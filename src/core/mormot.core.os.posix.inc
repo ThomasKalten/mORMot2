@@ -47,6 +47,7 @@ uses
 //  Posix.Unistd,
   Posix.SysWait,
 //  Posix.Sched,
+  Posix.StdLib,
   System.IOUtils,
   System.SyncObjs
   ;

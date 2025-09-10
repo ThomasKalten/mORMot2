@@ -2032,6 +2032,14 @@ implementation
 uses
   exeinfo; // cross-platform executable raw access for GDB DWARF support
 {$endif FPC}
+{$ifdef DELPHIPOSIX}
+uses  Posix.Stdio, // inline expand
+      Posix.Unistd, // inline expand
+      Posix.PThread, // inline expand
+      Posix.Errno, // inline expand
+      System.Types, // inline expand
+      System.SyncObjs; // inline expand
+{$endif DELPHIPOSIX}
 
 
 { ************** Debug Symbols Processing from Delphi .map or FPC/GDB DWARF }
@@ -4622,7 +4630,7 @@ type
     Name: TRawUtf8DynArray; // Name[ThreadNumber - 1] for ptIdentifiedInOneFile
     Count: integer; // as returned by TSynLog.ThreadCount
     IndexReleasedCount: integer;
-    IndexReleased: TWordDynArray; // reuse TSynLogThreadInfo.ThreadNumber
+    IndexReleased: mormot.core.base. TWordDynArray; // reuse TSynLogThreadInfo.ThreadNumber
   end;
   PSynLogThreads = ^TSynLogThreads;
 

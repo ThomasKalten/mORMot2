@@ -2460,6 +2460,11 @@ procedure MetricsToCsv(const Metrics: THttpAnalyzerToSaveDynArray;
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses Posix.UniStd, // inline expand
+     Posix.Stdio, // inline expand
+     System.SyncObjs; // inline expand
+{$endif DELPHIPOSIX}
 
 { ******************** Shared HTTP Constants and Functions }
 

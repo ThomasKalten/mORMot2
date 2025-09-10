@@ -2822,6 +2822,10 @@ function SetSystemSecurityDescriptor(const fn: TFileName;
 
 implementation
 
+ {$ifdef DELPHIPOSIX}
+uses  Mormot.core.posix.delphi;
+{$endif DELPHIPOSIX}
+
 
 { ****************** Security IDentifier (SID) Definitions }
 

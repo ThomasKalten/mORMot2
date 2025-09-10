@@ -725,6 +725,12 @@ type
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses Posix.UniStd, // inline expand
+     Posix.Pthread, // inline expand
+     System.SyncObjs, // inline expand
+     Mormot.core.posix.delphi; // inline expand
+{$endif DELPHIPOSIX}
 
 { **************** RSA Oriented Big-Integer Computation }
 

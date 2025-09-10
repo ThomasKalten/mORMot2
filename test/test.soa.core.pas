@@ -331,6 +331,10 @@ type
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses Posix.Pthread; // inline expand
+{$endif DELPHIPOSIX}
+
 { TServiceCalculator }
 
 type

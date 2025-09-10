@@ -156,6 +156,10 @@
 
 ********************** Conditionals **********************)
 
+{$IFNDEF FPC}
+  {$LEGACYIFEND ON} // hint seems to be emitted only on non-Windows targets
+{$ENDIF}
+
 
 {$ifdef FPC}
 
@@ -650,8 +654,6 @@
   {$warn SYMBOL_PLATFORM OFF}
   {$warn SYMBOL_DEPRECATED OFF}   // for faVolumeID
   {$warn UNIT_PLATFORM OFF}
-
-  {$LEGACYIFEND OFF}
 
   // -----------
   // -- identify CPU Architectures

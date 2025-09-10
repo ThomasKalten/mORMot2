@@ -2741,6 +2741,12 @@ procedure Sha256Weak(const s: RawByteString; out Digest: TSha256Digest);
 
 
 implementation
+{$ifdef DELPHIPOSIX}
+uses  Posix.Stdio, // inline expand
+      Posix.Unistd, // inline expand
+      System.SyncObjs, // inline expand
+      Mormot.core.posix.delphi; // inline expand
+{$endif DELPHIPOSIX}
 
 { ****************** Include Tuned INTEL/AMD Assembly }
 

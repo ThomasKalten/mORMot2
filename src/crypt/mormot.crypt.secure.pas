@@ -3900,6 +3900,10 @@ function SecurityDescriptorFromJson(const Json: RawUtf8;
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses Posix.Unistd, // inline expand
+     Mormot.core.posix.delphi; // inline expand
+{$endif DELPHIPOSIX}
 
 
 { **************** High-Level TSynSigner/TSynHasher Multi-Algorithm Wrappers }

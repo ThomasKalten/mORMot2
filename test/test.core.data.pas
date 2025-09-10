@@ -386,6 +386,10 @@ const
 
 implementation
 
+{$ifdef DELPHIPOSIX}
+Uses Mormot.core.posix.delphi; // inline expand
+{$endif DELPHIPOSIX}
+
 { TOrmTest }
 
 procedure TOrmTest.SetInt(const Value: int64);
