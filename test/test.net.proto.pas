@@ -1540,6 +1540,7 @@ var
   clientcb, servercb: ITunnelTransmit;
   clienttunnel, servertunnel: ITunnelLocal;
   sent, received, sent2, received2: RawByteString;
+  closed: PBoolean;
   i: integer;
   clientsock, serversock: TNetSocket;
   local, remote: TNetPort;
@@ -1552,12 +1553,14 @@ begin
   clientinstance.SignCert := clientcert;
   clientinstance.VerifyCert := servercert;
   clientinstance.LogClass := TSynLog;
+  clientinstance.VerboseLog := true;
   clienttunnel := clientinstance;
   clientcb := clientinstance;
   serverinstance := TTunnelLocalServer.Create;
   serverinstance.SignCert := servercert;
   serverinstance.VerifyCert := clientcert;
   serverinstance.LogClass := TSynLog;
+  serverinstance.VerboseLog := true;
   servertunnel := serverinstance;
   servercb := serverinstance;
   clienttunnel.SetTransmit(servercb); // set before Open()
@@ -1565,6 +1568,7 @@ begin
   // validate handshaking
   tunnelsession := Random32;
   tunnelappsec := RandomAnsi7(10);
+  tunnelexecutedone := false;
   TLoggedWorkThread.Create(
     TSynLog, 'servertunnel', serverinstance, TunnelExecute, TunnelExecuted);
   local := clientinstance.Open(
@@ -1631,6 +1635,9 @@ begin
     clientsock.ShutdownAndClose(true);
     serversock.ShutdownAndClose(true);
   end;
+  clientinstance.ClosePort;
+  closed := @serverinstance.Closed; // trick to access this propery by value
+  SleepHiRes(1000, closed^);
   servertunnel.SetTransmit(nil); // avoid memory leak due to circular references
 end;
 
@@ -1640,7 +1647,7 @@ var
   bak: TSynLogLevels;
 begin
   bak := TSynLog.Family.Level;
-  TSynLog.Family.Level := LOG_VERBOSE;
+  TSynLog.Family.Level := LOG_VERBOSE; // for LUTI debugging
   c := Cert('syn-es256').Generate([cuDigitalSignature]);
   s := Cert('syn-es256').Generate([cuDigitalSignature]);
   // plain tunnelling
