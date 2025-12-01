@@ -179,7 +179,7 @@ function IsString(P: PUtf8Char): boolean;
 // - e.g. IsStringJson('0')=false, IsStringJson('abc')=true,
 // but IsStringJson('null')=false
 // - will follow the JSON definition of number, i.e. '0123' is a string (since
-// '0' is excluded at the begining of a number) and '123' or '12.3' are no string
+// '0' is excluded at the beginning of a number) and '123' or '12.3' are no string
 function IsStringJson(P: PUtf8Char): boolean;
 
 /// test if the supplied text buffer seems to be a correct (extended) JSON value
@@ -5167,7 +5167,7 @@ end;
 
 procedure TJsonSaveContext.AddDateTime(Value: PDateTime; WithMS: boolean);
 var
-  d: double;
+  bak: TTextWriterOptions;
 begin
   if woDateTimeWithMagic in Options then
     W.AddShort4(JSON_SQLDATE_MAGIC_QUOTE_C)
@@ -5181,14 +5181,11 @@ begin
   end
   else
     W.Add('"');
-  d := unaligned(Value^);
-  W.AddDateTime(d, WithMS);
+  bak := W.CustomOptions;
   if woDateTimeWithZSuffix in Options then
-    if not (twoDateTimeWithZ in W.CustomOptions) then // if not already done
-      if frac(d) = 0 then // FireFox can't decode short form "2017-01-01Z"
-        W.AddShort('T00:00:00Z') // the same pattern for date and dateTime
-      else
-        W.AddDirect('Z');
+    include(W.fCustomOptions, twoDateTimeWithZ);
+  W.AddDateTime(Value, 'T', #0, WithMS);
+  W.CustomOptions := bak;
   W.AddDirect('"');
 end;
 
@@ -6471,41 +6468,33 @@ procedure TJsonWriter.AddFmt(Format: PUtf8Char; Values: PVarRec; ValuesCount: in
   Escape: TTextWriterKind; WriteObjectOptions: TTextWriterWriteObjectOptions);
 var
   start: PUtf8Char;
-  Len: PtrInt;
 begin
   if Format <> nil then
-  repeat
-    start := Format;
     repeat
-      if (Format^ = #0) or
-         (Format^ = '%') then
-        break;
+      start := Format;
+      repeat
+        if (Format^ = #0) or
+           (Format^ = '%') then
+          break;
+        inc(Format);
+      until false;
+      AddNoJsonEscape(start, Format - start);
+      if Format^ = #0 then
+        exit;
+      // add next value as text instead of Format^='%' placeholder
       inc(Format);
+      if ValuesCount <= 0 then
+        continue; // missing value will display nothing
+      if (Escape = twNone) or
+         (byte(Values^.VType) in vtNotString) then
+        AddVarRec(Values)
+      else
+        AddVarRec(Values, Escape, WriteObjectOptions);
+      if Format^ = #0 then
+        exit;
+      inc(Values);
+      dec(ValuesCount);
     until false;
-    Len := Format - start;
-    if Len <> 0 then
-    begin
-      if BEnd - B <= Len then  // note: PtrInt(BEnd - B) could be < 0
-        FlushToStream;
-      MoveFast(start^, B[1], Len); // append Format with no escaping
-      inc(B, Len);
-    end;
-    if Format^ = #0 then
-      exit;
-    // add next value as text instead of Format^='%' placeholder
-    inc(Format);
-    if ValuesCount <= 0 then
-      continue; // missing value will display nothing
-    if (Escape = twNone) or
-       (byte(Values^.VType) in vtNotString) then
-      AddVarRec(Values)
-    else
-      AddVarRec(Values, Escape, WriteObjectOptions);
-    if Format^ = #0 then
-      exit;
-    inc(Values);
-    dec(ValuesCount);
-  until false;
 end;
 
 procedure TJsonWriter.AddCsvUtf8(const Values: array of RawUtf8);
@@ -6635,6 +6624,7 @@ begin
   begin
     ctxt.W := self;
     ctxt.Options := WriteOptions; // other fields are just ignored
+    ctxt.Info := nil;
     save := VARIANT_JSONSAVE[vt];
     if Assigned(save) then
     begin
@@ -8076,12 +8066,18 @@ begin
 end;
 
 procedure _JL_DateTime(Data: PDateTime; var Ctxt: TJsonParserContext);
+var
+  d: TDateTime; // avoid EBusError on arm32
 begin
   if Ctxt.ParseNext then
     if Ctxt.WasString then
-      Iso8601ToDateTimePUtf8CharVar(Ctxt.Value, Ctxt.ValueLen, Data^)
-    else
-      UnixTimeOrDoubleToDateTime(Ctxt.Value, Ctxt.ValueLen, Data^); // also null
+      if Ctxt.Info.Cache.IsPureDate then // parse only 'Thhmmss' or 'hh:mm:ss'
+        Iso8601ToDatePUtf8CharVar(Ctxt.Value, Ctxt.ValueLen, TDate(d))
+      else
+        Iso8601ToDateTimePUtf8CharVar(Ctxt.Value, Ctxt.ValueLen, TDateTime(d))
+    else // also null
+      UnixTimeOrDoubleToDateTime(Ctxt.Value, Ctxt.ValueLen, TDateTime(d));
+  unaligned(Data^) := d;
 end;
 
 procedure _JL_Guid(Data: PGuid; var Ctxt: TJsonParserContext);
@@ -9824,7 +9820,7 @@ end;
 function TSynDictionary.DeleteDeprecated(tix64: Int64): integer;
 var
   i, tomove: PtrInt;
-  tix32: cardinal;
+  tix32, timeout32: cardinal;
 begin
   result := 0;
   if (self = nil) or
@@ -9841,8 +9837,10 @@ begin
   try
     fSafe.Padding[DIC_TIMETIX].VInteger := tix32;
     for i := fSafe.Padding[DIC_KEYCOUNT].VInteger - 1 downto 0 do
-      if (tix32 > fTimeOut[i]) and
-         (fTimeOut[i] <> 0) and
+    begin
+      timeout32 := fTimeOut[i];
+      if (tix32 > timeout32) and
+         (timeout32 <> 0) and
          (not Assigned(fOnCanDelete) or
           fOnCanDelete(fKeys.ItemPtr(i)^, fValues.ItemPtr(i)^, i)) then
       begin
@@ -9855,6 +9853,7 @@ begin
           MoveFast(fTimeOut[i + 1], fTimeOut[i], tomove * 4);
         inc(result);
       end;
+    end;
     if result <> 0 then
     begin
       if fSafe.Padding[DIC_KEYCOUNT].VInteger = 0 then

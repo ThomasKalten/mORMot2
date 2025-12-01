@@ -879,6 +879,7 @@ type
     /// append some UTF-8 chars, escaping all HTML special chars as expected
     procedure AddHtmlEscapeUtf8(const Text: RawUtf8;
       Fmt: TTextWriterHtmlFormat = hfAnyWhere);
+      {$ifdef HASINLINE}inline;{$endif}
     /// low-level function removing all &lt; &gt; &amp; &quot; HTML entities
     procedure AddHtmlUnescape(p, amp: PUtf8Char; plen: PtrUInt);
     /// low-level function removing all HTML <tag> and &entities;
@@ -2043,20 +2044,20 @@ procedure ConsoleShowFatalException(E: Exception; WaitForEnterKey: boolean = tru
 /// create a temporary string random content, WinAnsi (code page 1252) content
 function RandomWinAnsi(CharCount: integer): WinAnsiString;
 
-/// create a temporary UTF-8 string random content, using WinAnsi
-// (code page 1252) content
+/// create a temporary UTF-8 random string, from RandomWinAnsi() content
 // - CharCount is the number of random WinAnsi chars, so it is very likely that
 // length(result) > CharCount once encoded into UTF-8
 function RandomUtf8(CharCount: integer): RawUtf8;
 
-/// create a temporary UTF-16 string random content, using WinAnsi
-// (code page 1252) content
+/// create a temporary UTF-16 random string, from RandomWinAnsi() content
 function RandomUnicode(CharCount: integer): SynUnicode;
 
-/// create a temporary string random content, using ASCII 7-bit content
+/// create a temporary string random content, using only ASCII 7-bit chars
+// - e.g. RandomAnsi7(10) = '1d2I(\?U; ' (from #$20 space to #$7e tilde)
 function RandomAnsi7(CharCount: integer; CodePage: integer = CP_UTF8): RawByteString;
 
 /// create a temporary string random content, using A..Z,_,0..9 chars only
+// - for a strong password, use safer TAesPrng.Main.RandomPassword method
 function RandomIdentifier(CharCount: integer): RawUtf8;
 
 /// create a temporary string random content, using uri-compatible chars only
@@ -2745,13 +2746,13 @@ function UuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
 // $ { "Uid": "C9A646D3-9C61-4CB7-BFCD-EE2522C8F633" }
 function TextToGuid(P: PUtf8Char; Guid: PByteArray): PUtf8Char;
 
-/// convert some RTL string text into a TGuid
+/// convert some GUID or UUID RTL string text into a TGuid binary variable
 // - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // - return {00000000-0000-0000-0000-000000000000} if the supplied text buffer
 // is not a valid TGuid
 function StringToGuid(const text: string): TGuid;
 
-/// convert some UTF-8 encoded text into a TGuid
+/// convert some GUID or UUID UTF-8 encoded text into a TGuid binary variable
 // - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
 // '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
@@ -2759,13 +2760,13 @@ function StringToGuid(const text: string): TGuid;
 // is not a valid TGuid
 function RawUtf8ToGuid(const text: RawByteString): TGuid; overload;
 
-/// convert some UTF-8 encoded text into a TGuid
+/// convert some GUID or UUID UTF-8 encoded text into a TGuid binary variable
 // - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
 // '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
 function RawUtf8ToGuid(const text: RawByteString; out guid: TGuid): boolean; overload;
 
-/// convert some UTF-8 encoded text into a TGuid
+/// convert some GUID or UUID UTF-8 encoded text into a TGuid binary variable
 // - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
 // '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
@@ -6044,7 +6045,7 @@ begin
       beg := Text;
       repeat
         while true do
-          if esc[Text^] = 0 then
+          if esc[Text^] = 0 then // this loop is faster than TextLen overload
             inc(Text)
           else
             break;
@@ -6058,7 +6059,7 @@ begin
       until Text^ = #0;
     end
     else
-      AddNoJsonEscape(Text, mormot.core.base.StrLen(Text)); // hfNone
+      AddNoJsonEscape(Text); // hfNone
 end;
 
 procedure TTextWriter.AddHtmlEscape(Text: PUtf8Char; TextLen: PtrInt;
@@ -6067,29 +6068,27 @@ var
   beg: PUtf8Char;
   esc: PAnsiCharToByte;
 begin
-  if (Text = nil) or
-     (TextLen <= 0) then
-    exit;
-  if Fmt = hfNone then
-  begin
-    AddNoJsonEscape(Text, TextLen);
-    exit;
-  end;
-  inc(TextLen, PtrInt(Text)); // TextLen = final PtrInt(Text)
-  esc := @HTML_ESC[Fmt];
-  repeat
-    beg := Text;
-    while (PtrUInt(Text) < PtrUInt(TextLen)) and
-          (esc[Text^] = 0) do
-      inc(Text);
-    AddNoJsonEscape(beg, Text - beg);
-    if (PtrUInt(Text) = PtrUInt(TextLen)) or
-       (Text^ = #0) then
-      exit
+  if (Text <> nil) and
+     (TextLen > 0) then
+    if Fmt <> hfNone then
+    begin
+      inc(TextLen, PtrInt(Text)); // TextLen = final PtrInt(Text)
+      esc := @HTML_ESC[Fmt];
+      repeat
+        beg := Text;
+        while (PtrUInt(Text) < PtrUInt(TextLen)) and
+              (esc[Text^] = 0) do
+          inc(Text);
+        AddNoJsonEscape(beg, Text - beg);
+        if (PtrUInt(Text) = PtrUInt(TextLen)) or
+           (Text^ = #0) then
+          break;
+        AddShorter(HTML_ESCAPED[esc[Text^]]);
+        inc(Text);
+      until false;
+    end
     else
-      AddShorter(HTML_ESCAPED[esc[Text^]]);
-    inc(Text);
-  until false;
+      AddNoJsonEscape(Text, TextLen); // hfNone
 end;
 
 procedure TTextWriter.AddHtmlEscapeW(Text: PWideChar; Fmt: TTextWriterHtmlFormat);
@@ -6097,29 +6096,34 @@ var
   tmp: TSynTempBuffer;
 begin
   if Text <> nil then
-    if Fmt = hfNone then
-      AddNoJsonEscapeW(pointer(Text))
-    else
+    if Fmt <> hfNone then
     begin
-      RawUnicodeToUtf8(Text, StrLenW(Text), tmp, [ccfNoTrailingZero]);
-      AddHtmlEscape(tmp.buf, tmp.Len, Fmt);
+      RawUnicodeToUtf8(Text, mormot.core.base.StrLenW(Text), tmp, []);
+      AddHtmlEscape(tmp.buf, Fmt); // faster with no TextLen
       tmp.Done;
-    end;
+    end
+    else
+      AddNoJsonEscapeW(pointer(Text)); // seldom called
 end;
 
 procedure TTextWriter.AddHtmlEscapeString(const Text: string; Fmt: TTextWriterHtmlFormat);
 var
   tmp: TSynTempBuffer;
-  len: integer;
 begin
-  len := StringToUtf8(Text, tmp);
-  AddHtmlEscape(tmp.buf, len, Fmt);
+  AddHtmlEscape(StringToUtf8Temp(Text, tmp), tmp.len, Fmt);
   tmp.Done;
 end;
 
 procedure TTextWriter.AddHtmlEscapeUtf8(const Text: RawUtf8; Fmt: TTextWriterHtmlFormat);
+var
+  p: PUtf8Char;
 begin
-  AddHtmlEscape(pointer(Text), length(Text), Fmt);
+  p := pointer(Text);
+  if p <> nil then
+    if Fmt <> hfNone then
+      AddHtmlEscape(p, Fmt) // faster with no TextLen
+    else
+      AddNoJsonEscapeBig(p, PStrLen(p - _STRLEN)^) // seldom called
 end;
 
 procedure TTextWriter.AddHtmlUnescape(p, amp: PUtf8Char; plen: PtrUInt);
@@ -6439,7 +6443,7 @@ var
   amp: PUtf8CHar;
   temp: TTextWriterStackBuffer;
 begin
-  amp := PosChar(pointer(text), length(text), '&');
+  amp := PosCharU(text, '&');
   if amp = nil then
   begin
     result := text; // nothing to change
@@ -6460,7 +6464,7 @@ var
   tag: PUtf8CHar;
   temp: TTextWriterStackBuffer;
 begin
-  tag := PosChar(pointer(text), length(text), '<');
+  tag := PosCharU(text, '<');
   if tag = nil then
   begin
     result := HtmlUnescape(text); // no tag, but there may be some &entity;
@@ -10093,6 +10097,7 @@ end;
 function Make(const Args: array of const): RawUtf8;
 var
   f: TFormatUtf8;
+  new: PUtf8Char;
 begin
   if high(Args) = 0 then
   begin
@@ -10102,24 +10107,33 @@ begin
   {%H-}f.Init;
   f.AddVarRec(@Args[0], length(Args));
   if f.L <> 0 then
-    f.WriteAll(FastSetString(result, f.L), @f.blocks)
+  begin
+    new := FastNewString(f.L, CP_UTF8); // inlined FastSetString()
+    f.WriteAll(new, @f.blocks);
+  end
   else
-    FastAssignNew(result);
+    new := nil;
+  FastAssignNew(result, new);
 end;
 
 procedure Make(const Args: array of const; var Result: RawUtf8;
   const IncludeLast: RawUtf8);
 var
   f: TFormatUtf8;
+  new: PUtf8Char;
 begin
   {%H-}f.Init;
   f.AddVarRec(@Args[0], length(Args));
   if IncludeLast <> '' then
     f.AddText(IncludeLast);
   if f.L <> 0 then
-    f.WriteAll(FastSetString(result, f.L), @f.blocks)
+  begin
+    new := FastNewString(f.L, CP_UTF8); // inlined FastSetString()
+    f.WriteAll(new, @f.blocks);
+  end
   else
-    FastAssignNew(result);
+    new := nil;
+  FastAssignNew(Result, new);
 end;
 
 function MakeString(const Args: array of const): string;
@@ -10303,7 +10317,7 @@ var
 begin
   R := RandomByteString(CharCount, result, CodePage);
   for i := 0 to CharCount - 1 do
-    R[i] := (R[i] mod 95) + 32; // may include tilde #$7e (#126) char
+    R[i] := (R[i] mod 95) + 32; // [' ' .. #$7e] (#126=tilde) range
 end;
 
 procedure InitRandom64(chars64: PAnsiChar; count: integer; var result: RawUtf8);
@@ -10720,7 +10734,7 @@ const
    'HTTP Version Not Supported',        // HTTP_HTTPVERSIONNONSUPPORTED
    'Network Authentication Required',   // 511
    'Client Side Connection Error',      // HTTP_CLIENTERROR = 666
-   'Invalid Request');                  // 513 should be last INDEX_HTTP_INVALID
+   'Invalid Request');                  // last INDEX_HTTP_INVALID = 513
   HTTP_CODE: array[0 .. INDEX_HTTP_INVALID] of word = ( // match HTTP_REASON[]
     HTTP_SUCCESS,
     HTTP_NOCONTENT,

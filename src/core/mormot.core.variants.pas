@@ -647,7 +647,7 @@ type
     // !  ...
     class procedure NewFast(out aValue: variant;
       aKind: TDocVariantKind = dvUndefined); overload;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifndef VER370inlinebug}{$ifdef HASINLINE}inline;{$endif}{$endif} // Delphi 13 bug
     /// ensure a variant is a TDocVariant instance
     // - if aValue is not a TDocVariant, will create a new JSON_FAST
     class procedure IsOfTypeOrNewFast(var aValue: variant);
@@ -1004,7 +1004,7 @@ type
       {$ifdef HASSAFEINLINE}inline;{$endif}
     procedure InternalUniqueValueAt(aIndex: PtrInt);
     function InternalNextPath(aCsv: PUtf8Char; aPathDelim: AnsiChar;
-      out aLen: PtrInt): PtrInt; {$ifdef FPC}inline;{$endif}
+      out aLen: PtrInt): PtrInt; {$ifdef FPC} inline; {$endif}
     procedure InternalNotFound(var Dest: variant; aName: PUtf8Char); overload;
     procedure InternalNotFound(var Dest: variant; aIndex: integer); overload;
     function InternalNotFound(aName: PUtf8Char): PVariant; overload;
@@ -1448,6 +1448,9 @@ type
     function Equals(const aName: RawUtf8; const aValue: variant;
       aCaseInsensitive: boolean = false): boolean; overload;
       {$ifdef ISDELPHI}{$ifdef HASINLINE}inline;{$endif}{$endif}
+    /// compare a TTDocVariantData object property with a given text value
+    function CompareText(const aName, aValue: RawUtf8;
+      aCaseInsensitive: boolean = false): integer;
     /// low-level method called internally to reserve place for new values
     // - returns the index of the newly created item in Values[]/Names[] arrays
     // - you should not have to use it, unless you want to add some items
@@ -1628,13 +1631,13 @@ type
     /// find an item index in this document from its name
     // - search will follow dvoNameCaseSensitive option of this document
     // - lookup the value by name for an object document, or accept an integer
-    // text as index for an array document
+    // text (e.g. '0') as index for an array document (-# to count from the end)
     // - returns -1 if not found
     function GetValueIndex(const aName: RawUtf8): integer; overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// find an item index in this document from its name
     // - lookup the value by name for an object document, or accept an integer
-    // text as index for an array document
+    // text as index for an array document (-# to count from the end)
     // - returns -1 if not found
     function GetValueIndex(aName: PUtf8Char; aNameLen: PtrInt;
       aCaseSensitive: boolean): integer; overload;
@@ -1761,14 +1764,16 @@ type
     function GetAsPVariant(aName: PUtf8Char; aNameLen: PtrInt): PVariant; overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// retrieve a value, given its path
-    // - path is defined as a dotted name-space, e.g. 'doc.glossary.title'
+    // - path is defined as a dotted name-space, e.g. 'doc.glossary.title',
+    // or 'array.0.field', and could be of another type (e.g. TBsonVariant)
     // - return Unassigned (varEmpty) if there is no item at the supplied aPath
     // - you can set e.g. aPathDelim = '/' to search e.g. for 'parent/child'
     // - see also the P[] property if the default aPathDelim = '.' is enough
     function GetValueByPath(
       const aPath: RawUtf8; aPathDelim: AnsiChar = '.'): variant; overload;
     /// retrieve a value, given its path
-    // - path is defined as a dotted name-space, e.g. 'doc.glossary.title'
+    // - path is defined as a dotted name-space, e.g. 'doc.glossary.title',
+    // or 'array.0.field', and could be of another type (e.g. TBsonVariant)
     // - returns FALSE if there is no item at the supplied aPath
     // - returns TRUE and set the found value in aValue
     // - you can set e.g. aPathDelim = '/' to search e.g. for 'parent/child'
@@ -1777,21 +1782,25 @@ type
       aPathDelim: AnsiChar = '.'): boolean; overload;
     /// retrieve a value, given its path
     // - path is defined as a list of names, e.g. ['doc','glossary','title']
+    // - all items on this path are expected to be only dvObject until the value
     // - return Unassigned (varEmpty) if there is no item at the supplied aPath
-    // - this method will only handle nested TDocVariant values: use the
-    // slightly slower GetValueByPath() overloaded method, if any nested object
-    // may be of another type (e.g. a TBsonVariant)
     function GetValueByPath(const aDocVariantPath: array of RawUtf8): variant; overload;
     /// retrieve a reference to a value, given its path
     // - path is defined as a dotted name-space, e.g. 'doc.glossary.title'
     // - if the supplied aPath does not match any object, it will return nil
     // - if aPath is found, returns a pointer to the corresponding value
     // - you can set e.g. aPathDelim = '/' to search e.g. for 'parent/child'
+    // - this method will only handle nested TDocVariant values: use the
+    // slightly slower GetValueByPath() overloaded methods, if any nested object
+    // may be of another type (e.g. a TBsonVariant)
     function GetPVariantByPath(const aPath: RawUtf8;
       aPathDelim: AnsiChar = '.'): PVariant;
     /// retrieve a reference to a value, given its path
     // - if the supplied aPath does not match any object, it will follow
     // dvoReturnNullForUnknownProperty option
+    // - this method will only handle nested TDocVariant values: use the
+    // slightly slower GetValueByPath() overloaded methods, if any nested object
+    // may be of another type (e.g. a TBsonVariant)
     function GetPVariantExistingByPath(const aPath: RawUtf8;
       aPathDelim: AnsiChar = '.'): PVariant;
     /// retrieve a reference to a TDocVariant, given its path
@@ -1831,7 +1840,7 @@ type
     // range and dvoReturnNullForUnknownProperty is set in Options
     // - create a copy of the variant by default, unless DestByRef is TRUE
     procedure RetrieveValueOrRaiseException(Index: integer;
-     var Dest: variant; DestByRef: boolean); overload;
+      var Dest: variant; DestByRef: boolean); overload;
     /// retrieve an item in this document from its index, and returns its Name
     // - raise an EDocVariant if the supplied Index is not in the 0..Count-1
     // range and dvoReturnNullForUnknownProperty is set in Options
@@ -1964,6 +1973,10 @@ type
     // - you can specify an optional index in the array where to insert
     // - returns the index of the corresponding newly added item
     function AddItemText(const aValue: RawUtf8; aIndex: integer = -1): integer;
+    /// add an item in this array document from a real value and its associated RTTI
+    // - returns the index of the corresponding newly added item
+    function AddItemRtti(aItem: pointer; aRtti: TRttiCustom;
+      aIndex: integer = -1): integer;
     /// add one or several values to this document, handled as array
     // - if instance's Kind is dvObject, it will raise an EDocVariant exception
     procedure AddItems(const aValue: array of const);
@@ -2265,15 +2278,11 @@ type
     property Names: TRawUtf8DynArray
       read VName;
     /// find an item in this document, and returns its value
+    // - dvObject will lookup by name using aNameOrIndex string
+    // - dvObjet and dvArray will lookup by index using aNameOrIndex integer,
+    // using -1,-2,... to count the index backwards
     // - raise an EDocVariant if aNameOrIndex is neither an integer nor a string
-    // - raise an EDocVariant if Kind is dvArray and aNameOrIndex is a string
-    // or if Kind is dvObject and aNameOrIndex is an integer
-    // - raise an EDocVariant if Kind is dvObject and if aNameOrIndex is a
-    // string, which is not found within the object property names and
-    // dvoReturnNullForUnknownProperty is set in Options
-    // - raise an EDocVariant if Kind is dvArray and if aNameOrIndex is a
-    // integer, which is not within 0..Count-1 and dvoReturnNullForUnknownProperty
-    // is set in Options
+    // or on failed lookup if dvoReturnNullForUnknownProperty Options is not set
     // - so you can use directly:
     // ! // for an array document:
     // ! aVariant := TDocVariant.NewArray(['one',2,3.0]);
@@ -2293,11 +2302,11 @@ type
     // but of course, if want to want to access the content by index (typically
     // for a dvArray), using Values[] - and Names[] - properties is much faster
     // than this variant-indexed pseudo-property:
-    // ! with TDocVariantData(aVariant) do
+    // ! with _Safe(aVariant)^ do
     // !   for i := 0 to Count-1 do
     // !     Writeln(Values[i]);
     // is faster than:
-    // ! with TDocVariantData(aVariant) do
+    // ! with _Safe(aVariant)^ do
     // !   for i := 0 to Count-1 do
     // !     Writeln(Value[i]);
     // which is faster than:
@@ -3210,11 +3219,11 @@ type
     function AsList: IDocList;
     /// returns itself as a IDocDic, or nil if is a IDocList
     function AsDict: IDocDict;
-    /// returns the associated TDocVariant instance
+    /// returns the associated TDocVariant instance as a variant
     function AsVariant: variant;
     /// low-level access to the internal TDocVariantData storage
-    // - warning: is a weak reference pointer to the main IDocList/IDocDict, so
-    // you need to copy it to use it outside of this instance
+    // - warning: is a weak reference to the internal TDocVariant, so you need
+    // to copy its value to use it without this main IDocList/IDocDict instance
     function Value: PDocVariantData;
   end;
 
@@ -3725,6 +3734,10 @@ function DocDictCopy(const v: variant): IDocDict; overload;
 // and a specific options model
 function DocDictCopy(const dv: TDocVariantData;
   model: TDocVariantModel): IDocDict; overload;
+
+/// create a self-owned IDocDict/IDocList from a JSON object/array content
+// - if json is something else than an object or array, returns nil
+function DocAny(const json: RawUtf8; model: TDocVariantModel): IDocAny;
 
 var
   /// default TDocVariant model for IDocList/IDocDict
@@ -4326,7 +4339,7 @@ end;
 
 function SortDynArrayWordBoolean(const A, B): integer;
 begin
-  if WordBool(A) then // normalize
+  if WordBool(A) then // normalize (an OLE WordBool may be $ffff)
     if WordBool(B) then
       result := 0
     else
@@ -5143,7 +5156,7 @@ begin
     result := true
   else
   begin
-    ndx := dv.GetValueIndex(pointer(Name), NameLen, dv.IsCaseSensitive);
+    ndx := dv.GetValueIndex(pointer(Name), NameLen, dv.Has(dvoNameCaseSensitive));
     if ndx < 0 then
       if NoException or
          dv.Has(dvoReturnNullForUnknownProperty) then
@@ -5175,7 +5188,7 @@ begin
     dv.AddItem(variant(Value));
     exit;
   end;
-  ndx := dv.GetValueIndex(pointer(Name), NameLen, dv.IsCaseSensitive);
+  ndx := dv.GetValueIndex(pointer(Name), NameLen, dv.Has(dvoNameCaseSensitive));
   if ndx < 0 then
     if dv.IsArray then
       exit // avoid EDocVariant in dv.InternalAddBuf()
@@ -5304,7 +5317,7 @@ begin
       begin
         temp := ToUtf8(Arguments[0]);
         Data.RetrieveValueOrRaiseException(pointer(temp), length(temp),
-          Data.IsCaseSensitive, variant(Dest), true);
+          Data.Has(dvoNameCaseSensitive), variant(Dest), true);
         exit;
       end;
   end;
@@ -7183,7 +7196,7 @@ begin // hash all [names and] values in-place with no memory allocation
   if IsObject then
   begin
     propname := pointer(VName);
-    prophasher := DynArrayHashOne(ptRawUtf8, not IsCaseSensitive); // =Compare()
+    prophasher := DynArrayHashOne(ptRawUtf8, not Has(dvoNameCaseSensitive));
   end;
   v := pointer(VValue);
   repeat
@@ -7222,7 +7235,7 @@ begin
     if not Another.IsObject then
       exit
     else
-      nameCmp := SortDynArrayAnsiStringByCase[not IsCaseSensitive];
+      nameCmp := SortDynArrayAnsiStringByCase[not Has(dvoNameCaseSensitive)];
   // compare as many in-order content as possible
   n := Another.VCount;
   if VCount < n then
@@ -7305,6 +7318,16 @@ begin
   result := (cardinal(VType) = DocVariantVType) and
             GetObjectProp(aName, v{%H-}, nil) and
             (FastVarDataComp(@aValue, pointer(v), aCaseInsensitive) = 0);
+end;
+
+function TDocVariantData.CompareText(const aName, aValue: RawUtf8;
+  aCaseInsensitive: boolean): integer;
+var
+  t: TSynVarData;
+begin
+  t.VType := varString;
+  t.VAny := pointer(aValue);
+  result := Compare(aName, PVariant(@t)^, aCaseInsensitive);
 end;
 
 function TDocVariantData.InternalAddBuf(aName: PUtf8Char; aNameLen: PtrInt): PtrInt;
@@ -7741,6 +7764,18 @@ begin
     RawUtf8ToVariant(aValue, VValue[result]); // always RawUtf8
 end;
 
+function TDocVariantData.AddItemRtti(aItem: pointer; aRtti: TRttiCustom;
+  aIndex: integer): integer;
+begin
+  result := -1;
+  if IsObject then
+    exit;
+  result := InternalAdd('', aIndex);
+  if (aItem <> nil) and
+     (aRtti <> nil) then
+    aRtti.ValueToVariant(aItem, PVarData(@VValue[result])^, @VOptions);
+end;
+
 procedure TDocVariantData.AddItems(const aValue: array of const);
 var
   ndx, added: PtrInt;
@@ -7799,12 +7834,12 @@ begin
   begin // optimistic try if this field appears at the same position
     ndx := aPreviousIndex^;
     if (PtrUInt(ndx) >= PtrUInt(n)) or
-       (SortDynArrayAnsiStringByCase[not IsCaseSensitive](
+       (SortDynArrayAnsiStringByCase[not Has(dvoNameCaseSensitive)](
          VName[ndx], aName) <> 0) then
       ndx := -1;
   end;
   if ndx < 0 then
-    ndx := FindNonVoid[IsCaseSensitive](pointer(VName),
+    ndx := FindNonVoid[Has(dvoNameCaseSensitive)](pointer(VName),
       pointer(aName), PStrLen(PAnsiChar(pointer(aName)) - _STRLEN)^, n);
   if ndx < 0 then
     exit;
@@ -8124,7 +8159,7 @@ begin
   if Assigned(aNameSortedCompare) then // just like GetVarData() searches names
     namecomp := aNameSortedCompare
   else
-    namecomp := StrCompByCase[not Doc^.IsCaseSensitive];
+    namecomp := StrCompByCase[not Doc^.Has(dvoNameCaseSensitive)];
   for f := 0 to Depth do
   begin
     if aPropNames[f] = '' then
@@ -8742,27 +8777,30 @@ end;
 function TDocVariantData.InternalNextPath(aCsv: PUtf8Char; aPathDelim: AnsiChar;
   out aLen: PtrInt): PtrInt;
 var
-  c: PUtf8Char;
+  csvEnd: PUtf8Char;
 begin
-  c := aCsv;
-  if c <> nil then
+  csvEnd := aCsv;
+  if csvEnd <> nil then
     while true do
-      if (c^ = #0) or
-         (c^ = aPathDelim) then // aPathDelim = #0 e.g. from Merge()
+      if (csvEnd^ = #0) or
+         (csvEnd^ = aPathDelim) then // aPathDelim = #0 e.g. from Merge()
         break
       else
-        inc(c);
-  aLen := c - aCsv;
+        inc(csvEnd);
+  aLen := csvEnd - aCsv;
   if (aLen <> 0) and
      (VCount <> 0) then
     if VName <> nil then // search dvoObject property name
     begin
-      result := FindNonVoid[IsCaseSensitive](pointer(VName), aCsv, aLen, VCount);
+      result := FindNonVoid[Has(dvoNameCaseSensitive)](
+        pointer(VName), aCsv, aLen, VCount);
       exit;
     end
-    else if aCsv^ in ['0' .. '9'] then // path is index for dvoArray
+    else if aCsv^ in ['-', '0' .. '9'] then // path is index for dvoArray
     begin
-      result := GetCardinal(aCsv, c);
+      result := GetInteger(aCsv, csvEnd);
+      if result < 0 then
+        inc(result, VCount); // -1,-2,-3... to lookup from end of array
       if PtrUInt(result) < PtrUInt(VCount) then // array index integer as text
         exit;
     end;
@@ -8819,7 +8857,7 @@ begin
     exit;
   dv := @self;
   repeat
-    ndx := dv^.InternalNextPath(csv, aPathDelim, len);
+    ndx := dv^.InternalNextPath(csv, aPathDelim, len); // inlined on FPC
     if ndx < 0 then
       exit;
     inc(csv, len);
@@ -8896,38 +8934,37 @@ end;
 
 function TDocVariantData.Exists(const aName: RawUtf8): boolean;
 begin
-  result := GetValueIndex(pointer(aName), Length(aName), IsCaseSensitive) >= 0;
+  result := GetValueIndex(pointer(aName), Length(aName), Has(dvoNameCaseSensitive)) >= 0;
 end;
 
 function TDocVariantData.GetValueIndex(aName: PUtf8Char; aNameLen: PtrInt;
   aCaseSensitive: boolean): integer;
 var
-  err: integer;
+  ndx: integer;
 begin
+  result := -1;
   if (cardinal(VType) = DocVariantVType) and
      (aNameLen > 0) and
      (aName <> nil) and
      (VCount > 0) then
-    if IsArray then
-    begin
-      // try index integer as text, for lookup in array document
-      result := GetInteger(aName, err);
-      if (err <> 0) or
-         (cardinal(result) >= cardinal(VCount)) then
-        result := -1;
-    end
-    else
-      // O(n) lookup for name -> efficient brute force sub-functions
+    if VName <> nil then
+      // O(n) object lookup for name -> efficient brute force sub-functions
       result := FindNonVoid[aCaseSensitive](pointer(VName), aName, aNameLen, VCount)
-  else
-    result := -1;
+    else if aName[0] in ['-', '0'..'9'] then // array index as integer text
+    begin
+      ndx := GetInteger(aName, aName + aNameLen);
+      if ndx < 0 then
+        inc(ndx, VCount); // -1,-2,-3... to lookup from end of array
+      if cardinal(ndx) < cardinal(VCount) then
+        result := ndx;
+    end;
 end;
 
 function TDocVariantData.GetValueOrRaiseException(
   const aName: RawUtf8): variant;
 begin
   RetrieveValueOrRaiseException(
-    pointer(aName), length(aName), IsCaseSensitive, result, false);
+    pointer(aName), length(aName), Has(dvoNameCaseSensitive), result, false);
 end;
 
 function TDocVariantData.GetValueOrDefault(const aName: RawUtf8;
@@ -9100,7 +9137,7 @@ function TDocVariantData.GetAsPVariant(
 var
   ndx: PtrInt;
 begin
-  ndx := GetValueIndex(aName, aNameLen, IsCaseSensitive);
+  ndx := GetValueIndex(aName, aNameLen, Has(dvoNameCaseSensitive));
   if ndx >= 0 then
     result := @VValue[ndx]
   else
@@ -9124,15 +9161,14 @@ begin
   end
   else
   begin
-    if Assigned(aSortedCompare) then
-      if @aSortedCompare = @StrComp then
-        // use dedicated (branchless x86_64 asm) function for StrComp()
+    if Assigned(aSortedCompare) then // faster O(log(n)) binary search
+      if @aSortedCompare = @StrComp then // use dedicated branchless/asm function
         ndx := FastFindPUtf8CharSorted(pointer(VName), VCount - 1, pointer(aName))
       else
         ndx := FastFindPUtf8CharSorted(
           pointer(VName), VCount - 1, pointer(aName), aSortedCompare)
     else
-      ndx := FindNonVoid[IsCaseSensitive](pointer(VName),
+      ndx := FindNonVoid[Has(dvoNameCaseSensitive)](pointer(VName),
         pointer(aName), PStrLen(PAnsiChar(pointer(aName)) - _STRLEN)^, VCount);
     if aFoundIndex <> nil then
       aFoundIndex^ := ndx;
@@ -9413,8 +9449,8 @@ procedure TDocVariantData.SetValueOrRaiseException(Index: integer;
   const NewValue: variant);
 begin
   if cardinal(Index) >= cardinal(VCount) then
-    EDocVariant.RaiseUtf8('Out of range Values[%] (count=%)', [Index, VCount]);
-  VValue[Index] := NewValue;
+    EDocVariant.RaiseUtf8('Out of range Value[%] (count=%)', [Index, VCount]);
+  InternalSetValue(Index, NewValue);
 end;
 
 function TDocVariantData.SetValueByPath(const aPath: RawUtf8;
@@ -9426,13 +9462,11 @@ var
   ndx, len: PtrInt;
 begin
   result := nil;
-  if IsArray then
-    exit;
   csv := pointer(aPath);
   v := @self;
   // work with aPathDelim = #0 e.g. from Merge()
   repeat
-    ndx := v^.InternalNextPath(csv, aPathDelim, len);
+    ndx := v^.InternalNextPath(csv, aPathDelim, len); // inlined on FPC
     if csv[len] = #0 then
       break; // reached the last item of the path, which is the value to set
     if ndx < 0 then
@@ -9514,50 +9548,59 @@ end;
 
 function TDocVariantData.GetValueOrItem(const aNameOrIndex: variant): variant;
 var
+  ndx: integer;
   wasString: boolean;
-  Name: RawUtf8;
+  name: TTempUtf8; // no memory allocation most of the time
 begin
-  if IsArray then
-    // fast index lookup e.g. for Value[1]
-    RetrieveValueOrRaiseException(
-      VariantToIntegerDef(aNameOrIndex, -1), result, true)
+  if VariantToInteger(aNameOrIndex, ndx) then
+  begin
+    if ndx < 0 then
+      inc(ndx, VCount); // -1,-2,-3... to lookup from end of array or object
+  end
   else
   begin
-    // by name lookup e.g. for Value['abc']
-    VariantToUtf8(aNameOrIndex, Name, wasString);
-    if wasString then
-      RetrieveValueOrRaiseException(
-        pointer(Name), length(Name), IsCaseSensitive, result, true)
-    else
-      RetrieveValueOrRaiseException(
-        GetIntegerDef(pointer(Name), -1), result, true);
+    ndx := -1;
+    if VName <> nil then
+    begin
+      VariantToTempUtf8(aNameOrIndex, name, wasString);
+      if name.Text <> nil then
+        ndx := FindNonVoid[Has(dvoNameCaseSensitive)](pointer(VName),
+          name.Text, name.Len, VCount);
+      TempUtf8Done(name);
+    end;
   end;
+  if cardinal(ndx) >= cardinal(VCount) then
+    if Has(dvoReturnNullForUnknownProperty) then
+      SetVariantNull(result)
+    else
+      EDocVariant.RaiseUtf8('Value[%] property not found', [aNameOrIndex])
+  else
+    SetVariantByRef(VValue[ndx], result);
 end;
 
 procedure TDocVariantData.SetValueOrItem(const aNameOrIndex, aValue: variant);
 var
-  wasString: boolean;
   ndx: integer;
-  Name: RawUtf8;
+  wasString: boolean;
+  name: RawUtf8; // use a true variable for InternalAdd()
 begin
-  if IsArray then
-    // fast index lookup e.g. for Value[1]
-    SetValueOrRaiseException(VariantToIntegerDef(aNameOrIndex, -1), aValue)
-  else
+  if VariantToInteger(aNameOrIndex, ndx) then
   begin
-    // by name lookup e.g. for Value['abc']
-    VariantToUtf8(aNameOrIndex, Name, wasString);
-    if wasString then
-    begin
-      ndx := GetValueIndex(Name);
-      if ndx < 0 then
-        ndx := InternalAdd(Name);
-      InternalSetValue(ndx, aValue);
-    end
-    else
-      SetValueOrRaiseException(
-        VariantToIntegerDef(aNameOrIndex, -1), aValue);
+    if ndx < 0 then
+      inc(ndx, VCount); // -1,-2,-3... to lookup from end of array or object
+    SetValueOrRaiseException(ndx, aValue);
+    exit;
   end;
+  VariantToUtf8(aNameOrIndex, name, wasString);
+  if name = '' then
+    EDocVariant.RaiseU('Unexpected set Value['''']');
+  ndx := -1;
+  if VName <> nil then
+    ndx := FindNonVoid[Has(dvoNameCaseSensitive)](pointer(VName),
+      pointer(name), PStrLen(PAnsiChar(pointer(name)) - _STRLEN)^, VCount);
+  if ndx < 0 then
+    ndx := InternalAdd(name);
+  InternalSetValue(ndx, aValue);
 end;
 
 function TDocVariantData.AddOrUpdateValue(const aName: RawUtf8;
@@ -11574,6 +11617,20 @@ begin
   result := d;
 end;
 
+{ IDocAny factories functions }
+
+function DocAny(const json: RawUtf8; model: TDocVariantModel): IDocAny;
+begin
+  case GetFirstJsonToken(pointer(json)) of
+    jtObjectStart:
+      result := DocDict(json, model);
+    jtArrayStart:
+      result := DocList(json, model);
+  else
+    result := nil;
+  end;
+end;
+
 
 { TDocAny }
 
@@ -11715,7 +11772,7 @@ begin
   ndx := position;
   n := fValue^.VCount;
   if position < 0 then
-    inc(ndx, n);
+    inc(ndx, n); // -1,-2... = position from the end of list
   if ndx >= n then
     EDocList.RaiseUtf8('Index % out of range (len=%)', [position, n]);
   result := @fValue^.VValue[ndx];
@@ -12027,7 +12084,7 @@ end;
 function TDocList.Reduce(const keys: array of RawUtf8): IDocList;
 begin
   result := DocList(Model);
-  fValue^.Reduce(keys, fValue^.IsCaseSensitive, result.Value^);
+  fValue^.Reduce(keys, fValue^.Has(dvoNameCaseSensitive), result.Value^);
 end;
 
 function TDocList.Remove(const value: variant): integer;
@@ -12236,7 +12293,7 @@ end;
 function TDocDict.GetValueAt(const key: RawUtf8; out value: PVariant): boolean;
 begin
   if fPathDelim = #0 then
-    value := pointer(fValue^.GetVarData(key, fSorted)) // faster
+    value := pointer(fValue^.GetVarData(key, fSorted)) // faster if sorted
   else
     value := fValue^.GetPVariantByPath(key, fPathDelim);
   result := value <> nil; // return false if not found
@@ -12565,7 +12622,7 @@ end;
 function TDocDict.Reduce(const keys: array of RawUtf8): IDocDict;
 begin
   result := TDocDict.CreateOwned;
-  fValue^.Reduce(keys, fValue^.IsCaseSensitive, result.Value^);
+  fValue^.Reduce(keys, fValue^.Has(dvoNameCaseSensitive), result.Value^);
 end;
 
 function TDocDict.SetDefault(const key: RawUtf8): variant;
@@ -12585,7 +12642,7 @@ procedure TDocDict.Sort(reverse: boolean; keycompare: TUtf8Compare;
   nestedDict: boolean);
 begin
   if not Assigned(keycompare) then
-    keycompare := StrCompByCase[fValue^.IsCaseSensitive];
+    keycompare := StrCompByCase[fValue^.Has(dvoNameCaseSensitive)];
   fValue^.SortByName(keycompare, reverse, nestedDict);
   if reverse then
     fSorted := nil

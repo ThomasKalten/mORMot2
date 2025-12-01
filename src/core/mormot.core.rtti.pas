@@ -502,7 +502,7 @@ type
       {$ifdef HASINLINE}inline;{$endif}
   public
     /// specify ordinal storage size and sign
-    // - is prefered to MaxValue to identify the number of stored bytes
+    // - is preferred to MaxValue to identify the number of stored bytes
     function RttiOrd: TRttiOrd;
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// first value of enumeration type, typicaly 0
@@ -762,7 +762,7 @@ type
     case TRttiKind of
       rkFloat: (
         RttiFloat: TRttiFloat;
-        IsDateTime: boolean);
+        IsDateTime, IsPureDate: boolean);
       rkLString: ( // from TypeInfo() on older Delphi with no CP RTTI
         CodePage: cardinal; // RawBlob=CP_RAWBYTESTRING not CP_RAWBLOB
         Engine: TSynAnsiConvert);
@@ -2392,14 +2392,6 @@ type
   {$else}
   TRttiCustomProp = object
   {$endif USERECORDWITHMETHODS}
-  private
-    fOrigName: RawUtf8; // as set by InternalAdd()
-    function InitFrom(RttiProp: PRttiProp): PtrInt;
-    function ValueIsVoidGetter(Data: pointer): boolean;
-    procedure GetRttiVarDataDirect(Data: PByte; rvd: PRttiVarData);
-    procedure GetRttiVarDataGetter(Instance: TObject; rvd: PRttiVarData);
-    function CompareValueComplex(Data, Other: pointer;
-      OtherRtti: PRttiCustomProp; CaseInsensitive: boolean): integer;
   public
     /// contains standard TypeInfo/PRttiInfo of this field/property
     // - for instance, Value.Size contains its memory size in bytes
@@ -2486,6 +2478,14 @@ type
     // ! if RVD.NeedsClear then VarClearProc(RVD.Data);
     procedure GetRttiVarData(Data: pointer; out RVD: TRttiVarData);
       {$ifdef HASINLINE}inline;{$endif}
+  private
+    fOrigName: RawUtf8; // as set by InternalAdd()
+    function InitFrom(RttiProp: PRttiProp): PtrInt;
+    function ValueIsVoidGetter(Data: pointer): boolean;
+    procedure GetRttiVarDataDirect(Data: PByte; rvd: PRttiVarData);
+    procedure GetRttiVarDataGetter(Instance: TObject; rvd: PRttiVarData);
+    function CompareValueComplex(Data, Other: pointer;
+      OtherRtti: PRttiCustomProp; CaseInsensitive: boolean): integer;
   end;
 
   /// store information about the properties/fields of a given TypeInfo/PRttiInfo
@@ -3164,9 +3164,11 @@ type
   // - records should have field-level extended RTTI (since Delphi 2010 / FPC
   // trunk), or have been properly defined with Rtti.RegisterFromText() on
   // oldest Delphi or FPC
-  // - allow RTTI or custom mapping, e.g. with Data Transfer Objects (DTO)
-  // - ToA() / ToB() methods are thread-safe by design: once Init() and Map()
-  // have been made, you can safely share a single TRttiMap between threads
+  // - allow RTTI or custom mapping, e.g. between isolated Domain Objects and
+  // Data Transfer Objects (DTO) - also for testing via RandomA/B() and Compare()
+  // - processing methods are thread-safe by design: once Init() and Map()
+  // have been made, you can safely share a single TRttiMap between threads,
+  // e.g. as a global variables in your DTO type definitions unit
   {$ifdef USERECORDWITHMETHODS}
   TRttiMap = record
   {$else}
@@ -3201,7 +3203,7 @@ type
     /// map fields by A,B pairs of names
     // - returns self to continue manual calls to Map() in a fluid interface
     function Map(const ABPairs: array of RawUtf8): PRttiMap; overload;
-    /// thread-safe copy B fields values into A
+    /// thread-safe copy mapped B fields values into A
     // - A and B are either a TObject instance or a @record pointer, depending
     // on Init() supplied types, for instance:
     // !var c: TMyClass;
@@ -3210,11 +3212,11 @@ type
     // !  map.Init(TMyClass, TypeInfo(TMyRecord)).AutoMap;
     // !  map.ToA(c, @r); // from TMyRecord to TMyClass
     // !  map.ToB(c, @r); // from TMyClass to TMyRecord
-    procedure ToA(A, B: pointer); overload;
-    /// thread-safe copy A fields values into B
+    procedure ToA(A, B: pointer); overload; {$ifdef HASINLINE} inline; {$endif}
+    /// thread-safe copy mapped A fields values into B
     // - A/B are either TObject instance or @record pointer, depending on Init()
-    procedure ToB(A, B: pointer); overload;
-    /// thread-safe create a new A, copying field values from B
+    procedure ToB(A, B: pointer); overload; {$ifdef HASINLINE} inline; {$endif}
+    /// thread-safe create a new A, copying mapped field values from B
     // - if Init(A) was a class, returned pointer is a new class instance,
     // which should be released via Free
     // - if Init(A) was a record, returned pointer if a heap-allocated record,
@@ -3245,15 +3247,39 @@ type
     // !  end;
     // !end;
     function ToA(B: pointer): pointer; overload;
-    /// thread-safe create a new B, copying field values from A
+    /// thread-safe create a new B, copying mapped field values from A
     // - if Init(B) was a class, returned pointer is a new class instance,
     // which should be released via Free
     // - if Init(B) was a record, returned pointer if a heap-allocated record,
     // which should be released via a proper Dispose()
     // - returned B is a newly allocated instance of the TClass specified to Init()
     function ToB(A: pointer): pointer; overload;
+    /// thread-safe create a dynamic array of type A from a dynamic array of type B
+    // - with proper mapped fields values between each instances
+    // - A/B are either T*ObjArray instance or array of records, depending on Init()
+    // - don't forget to eventually call ObjArrayClear(A/B) if A/B are TObject
+    procedure ToArrayA(var A, B);
+    /// thread-safe create a dynamic array of type B from a dynamic array of type A
+    // - with proper mapped fields values between each instances
+    // - A/B are either T*ObjArray instance or array of records, depending on Init()
+    procedure ToArrayB(var A, B);
+    /// compare A and B fields, using the registered properties mapping
+    // - could be useful e.g. for regression tests between DTOs and Domain Objects
+    // - A/B are either TObject instance or @record pointer, depending on Init()
+    function Compare(A, B: pointer; CaseInsensitive: boolean = false): integer;
+    /// fill one A instance fields with some random values
+    // - A is either a TObject instance or @record pointer, depending on Init()
+    // - could be useful e.g. for filling some objects during regression tests
+    procedure RandomA(A: pointer);
+    /// fill one B instance fields with some random values
+    // - B is either a TObject instance or @record pointer, depending on Init()
+    // - could be useful e.g. for filling some objects during regression tests
+    procedure RandomB(B: pointer);
   end;
 
+// low level function defined here for proper inlining - do not call
+procedure RttiMapTo(fromPtr, toPtr: PAnsiChar; fromRtti: TRttiCustom;
+  map: PPRttiCustomProp);
 
 { *********** TObjectWithRttiMethods TObjectWithID TClonable Classes }
 
@@ -4238,6 +4264,7 @@ begin
         else if IsDate then
         begin
           Cache.IsDateTime := true;
+          Cache.IsPureDate := (@self = TypeInfo(TDate)); // force truncate time
           Cache.VarDataVType := varDate;
           Cache.RttiVarDataVType := varDate;
         end
@@ -6982,6 +7009,19 @@ end;
 
 { ************* Managed Types Finalization, Random or Copy }
 
+procedure TRttiCustom.ValueRandom(Data: pointer); // defined here for inlining
+begin
+  fSetRandom(Data, self); // handle most simple kind of values from RTTI
+end;
+
+function TRttiCustom.PropsCount: integer;
+begin
+  if self = nil then
+    result := 0
+  else
+    result := fProps.Count;
+end;
+
 { RTTI_FINALIZE[] implementation functions }
 
 function _StringClear(V: PPointer; Info: PRttiInfo): PtrInt;
@@ -7095,11 +7135,16 @@ procedure _NoRandom(V: PPointer; RC: TRttiCustom);
 begin
 end;
 
-// we use SharedRandom since TLightLock may be faster than a threadvar
+// we use SharedRandom since TLightLock is likely to be faster than a threadvar
 
 procedure _FillRandom(V: PByte; RC: TRttiCustom);
-begin
-  SharedRandom.Fill(V, RC.Cache.Size);
+var
+  lec: ^TLecuyerThreadSafe;
+begin // inlined SharedRandom.Fill() for this most common method
+  lec := @SharedRandom;
+  lec^.Safe.Lock;
+  lec^.Generator.Fill(V, RC.Cache.Size);
+  lec^.Safe.UnLock
 end;
 
 procedure _StringRandom(V: PPointer; RC: TRttiCustom);
@@ -7108,6 +7153,11 @@ var
 begin
   SharedRandom.FillShort31(tmp);
   FastSetStringCP(V^, @tmp[1], ord(tmp[0]), RC.Cache.CodePage);
+end;
+
+procedure _RawJsonRandom(V: PRawUtf8; RC: TRttiCustom);
+begin // just '0' ..'999' as valid random JSON content
+  V^ := SmallUInt32Utf8[Random32(high(SmallUInt32Utf8))];
 end;
 
 procedure _WStringRandom(V: PWideString; RC: TRttiCustom);
@@ -7169,15 +7219,85 @@ begin
   V^ := 38000 + Int64(SharedRandom.Next) / (maxInt shr 12);
 end;
 
+procedure _UnixTimeRandom(V: PInt64; RC: TRttiCustom);
+begin
+  V^ := 1481187020 + SharedRandom.Next shr 8; // as seconds
+end;
+
+procedure _UnixMSRandom(V: PInt64; RC: TRttiCustom);
+begin
+  V^ := Int64(1481187020000) + Int64(SharedRandom.Next); // as milliseconds
+end;
+
 procedure _SingleRandom(V: PSingle; RC: TRttiCustom);
 begin
   V^ := SharedRandom.NextDouble;
 end;
 
+procedure _PropsRandom(V: PAnsiChar; RC: TRttiCustom);
+var
+  n: integer;
+  o: PtrInt;
+  p: PRttiCustomProp;
+begin // used for ptRecord and ptClass
+  n := RC.PropsCount;
+  if n = 0 then
+    exit;
+  if RC.Kind = rkClass then
+    V := PPointer(V)^; // TObject is stored by reference, supplied as PObject
+  if V = nil then
+    exit;
+  p := pointer(RC.Props.List);
+  repeat
+    o := p^.OffsetSet;
+    if o >= 0 then
+      p^.Value.ValueRandom(V + o); // setters are not supported yet
+    inc(p);
+    dec(n);
+  until n = 0;
+end;
+
+procedure _ArrayRandom(V: PAnsiChar; RC: TRttiCustom);
+var
+  n: integer;
+begin
+  n := RC.Cache.ItemCount;
+  if n <> 0 then
+    if RC.ArrayRtti = nil then
+      SharedRandom.Fill(v, RC.Size)
+    else
+      repeat
+        RC.ArrayRtti.ValueRandom(V);
+        inc(V, RC.Cache.ItemSize);
+        dec(n);
+      until n = 0;
+end;
+
+procedure _DynArrayRandom(V: PPointer; RC: TRttiCustom);
+var
+  n: integer;
+  p: PAnsiChar;
+begin
+  if V^ <> nil then
+    RC.ValueFinalize(V); // reset whole array variable
+  n := SharedRandom.Next and 15; // random length 0..15
+  if n = 0 then
+    exit;
+  p := DynArrayNew(V, n, RC.Cache.ItemSize);
+  if RC.ArrayRtti = nil then
+    SharedRandom.Fill(p, n * RC.Cache.ItemSize)
+  else
+    repeat
+      RC.ArrayRtti.ValueRandom(p);
+      inc(p, RC.Cache.ItemSize);
+      dec(n);
+    until n = 0;
+end;
+
 var
   PT_RANDOM: array[TRttiParserType] of pointer = (
     @_NoRandom,       //  ptNone
-    @_NoRandom,       //  ptArray
+    @_ArrayRandom,    //  ptArray
     @_FillRandom,     //  ptBoolean
     @_FillRandom,     //  ptByte
     @_FillRandom,     //  ptCardinal
@@ -7188,9 +7308,9 @@ var
     @_FillRandom,     //  ptInteger
     @_FillRandom,     //  ptQWord
     @_StringRandom,   //  ptRawByteString
-    @_NoRandom,       //  ptRawJson
+    @_RawJsonRandom,  //  ptRawJson
     @_StringRandom,   //  ptRawUtf8
-    @_NoRandom,       //  ptRecord
+    @_PropsRandom,    //  ptRecord
     @_SingleRandom,   //  ptSingle
     {$ifdef UNICODE}
     @_UStringRandom,
@@ -7208,23 +7328,23 @@ var
     @_FillRandom,     //  ptHash128
     @_FillRandom,     //  ptHash256
     @_FillRandom,     //  ptHash512
-    @_NoRandom,       //  ptOrm
+    @_FillRandom,     //  ptOrm
     @_FillRandom,     //  ptTimeLog
     {$ifdef HASVARUSTRING}
     @_UStringRandom,
     {$else}           //  ptUnicodeString
     @_NoRandom,
     {$endif HASVARUSTRING}
-    @_FillRandom,     //  ptUnixTime
-    @_FillRandom,     //  ptUnixMSTime
+    @_UnixTimeRandom, //  ptUnixTime
+    @_UnixMSRandom,   //  ptUnixMSTime
     @_VariantRandom,  //  ptVariant
     @_WStringRandom,  //  ptWideString
     @_StringRandom,   //  ptWinAnsi
     @_FillRandom,     //  ptWord
     @_FillRandom,     //  ptEnumeration
     @_FillRandom,     //  ptSet
-    @_NoRandom,       //  ptClass
-    @_NoRandom,       //  ptDynArray
+    @_PropsRandom,    //  ptClass
+    @_DynArrayRandom, //  ptDynArray
     @_NoRandom,       //  ptInterface
     @_NoRandom,       //  ptPUtf8Char is read-only
     @_NoRandom);      //  ptCustom
@@ -7480,11 +7600,11 @@ begin
   end;
   if nfo <> nil then
   begin
-    p := pointer(nfo.Props.List); // for both records and classes
     if Info^.Kind = rkClass then
       v := PPointer(Value)^ // classes are passed by reference
     else
       v := @Value;          // records are passed by value
+    p := pointer(nfo.Props.List); // for both records and classes
     for i := 1 to nfo.Props.Count do
     begin
       if (p^.OffsetSet >= 0) and
@@ -9191,11 +9311,6 @@ begin
     {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif}
 end;
 
-procedure TRttiCustom.ValueRandom(Data: pointer);
-begin
-  fSetRandom(Data, self); // handle most simple kind of values from RTTI
-end;
-
 function TRttiCustom.ValueFullHash(const Elem): cardinal;
 begin
   result := DefaultHasher(PtrUInt(self), @Elem, fCache.ItemSize);
@@ -9476,7 +9591,7 @@ begin
         break;
     end
     else if not GetNextFieldProp(P, propname) then
-      // expect regular object pascal identifier (i.e. 0..9,a..z,A..Z,_)
+      // expect regular Object Pascal identifier (i.e. 0..9,a..z,A..Z,_)
       break;
     if P^ = ',' then
     begin
@@ -9731,13 +9846,6 @@ begin
   r.fArrayRtti := Rtti.RegisterClass(aItemClass);
 end; // no need to set other fields like Name
 
-function TRttiCustom.PropsCount: integer;
-begin
-  if self = nil then
-    result := 0
-  else
-    result := fProps.Count;
-end;
 
 
 { TRttiCustomList }
@@ -10475,7 +10583,93 @@ begin
   result := @self;
 end;
 
+procedure RttiMapTo(fromPtr, toPtr: PAnsiChar; fromRtti: TRttiCustom;
+  map: PPRttiCustomProp);
+var
+  n: integer;
+  pFrom: PRttiCustomProp;
+begin
+  pFrom := pointer(fromRtti.Props.List); // always <> nil
+  n := fromRtti.Props.Count;             // always > 0
+  repeat
+    if map^ <> nil then
+      pFrom^.CopyValue(toPtr, fromPtr, map^); // copy this mapped property value
+    inc(map);
+    inc(pFrom);
+    dec(n);
+  until n = 0;
+end;
+
 procedure TRttiMap.ToA(A, B: pointer);
+begin
+  RttiMapTo(B, A, bRtti, pointer(b2a));
+end;
+
+procedure TRttiMap.ToB(A, B: pointer);
+begin
+  RttiMapTo(A, B, aRtti, pointer(a2b));
+end;
+
+function TRttiMap.ToA(B: pointer): pointer;
+begin
+  if aRtti.Kind = rkClass then
+    result := aRtti.ClassNewInstance
+  else
+    result := AllocMem(aRtti.Size);
+  RttiMapTo(B, result, bRtti, pointer(b2a));
+end;
+
+function TRttiMap.ToB(A: pointer): pointer;
+begin
+  if bRtti.Kind = rkClass then
+    result := bRtti.ClassNewInstance
+  else
+    result := AllocMem(bRtti.Size);
+  RttiMapTo(A, result, aRtti, pointer(a2b));
+end;
+
+procedure RttiMapArray(fromPtr, toPtr: PAnsiChar; fromRtti, toRtti: TRttiCustom;
+  map: PPRttiCustomProp);
+var
+  n: PtrInt;
+  f, t: pointer;
+begin
+  FastDynArrayClear(pointer(toPtr), toRtti.Info);
+  fromPtr := PPointer(fromPtr)^; // from dynarray to items
+  if fromPtr = nil then
+    exit;
+  n := PDALen(fromPtr - _DALEN)^ + _DAOFF;
+  toPtr := DynArrayNew(pointer(toPtr), n, toRtti.Size);
+  if map <> nil then
+    repeat
+      if toRtti.Kind = rkClass then
+      begin
+        t := toRtti.ClassNewInstance;
+        PPointer(toPtr)^ := t; // new destination TObject storage
+      end
+      else
+        t := toPtr; // new zeroed destination record
+      f := fromPtr;
+      if fromRtti.Kind = rkClass then
+        f := PPointer(f)^; // source TObject redirection
+      RttiMapTo(f, t, fromRtti, map);
+      inc(fromPtr, fromRtti.Size);
+      inc(toPtr, toRtti.Size);
+      dec(n);
+    until n = 0;
+end;
+
+procedure TRttiMap.ToArrayA(var A, B);
+begin
+  RttiMapArray(@B, @A, bRtti, aRtti, pointer(b2a));
+end;
+
+procedure TRttiMap.ToArrayB(var A, B);
+begin
+  RttiMapArray(@A, @B, aRtti, bRtti, pointer(a2b));
+end;
+
+function TRttiMap.Compare(A, B: pointer; CaseInsensitive: boolean): integer;
 var
   n: integer;
   pa: PPRttiCustomProp;
@@ -10486,47 +10680,36 @@ begin
   n := bRtti.Props.Count;          // always > 0
   repeat
     if pa^ <> nil then
-      pb^.CopyValue(A, B, pa^); // copy this mapped property value
+    begin
+      result := pa^.CompareValue(A, B, pb^, CaseInsensitive);
+      if result <> 0 then
+        exit; // found some difference in this property
+    end;
     inc(pa);
     inc(pb);
     dec(n);
   until n = 0;
+  result := 0; // all mapped properties are (born) equal
 end;
 
-procedure TRttiMap.ToB(A, B: pointer);
+procedure TRttiMap.RandomA(A: pointer);
 var
-  n: integer;
-  pa: PRttiCustomProp;
-  pb: PPRttiCustomProp;
+  tmp: pointer;
 begin
-  pa := pointer(aRtti.Props.List);
-  pb := pointer(a2b);
-  n := aRtti.Props.Count;
-  repeat
-    if pb^ <> nil then
-      pa^.CopyValue(B, A, pb^);
-    inc(pa);
-    inc(pb);
-    dec(n);
-  until n = 0;
-end;
-
-function TRttiMap.ToA(B: pointer): pointer;
-begin
+  tmp := A;
   if aRtti.Kind = rkClass then
-    result := aRtti.ClassNewInstance
-  else
-    result := AllocMem(aRtti.Size);
-  ToA(result, B);
+    tmp := @A; // low-level TRttiCustom methods expect a PObject
+  aRtti.ValueRandom(tmp); // just use the RTTI
 end;
 
-function TRttiMap.ToB(A: pointer): pointer;
+procedure TRttiMap.RandomB(B: pointer);
+var
+  tmp: pointer;
 begin
+  tmp := B;
   if bRtti.Kind = rkClass then
-    result := bRtti.ClassNewInstance
-  else
-    result := AllocMem(bRtti.Size);
-  ToB(A, result);
+    tmp := @B; // low-level TRttiCustom methods expect a PObject
+  bRtti.ValueRandom(tmp);
 end;
 
 

@@ -56,6 +56,11 @@ const
   // - specific branches may have prefixes, e.g. 'lts-2.3.#'
   SYNOPSE_FRAMEWORK_VERSION = {$I ..\mormot.commit.inc};
 
+  /// the corresponding branch of the mORMot framework, e.g. as '3' for 2.3 trunk
+  // - as used by DefaultUserAgent() in mormot.net.client as 'mORMot) HCS/#'
+  // - for a client application, the branch main revision is safe and meaningful
+  SYNOPSE_FRAMEWORK_BRANCH = '3';
+
   /// a text including the version and the main active conditional options
   // - usefull for low-level debugging purpose
   SYNOPSE_FRAMEWORK_FULLVERSION  = SYNOPSE_FRAMEWORK_VERSION
@@ -525,7 +530,12 @@ type
   {$M+}
   /// a parent Exception class with RTTI generated for its published properties
   // - not as good as ESynException, but could be used without mormot.core.text
-  ExceptionWithProps = class(Exception);
+  ExceptionWithProps = class(Exception)
+  public
+    /// wrapper to raise CreateFmt() with optional leading 'ClassName.' text
+    class procedure RaiseFmt(caller: TObject; const Fmt: string;
+      const Args: array of const);
+  end;
 
   /// a parent TObject class with a virtual constructor and RTTI generated
   // for its published properties
@@ -1905,7 +1915,10 @@ function AddWord(var Values: TWordDynArray; var ValuesCount: integer;
 
 /// add a 8-bit integer value at the end of a dynamic array of integers
 function AddByte(var Values: TByteDynArray; var ValuesCount: integer;
-  Value: byte): PtrInt;
+  Value: byte): PtrInt; overload;
+
+/// add a 8-bit integer value at the end of a dynamic array of integers
+function AddByte(var Values: TByteDynArray; Value: byte): PtrInt; overload;
 
 /// add a 64-bit integer value at the end of a dynamic array of integers
 function AddInt64(var Values: TInt64DynArray; var ValuesCount: integer;
@@ -2128,7 +2141,7 @@ function ObjArrayAdd(var aObjArray; aItem: TObject): PtrInt; overload;
 /// wrapper to add an item to a T*ObjArray dynamic array storage
 // - this overloaded function will use a separated variable to store the items
 // count, so will be slightly faster: but you should call SetLength() when done,
-// to have a stand-alone array as expected by our ORM/SOA serialziation
+// to have a stand-alone array as expected by our ORM/SOA serialization
 // - return the index of the item in the dynamic array
 function ObjArrayAddCount(var aObjArray; aItem: TObject;
   var aObjArrayCount: integer): PtrInt;
@@ -2795,6 +2808,9 @@ type
   /// all CPU features flags, as retrieved from an Intel/AMD CPU
   TIntelCpuFeatures = set of TIntelCpuFeature;
 
+  /// recognize the main Intel/AMD CPU manufacturers
+  TIntelCpuManufacturer = (icmOther, icmIntel, icmAmd);
+
   /// 32-bit ARM Hardware capabilities
   // - merging AT_HWCAP and AT_HWCAP2 flags as reported by
   // github.com/torvalds/linux/blob/master/arch/arm/include/uapi/asm/hwcap.h
@@ -2879,6 +2895,10 @@ var
   // - on LINUX, consider CpuInfoArm or the textual CpuInfoFeatures from
   // mormot.core.os.pas
   CpuFeatures: TIntelCpuFeatures;
+
+  // additional low-level Intel/AMD CPU information retrieved using CPUID
+  CpuManufacturer: TIntelCpuManufacturer;
+  CpuFamily, CpuModel: byte;
 
 /// twelve-character ASCII vendor string returned by Intel/AMD cpuid
 // - typical values are 'AuthenticAMD' or 'GenuineIntel'
@@ -3190,6 +3210,11 @@ function PosChar(Str: PUtf8Char; Chr: AnsiChar): PUtf8Char; overload;
 /// fast retrieve the position of a given character in a #0 ended buffer
 // - will use fast SSE2 asm on i386 and x86_64
 function PosChar(Str: PUtf8Char; StrLen: PtrInt; Chr: AnsiChar): PUtf8Char; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// fast retrieve the pointer of a given character in a UTF-8 string
+// - will use fast SSE2 asm on x86_64
+function PosCharU(const Str: RawUtf8; Chr: AnsiChar): PUtf8Char;
   {$ifdef HASINLINE}inline;{$endif}
 
 {$ifndef PUREMORMOT2}
@@ -3630,31 +3655,23 @@ type
       read Store.len;
   end;
 
-/// logical OR of two memory buffers
-// - will perform on all buffer bytes:
-// ! Dest[i] := Dest[i] or Source[i];
+/// logical "Dest := Dest OR Source"  of two memory buffers
 procedure OrMemory(Dest, Source: PByteArray; Size: PtrInt);
 
-/// logical XOR of two memory buffers - using SSE2 asm on x86_64
-// - will perform on all buffer bytes:
-// ! Dest[i] := Dest[i] xor Source[i];
+/// logical "Dest := Dest XOR Source" of two memory buffers - using SSE2 asm on x86_64
 procedure XorMemory(Dest, Source: PByteArray; Size: PtrInt); overload;
   {$ifndef CPUX64} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
-/// logical XOR of two memory buffers into a third
-// - will perform on all buffer bytes:
-// ! Dest[i] := Source1[i] xor Source2[i];
+/// logical "Dest := Source1 XOR Source2" of two memory buffers into a third
 procedure XorMemory(Dest, Source1, Source2: PByteArray; Size: PtrInt); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// logical XOR of two 128-bit / 16-byte memory buffers
+/// logical "Dest := Dest XOR Source" of two 128-bit / 16-byte memory buffers
 procedure XorMemory(var Dest: THash128Rec;
   {$ifdef FPC}constref{$else}const{$endif} Source: THash128Rec); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// logical AND of two memory buffers
-// - will perform on all buffer bytes:
-// ! Dest[i] := Dest[i] and Source[i];
+/// logical "Dest := Dest AND Source"  of two memory buffers
 procedure AndMemory(Dest, Source: PByteArray; size: PtrInt);
 
 /// returns TRUE if all bytes equal zero
@@ -4175,8 +4192,8 @@ function SetVariantUnRefSimpleValue(const Source: variant; var Dest: TVarData): 
 
 /// convert any numerical Variant into a 32-bit integer
 // - it will expect true numerical Variant and won't convert any string nor
-// floating-pointer Variant, which will return FALSE and won't change the
-// Value variable content
+// floating-pointer Variant, which will return FALSE and won't change the Value
+// variable content - but accept cardinal/Int64/QWord values fitting into 32-bit
 function VariantToInteger(const V: Variant; var Value: integer): boolean;
 
 /// convert any numerical Variant into a 64-bit integer
@@ -5824,6 +5841,20 @@ begin
 end;
 
 
+{ ExceptionWithProps }
+
+class procedure ExceptionWithProps.RaiseFmt(caller: TObject;
+  const Fmt: string; const Args: array of const);
+var
+  txt: string;
+begin
+  if caller <> nil then
+    txt := string(caller.ClassName) + '.';
+  raise Create(txt + Format(Fmt, Args))
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+    {$else} at ReturnAddress {$endif}
+end;
+
 { TSynPersistent}
 
 constructor TSynPersistent.Create;
@@ -7303,14 +7334,20 @@ begin
   inc(ValuesCount);
 end;
 
-function AddByte(var Values: TByteDynArray; var ValuesCount: integer;
-  Value: byte): PtrInt;
+function AddByte(var Values: TByteDynArray; var ValuesCount: integer; Value: byte): PtrInt;
 begin
   result := ValuesCount;
   if result = Length(Values) then
     SetLength(Values, NextGrow(result));
   Values[result] := Value;
   inc(ValuesCount);
+end;
+
+function AddByte(var Values: TByteDynArray; Value: byte): PtrInt;
+begin
+  result := Length(Values);
+  SetLength(Values, result + 1);
+  Values[result] := Value;
 end;
 
 function AddInt64(var Values: TInt64DynArray; var ValuesCount: integer; Value: Int64): PtrInt;
@@ -9529,6 +9566,20 @@ begin
     result := Str + StrLen;
 end;
 
+function PosCharU(const Str: RawUtf8; Chr: AnsiChar): PUtf8Char;
+var
+  len: PtrInt;
+begin
+  result := pointer(Str);
+  if Str = '' then
+    exit;
+  len := ByteScanIndex(pointer(result), PStrLen(result - _STRLEN)^, byte(Chr));
+  if len >= 0 then
+    inc(result, len)
+  else
+    result := nil;
+end;
+
 {$ifdef UNICODE}
 
 function PosExString(const SubStr, S: string; Offset: PtrUInt): PtrInt;
@@ -10041,7 +10092,7 @@ function GetTickCount64: UInt64; cdecl external 'c' name 'mach_absolute_time';
 {$endif OSDDARWIN}
 procedure __Fill256FromOs(out e: THash256Rec);
 begin
-  e.q[0] := GetTickCount64;
+  e.q[0] := GetTickCount64;         // always available in FPC RTL
   crc256c(@e, SizeOf(e.q[0]), e.b); // weak but not void
 end; // mormot.core.os.posix.inc overrides to use OS API - but not /dev/urandom
 {$endif OSWINDOWS}
@@ -10052,7 +10103,7 @@ var
 begin
   _Fill256FromOs(tmp);              // fast 256-bit entropy from OS APIs
   XorMemory(e.r[0], tmp.l);
-  XorMemory(e.r[1], tmp.h);         // on Linux, tmp.h is from getrandom syscall
+  XorMemory(e.r[1], tmp.h);
   e.r[2].L := e.r[2].L xor PtrUInt(@tmp) xor tmp.d3;
   e.r[2].H := e.r[2].H xor PtrUInt(GetCurrentThreadId) xor tmp.d2;
   {$ifdef CPUINTEL}
@@ -10235,7 +10286,7 @@ end;
 
 procedure LecuyerEncrypt(key: Qword; var data: RawByteString);
 var
-  gen: TLecuyer;
+  gen: TLecuyer; // thread-safe local instance
 begin
   if data = '' then
     exit;
@@ -10249,7 +10300,7 @@ end;
 
 procedure LecuyerDiffusion(dest: pointer; destsize: PtrUInt; src: PHash128);
 var
-  gen: TLecuyer;
+  gen: TLecuyer; // thread-safe local instance
 begin
   PHash128(@gen)^ := src^;
   gen.SeedGenerator;
@@ -10447,41 +10498,58 @@ end; // no "vector width" bits any more: AVX10 means 128-, 256- and 512-bit
 
 procedure TestCpuFeatures;
 var
-  regs: array[0..3] of TIntelRegisters absolute BaseEntropy;
+  regs: TIntelRegisters;
   flags: PIntegerArray;
 begin
   // retrieve CPUID raw flags
-  GetCpuid({eax=}1, {ecx=}0, regs[0]); // EAX=1: Processor Info and Feature Bits
+  GetCpuid({eax=}1, {ecx=}0, regs); // EAX=1: Processor Info and Feature Bits
+  CpuFamily := (regs.eax shr 8) and $0f;
+  if CpuFamily = $0f then
+    inc(CpuFamily, (regs.eax shr 20) and $0f);
+  CpuModel := (((regs.eax shr 16) and $0f) shl 4) or ((regs.eax shr 4) and $0f);
   flags := @CpuFeatures;
-  flags^[0] := regs[0].edx;
-  flags^[1] := regs[0].ecx;
-  GetCpuid(7, 0, regs[1]);             // EAX=7, ECX=0: Extended flags
-  flags^[2] := regs[1].ebx;
-  flags^[3] := regs[1].ecx;
-  flags^[4] := regs[1].edx;
-  if regs[1].eax in [1..9] then        // maximum ecx value for EAX=7
+  flags^[0] := regs.edx;
+  flags^[1] := regs.ecx;
+  BaseEntropy.h0 := PHash128(@regs)^;
+  GetCpuid(7, 0, regs);             // EAX=7, ECX=0: Extended flags
+  flags^[2] := regs.ebx;
+  flags^[3] := regs.ecx;
+  flags^[4] := regs.edx;
+  BaseEntropy.h1 := PHash128(@regs)^;
+  if regs.eax in [1..9] then        // maximum ecx value for EAX=7
   begin
-    GetCpuid(7, 1, regs[2]);           // EAX=7, ECX=1: Extended flags
-    flags^[5] := regs[2].eax;
-    flags^[6] := regs[2].edx;          // just ignoring regs.ebx and regs.ecx
+    GetCpuid(7, 1, regs);           // EAX=7, ECX=1: Extended flags
+    flags^[5] := regs.eax;
+    flags^[6] := regs.edx;          // just ignoring regs.ebx and regs.ecx
+    BaseEntropy.h2 := PHash128(@regs)^;
   end;
+  GetCpuid(0, 0, regs); // EAX=0: Manufacturer ID in EBX,EDX,ECX
+  if (regs.ebx = $756e6547) and
+     (regs.edx = $49656e69) and
+     (regs.ecx = $6c65746e) then
+    CpuManufacturer := icmIntel  // 'GenuineIntel'
+  else if (regs.ebx = $68747541) and
+          (regs.edx = $69746e65) and
+          (regs.ecx = $444d4163) then
+    CpuManufacturer := icmAmd;   // 'AuthenticAMD'
   // validate accuracy of most used HW opcodes against flags reported by CPUID
   if cfTSC in CpuFeatures then
     try
-      PInt64(@regs[3].eax)^ := Rdtsc; // current number of cpu cycles
+      PInt64(@regs.eax)^ := PInt64(@regs.eax)^ xor Rdtsc; // # of cpu cycles
     except // may trigger a GPF if CR4.TSD bit is set on hardened systems
       exclude(CpuFeatures, cfTSC);
     end;
   if cfRAND in CpuFeatures then
     try
-      regs[3].ecx := RdRand32; // don't loose those random values
-      regs[3].edx := RdRand32;
-      if regs[3].ecx = regs[3].edx then
+      regs.ecx := RdRand32; // don't loose those random values
+      regs.edx := RdRand32;
+      if regs.ecx = regs.edx then
         // most probably a RDRAND bug, e.g. on AMD Rizen 3000
         exclude(CpuFeatures, cfRAND);
     except // may trigger an illegal instruction exception on some Ivy Bridge
       exclude(CpuFeatures, cfRAND);
     end;
+  BaseEntropy.h3 := PHash128(@regs)^;
   {$ifdef DISABLE_SSE42}
   // force fallback on Darwin x64 (as reported by alf) - clang asm bug?
   CpuFeatures := CpuFeatures -
@@ -11087,7 +11155,7 @@ begin
         dec(PByte(e), SizeOf(BaseEntropy));
       p := @p[2];
     end;
-    MoveFast(caps, CpuFeatures, SizeOf(CpuFeatures));
+    Move(caps, CpuFeatures, SizeOf(CpuFeatures)); // don't use MoveFast() yet
   except
     // may happen on some untested Operating System
   end;
@@ -12845,7 +12913,7 @@ begin
   result := false;
   vd := VarDataFromVariant(V);
   repeat
-    case cardinal(vd^.VType) of
+    case cardinal(vd^.VType) of // use a jmp table on FPC
       varNull,
       varEmpty:
         Value := 0;
@@ -12883,13 +12951,6 @@ begin
           Value := vd^.VInt64
         else
           exit;
-      varDouble,
-      varDate,
-      varSingle,
-      varCurrency,
-      varString,
-      varOleStr:
-        exit;
     else
       begin
         vd := SetVarDataUnRefSimpleValue(vd, tmp{%H-});
@@ -12987,19 +13048,16 @@ begin
         exit;
       varBoolean: // 16-bit WordBool to 8-bit boolean
         if vd^.VBoolean then
-          Value := true // normalize
+          Value := true // normalize (an OLE WordBool may be $ffff)
         else
           Value := false;
       varInteger: // coming e.g. from TGetJsonField
         Value := vd^.VInteger = 1;
       varString:
         Value := GetBoolean(vd^.VAny);
+      {$ifdef HASVARUSTRING}  varUString, {$endif HASVARUSTRING}
       varOleStr:
         Value := GetBooleanW(vd^.VAny);
-    {$ifdef HASVARUSTRING}
-      varUString:
-        Value := GetBooleanW(vd^.VAny);
-    {$endif HASVARUSTRING}
     else
       begin
         vd := SetVarDataUnRefSimpleValue(vd, tmp{%H-});
@@ -13020,15 +13078,15 @@ var
 begin
   vd := VarDataFromVariant(V);
   repeat
-    case cardinal(vd^.VType) of
+    case cardinal(vd^.VType) of // use a jmp table on FPC
       varNull,
       varEmpty:
         Value := 0;
       varBoolean:
         if vd^.VBoolean then
-          Value := 1
+          Value := 1 // normalize (an OLE WordBool may be $ffff)
         else
-          Value := 0; // normalize
+          Value := 0;
       varSmallint:
         Value := vd^.VSmallInt;
       varShortInt:
@@ -13048,7 +13106,7 @@ begin
           Value := vd^.VInt64
         else
         begin
-          result := false;
+          result := false; // too huge to fit a signed 64-bit integer
           exit;
         end;
       varInt64:

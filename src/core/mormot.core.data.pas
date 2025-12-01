@@ -471,7 +471,17 @@ type
       read fSafe;
   end;
 
-  /// adding light locking methods to a TInterfacedObject with virtual constructor
+  /// adding R/W light locking methods to a TInterfacedObject with virtual constructor
+  TInterfacedObjectRWLightLocked = class(TInterfacedPersistent)
+  protected
+    fSafe: TRWLightLock;
+  public
+    /// access to the multiple Read / exclusive Write locking methods of this instance
+    property Safe: TRWLightLock
+      read fSafe;
+  end;
+
+  /// adding R/W upgradable locking methods to a TInterfacedObject with virtual constructor
   TInterfacedObjectRWLocked = class(TInterfacedPersistent)
   protected
     fSafe: TRWLock;
@@ -1341,6 +1351,8 @@ type
     // - the deleted element is finalized if necessary
     // - this method will recognize T*ObjArray types and free all instances
     function Delete(aIndex: PtrInt): boolean;
+    /// move one item from one position to another in the dynamic array
+    function Move(OldIndex, NewIndex: PtrInt): boolean;
     /// search for an element inside the dynamic array using RTTI
     // - return the index found (0..Count-1), or -1 if Item was not found
     // - will search for all properties content of Item: TList.IndexOf()
@@ -1618,8 +1630,8 @@ type
     // TStringDynArray, TWideStringDynArray, TSynUnicodeDynArray,
     // TTimeLogDynArray and TDateTimeDynArray as JSON array - or any customized
     // Rtti.RegisterFromText/TRttiJson.RegisterCustomSerializer format
-    // - or any other kind of array as Base64 encoded binary stream precessed
-    // via JSON_BASE64_MAGIC_C (UTF-8 encoded \uFFF0 special code)
+    // - or any other kind of array as Base64 encoded binary stream prefixed
+    // by JSON_BASE64_MAGIC_C (UTF-8 encoded \uFFF0 special code)
     // - typical handled content could be
     // ! '[1,2,3,4]' or '["\uFFF0base64encodedbinary"]'
     // - return a pointer at the end of the data read from P, nil in case
@@ -7314,8 +7326,7 @@ end;
 
 procedure TDynArray.Insert(Index: PtrInt; const Item);
 var
-  n: PtrInt;
-  s: PtrUInt;
+  n, s: PtrUInt;
   P: PAnsiChar;
 begin
   if fValue = nil then
@@ -7323,17 +7334,18 @@ begin
   n := GetCount;
   SetCount(n + 1);
   s := fInfo.Cache.ItemSize;
-  if PtrUInt(Index) < PtrUInt(n) then
+  P := PAnsiChar(fValue^);
+  if PtrUInt(Index) < n then
   begin
     // reserve space for the new item
-    P := PAnsiChar(fValue^) + PtrUInt(Index) * s;
-    MoveFast(P[0], P[s], PtrUInt(n - Index) * s);
+    inc(P, PtrUInt(Index) * s);
+    MoveFast(P[0], P[s], (n - PtrUInt(Index)) * s);
     if rcfArrayItemManaged in fInfo.Flags then // avoid GPF in ItemCopy() below
       FillCharFast(P^, s, 0);
   end
   else
-    // Index>=Count -> add at the end
-    P := PAnsiChar(fValue^) + PtrUInt(n) * s;
+    // Index>=Count (or Index<0) -> add at the end
+    inc(P, n * s);
   ItemCopy(@Item, P);
 end;
 
@@ -7384,6 +7396,25 @@ begin
   wassorted := fSorted;
   SetCount(n); // won't reallocate
   fSorted := wassorted; // deletion won't change the order
+  result := true;
+end;
+
+function TDynArray.Move(OldIndex, NewIndex: PtrInt): boolean;
+var
+  siz: PtrUInt;
+  temp: TBuffer1K; // local copy of the moved item
+begin
+  result := OldIndex = NewIndex;
+  siz := fInfo.Cache.ItemSize;
+  if result or
+     (fValue = nil) or
+     (siz > SizeOf(temp)) then // too big an item (paranoid)
+    exit;
+  MoveFast(PAnsiChar(fValue^)[PtrUInt(OldIndex) * siz], temp, siz);
+  if not Delete(OldIndex) then
+    exit; // out of range OldIndex - Insert(NewIndex<0) would append at the end
+  Insert(NewIndex, temp); // move in two steps: not the fastest, but working
+  fSorted := false; // we did change the order
   result := true;
 end;
 
@@ -11382,6 +11413,7 @@ function TRadixTreeNodeParams.Lookup(P: PUtf8Char; Ctxt: TObject): TRadixTreeNod
 var
   n: TDALen;
   c: PUtf8Char;
+  a: AnsiChar;
   t: PNormTable;
   f: TRadixTreeNodeFlags;
   ch: ^TRadixTreeNodeParams;
@@ -11392,7 +11424,8 @@ begin
   begin
     // static text
     c := pointer(Chars);
-    if c <> nil then
+    if (c <> nil) and
+       (c^ <> '<') then
     begin
       repeat
         if (t^[P^] <> c^) or // may do LowerCaseSelf(Chars) at Insert()
@@ -11415,9 +11448,10 @@ begin
       if (P^ < '0') or (P^ > '9') then
         exit; // void <integer> is not allowed
       repeat
-        inc(P)
-      until (P^ < '0') or (P^ > '9');
-      if (P^ <> #0) and (P^ <> '?') and (P^ <> '/') then
+        inc(P);
+        a := P^;
+      until (a < '0') or (a > '9');
+      if (a <> #0) and (a <> '?') and (a <> '/') then
         exit; // not an integer
     end
     else if rtfParamPath in f then // <path:filename> or * as <path:path>
@@ -11426,7 +11460,8 @@ begin
     else // regular <param>
       while (P^ <> #0) and (P^ <> '?') and (P^ <> '/') do
         inc(P);
-    if (Ctxt <> nil) and not LookupParam(Ctxt, c, P - c) then
+    if (Ctxt <> nil) and
+       not LookupParam(Ctxt, c, P - c) then
       exit; // the parameter is not in the expected format for Ctxt
   end;
   // if we reached here, the URI do match up to now
@@ -11446,6 +11481,7 @@ begin
       n := PDALen(PAnsiChar(ch) - _DALEN)^ + _DAOFF;
       repeat
         if (ch^.Names <> nil) or
+           (ch^.Chars[1] = '<') or
            (ch^.Chars[1] = t^[P^]) then // recursive call only if worth it
         begin
           result := ch^.Lookup(P, Ctxt);

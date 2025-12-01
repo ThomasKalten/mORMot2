@@ -266,7 +266,7 @@ type
 
 
 type
-  /// optimized thread-safe storage of a list of IP v4 adresses
+  /// optimized thread-safe storage of a list of IP v4 addresses
   // - can be used e.g. as white-list or black-list of clients
   // - will maintain internally a sorted list of 32-bit integers for fast lookup
   // - with optional binary persistence
@@ -565,6 +565,8 @@ type
     /// up to 512-bit of raw binary hash, according to Algo
     Bin: THash512Rec;
   end;
+  /// a pointer to one hash value and its algorithm
+  PHashDigest = ^THashDigest;
   /// store a dynamic array of hash value and its algorithm
   THashDigests = array of THashDigest;
 
@@ -798,6 +800,7 @@ type
   // any password, e.g. > than 72 bytes (following passlib.hash.bcrypt_sha256)
   // - mcfSCrypt is the SCrypt memory-intensive hashing algorithm, implemented in
   // mormot.crypt.other.pas or in mormot.crypt.openssl.pas via global SCrypt()
+  // - in practice: use safest mcfBCryptSha256 or mcfSCrypt if possible
   TModularCryptFormat = (
     mcfInvalid,
     mcfUnknown,
@@ -811,10 +814,13 @@ type
     mcfBCrypt,
     mcfBCryptSha256,
     mcfSCrypt);
+  PModularCryptFormat = ^TModularCryptFormat;
   /// allow to specify several ModularCryptIdentify/ModularCryptVerify algorithms
   TModularCryptFormats = set of TModularCryptFormat;
 
 const
+  SIGN_SIZE: array[TSignAlgo] of byte = (
+    20, 32, 48, 64, 28, 32, 48, 64, 32, 64, 28);
   /// the standard text of a TSignAlgo
   SIGNER_TXT: array[TSignAlgo] of RawUtf8 = (
     'SHA-1',    'SHA-256',  'SHA-384',  'SHA-512', 'SHA3-224', 'SHA3-256',
@@ -824,6 +830,9 @@ const
   SIGNER_DEFAULT_ALGO = saSha3S128;
   /// which ModularCryptIdentify/ModularCryptVerify() results are correct
   mcfValid = [mcfMd5Crypt .. high(TModularCryptFormat)];
+  /// the maximum number of PBKDF2 rounds which may trigger a DoS attack
+  // - 5 millions = 1–5 seconds with SHA-NI is noticeable to be painful
+  MAX_PBKDF2_ROUNDS = 5000000;
 var
   /// default number of rounds for PBKDF2 "Modular Crypt" functions
   // - numbers adjusted on 2025, and align with OWASP Password Storage Cheat
@@ -881,13 +890,20 @@ type
     function Final: RawUtf8; overload;
     /// returns the raw computed digital signature
     // - SignatureSize bytes will be written: use Signature.Lo/h0/b3/b accessors
-    procedure Final(aSignature: PHash512Rec; aNoInit: boolean = false); overload;
+    function Final(aSignature: PHash512Rec; aNoInit: boolean = false): integer; overload;
     /// one-step digital signature of a buffer as lowercase hexadecimal string
     function Full(aAlgo: TSignAlgo; const aSecret: RawUtf8;
       aBuffer: pointer; aLen: integer): RawUtf8; overload;
     /// one-step digital signature of a buffer with PBKDF2 derivation
     function Full(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
       aSecretPbkdf2Round: integer; aBuffer: pointer; aLen: integer): RawUtf8; overload;
+    /// one-step binary digital signature of a buffer with PBKDF2 derivation
+    function Full(aAlgo: TSignAlgo; aSecret: pointer; aSecretLen: PtrInt;
+      const aMessage: RawByteString; aHmac: PHash512Rec): integer; overload;
+    /// one-step hash computation of a buffer as a binary buffer
+    // - returns the written aDigest size in bytes
+    function Hash(aAlgo: TSignAlgo; aBuffer: pointer; aLen: integer;
+      out aDigest: THash512Rec): integer;
     /// convenient wrapper to perform PBKDF2 safe iterative key derivation
     function Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
       aSecretPbkdf2Round: integer; aDerivatedKey: PHash512Rec;
@@ -1046,6 +1062,7 @@ function HashFile(const aFileName: TFileName; aAlgo: THashAlgo): RawUtf8; overlo
 
 /// compute one or several hexadecimal hash(es) of any (big) file
 // - using a temporary buffer of 1MB for the sequential reading
+// - returns the hash in THashAlgo type definition order in aAlgos set
 function HashFileRaw(const aFileName: TFileName; aAlgos: THashAlgos): TRawUtf8DynArray;
 
 /// compute the hexadecimal hashe(s) of one file, as external .md5/.sha256/.. files
@@ -1115,11 +1132,13 @@ function ModularCryptHash(format: TModularCryptFormat; const password: RawUtf8;
   rounds: cardinal = 0; saltsize: cardinal = 0; const salt: RawUtf8 = ''): RawUtf8; overload;
 
 /// compute the "Modular Crypt" hash of a given password from expected format
-// - the format is the value returned by info^ in ModularCryptIdentify(), e.g.
+// - the format is the value returned by info^ in ModularCryptIdentify(), able
+// to identify the algorithm, its parameters, and the associated salt, e.g.
 // !ModularCryptHash('$1$gV5s/FALJ/0x8nyo$', 'password') = '$1$gV5s/FALJ/0x8nyo$6yO.DIuu/ZF/eJaK5oHu90'
 // - the format can e.g. be send back to the client to make the proper modular
-// crypt hashing on its side, and then the hash (or nonced proof) to the server
-function ModularCryptHash(const format, password: RawUtf8): RawUtf8; overload;
+// crypt hashing on its side, and send back the hash (or nonced proof) to the server
+function ModularCryptHash(const format, password: RawUtf8;
+  decodedFormat: PModularCryptFormat = nil): RawUtf8; overload;
 
 /// identify if a given hash matches any "Modular Crypt" format
 // - e.g. returns true and mcfMd5Crypt for '$1${salt}${checksum}' or
@@ -1148,6 +1167,8 @@ function ModularCryptParse(var P: PUtf8Char; var rounds: cardinal;
 // - without {checksum} - as returned by ModularCryptIdentify() info^ parameter
 // - used e.g. by TRestServer.ReturnNonce() with an unknown UserName, to avoid
 // the client being able to guess by fuzzing that this UserName is unknown
+// - use SystemEntropy.Startup as SHA-256 seed for consistent results between
+// calls, but eventually reset when the process is restarted
 function ModularCryptFakeInfo(const id: RawUtf8;
   format: TModularCryptFormat = mcfUnknown): RawUtf8;
 
@@ -1180,6 +1201,79 @@ function SCryptHash(const Password: RawUtf8; const Salt: RawUtf8 = '';
   HashPos: PInteger = nil; Api: TSCriptRaw = nil): RawUtf8;
 
 
+{ Official SCRAM Client/Server mutual authentication }
+
+type
+  /// RFC 5802/7677 SCRAM client, as used e.g. by MongoDB
+  // - can optionally implement SCRAM-MCF as Key Derivation Function, as
+  // defined by draft-bouchez-kitten-scram-mcf-01 upcoming RFC proposal
+  TScramClient = class
+  protected
+    fClientNonce, fAuthMessage, fServerProof, fLastError: RawUtf8;
+    fAlgo: TSignAlgo;
+    fSize: byte;
+    fMcfSupport: boolean;
+    fSigner: TSynSigner;
+  public
+    /// initialize the SCRAM client protocol
+    // - with an associated Hash function, typically saSha1, saSha256 or saSha512
+    // - you can also enable the SCRAM-MCF extension support
+    constructor Create(aAlgo: TSignAlgo; aMcfSupport: boolean = false); reintroduce;
+    /// finalize this instannce, and release all sensitive internal buffers
+    destructor Destroy; override;
+    /// generate a client nonce, and return the first client step
+    // - returns e.g. 'n,,n=user,r=...' or 'n,,n=user,r=...,f=y'
+    function ComputeFirstMessage(const User: RawUtf8; out Mechanism: RawUtf8;
+      const TestForceNonce: RawUtf8 = ''): RawUtf8;
+    /// compute the second and final client step
+    // - ServerResponse is e.g. 'r=...,s=...,i=4096' or 'r=...,f=...'
+    // - returns e.g. 'c=biws,r=...,p=...'
+    function ComputeFinalMessage(const ServerResponse, Password: RawUtf8): RawUtf8;
+    /// check the server proof to complete mutual authentication
+    function CheckFinalResponse(const ServerResponse: RawUtf8): boolean;
+    /// human-readable information about any failed ComputeFinalMessage() = ''
+    // or CheckFinalResponse() = false
+    property LastError: RawUtf8
+      read fLastError;
+    /// the size, in bytes, of the internal hash algorithm e.g. 32 for SHA-256
+    property Size: byte
+      read fSize;
+    /// true if this client supports our SCRAM-MCF extension
+    property McfSupport: boolean
+      read fMcfSupport write fMcfSupport;
+  end;
+
+{ our own SCRAM-MCF client/server pattern, using ModularCryptHash() }
+
+/// compute the SCRAM challenge to be stored on DB for a given "Modular Crypt" hash
+// - the value is bound to the User logon, so that it can't be reassigned to
+// a more sensitive user on a compromised database ("key swap" attack)
+function ScramPersistedKey(const Hash, User: RawUtf8): RawUtf8; overload;
+
+/// compute the SCRAM challenge to be stored for a given "Modular Crypt" hash
+function ScramPersistedKey(Mcf: TModularCryptFormat;
+  const Password, User: RawUtf8; Rounds: cardinal = 0): RawUtf8; overload;
+
+/// compute the SCRAM challenge to be stored for a given "Modular Crypt" hash
+// - this overload expects the MCF format to be supplied as text
+function ScramPersistedKey(const McfFormat, Password, User: RawUtf8): RawUtf8; overload;
+
+/// compute the SCRAM client proof for a given "Modular Crypt" hash
+function ScramClientProof(const Hash, User: RawUtf8; var ClientSignature: THash256;
+  const Msg: array of RawByteString): RawUtf8;
+
+/// compute the SCRAM server proof for a given "Modular Crypt" challenge
+// - and also verify a given ScramClientProof() value
+function ScramServerProof(const PersistedKey, ClientProof: RawUtf8;
+  const Msg: array of RawByteString): RawUtf8;
+
+/// verify a given ScramServerProof() value on client side
+// - can optionally return the server-side persisted value in DB (if needed
+// to compute the URI secret)
+function ScramClientServerAuth(const Hash, User, ServerProof: RawUtf8;
+  var ClientSignature: THash256): boolean;
+
+
 { some HMAC/PBKDF2 common wrappers defined here to redirect to TSynSigner }
 
 /// compute the HMAC message authentication code using any hash function
@@ -1187,8 +1281,8 @@ procedure Hmac(algo: TSignAlgo; key, msg: pointer; keylen, msglen: integer;
   result: PHash512Rec);
 
 /// compute the PBKDF2 derivation of a password using HMAC over any hash function
-procedure Pbkdf2(algo: TSignAlgo; const password, salt: RawByteString;
-  count: integer; result: PHash512Rec); overload;
+function Pbkdf2(algo: TSignAlgo; const password, salt: RawByteString;
+  count: integer; digest: PHash512Rec): integer; overload;
 
 /// compute the PBKDF2 derivation of a password using HMAC over any hash function
 // - this overloaded function will return any size of the derived password
@@ -1708,7 +1802,7 @@ type
   /// a 31-bit increasing sequence used for TBinaryCookieGenerator sessions
   TBinaryCookieGeneratorSessionID = type integer;
 
-  /// TBinaryCookieGenerator execution context - to be persisted on disk
+  /// TBinaryCookieGenerator execution context - may be persisted on disk
   TBinaryCookieContext = packed record
     /// identify this data structure on disk - should equal 1 now
     Version: cardinal;
@@ -2110,8 +2204,8 @@ type
   ICryptPublicKey = interface
     /// unserialize a public key content
     // - this instance should be void, i.e. just created with no prior Load
-    // - will first try from X.509 SubjectPublicKey raw binary, then the main
-    // known PEM or DER usual serialization formats
+    // - will first try the main PEM or DER usual serialization formats, then
+    // from X.509 SubjectPublicKey raw binary, then as JWK format (RSA/EC)
     function Load(Algorithm: TCryptKeyAlgo;
       const PublicKeySaved: RawByteString): boolean;
     /// verify the RSA or ECC signature of a memory buffer
@@ -2908,12 +3002,17 @@ type
     // - warning: only supported by our 'syn-store' algorithm: OpenSSL Store
     // has no way to lookup the X.509 certificate which actually signed the buffer
     function Verify(const Signature: RawByteString; Data: pointer; Len: integer;
-      IgnoreError: TCryptCertValidities = []; TimeUtc: TDateTime = 0): TCryptCertValidity;
+      IgnoreError: TCryptCertValidities = [];
+      TimeUtc: TDateTime = 0): TCryptCertValidity; overload;
+    /// verify the digital signature of a given memory string
+    function Verify(const Signature, Data: RawByteString;
+      IgnoreError: TCryptCertValidities = [];
+      TimeUtc: TDateTime = 0): TCryptCertValidity; overload;
     /// how many trusted certificates are currently stored
     function Count: integer;
     /// how many CRLs are currently stored
     function CrlCount: integer;
-    /// return the prefered algo to be used with this store
+    /// return the preferred algo to be used with this store
     // - call e.g. CertAlgo.New to prepare a new ICryptCert to add to this store
     function DefaultCertAlgo: TCryptCertAlgo;
   end;
@@ -2948,7 +3047,10 @@ type
       date: TDateTime): TCryptCertValidity; virtual;
     function Verify(const Signature: RawByteString; Data: pointer; Len: integer;
       IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
-        virtual; abstract;
+        overload; virtual; abstract;
+    function Verify(const Signature, Data: RawByteString;
+      IgnoreError: TCryptCertValidities = [];
+      TimeUtc: TDateTime = 0): TCryptCertValidity; overload;
     function Count: integer; virtual; abstract;
     function CrlCount: integer; virtual; abstract;
     function DefaultCertAlgo: TCryptCertAlgo; virtual;
@@ -2964,7 +3066,7 @@ type
     function New: ICryptStore; virtual; abstract;
     /// main factory to create a new Store instance from saved Binary
     function NewFrom(const Binary: RawByteString): ICryptStore; virtual;
-    /// return the prefered algo to be used with this store
+    /// return the preferred algo to be used with this store
     // - should be the same class as ICryptStore.DefaultCertAlgo
     function DefaultCertAlgo: TCryptCertAlgo; virtual; abstract;
   end;
@@ -3306,6 +3408,9 @@ function IsCN(const Rdn: RawUtf8): boolean;
 function IsDer(const Rdn: RawUtf8): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
+/// compute the minimum JWK output from raw binary parameters
+function SaveAsJwk(algo: TCryptAsymAlgo; const x, y: RawByteString): RawUtf8;
+
 /// main resolver of the randomness generators
 // - a shared TCryptRandom instance is returned: caller should NOT free it
 // - e.g. Rnd.GetBytes(100) to get 100 random bytes from 'rnd-default' engine,
@@ -3424,7 +3529,7 @@ function StoreAlgo(const name: RawUtf8): TCryptStoreAlgo;
 function Store(const name: RawUtf8): ICryptStore;
 
 var
-  /// the prefered/default algorithm to be used wth X.509 certificates
+  /// the preferred/default algorithm to be used with X.509 certificates
   // - caaES256 (aka prime256v1 or NISTP-256) seems the new default (faster
   // and with 128-bit of security), even if RSA-2048 (i.e. caaRS256) may still
   // be used for compatiblity with legacy systems (but much slower signing and
@@ -4699,7 +4804,7 @@ var
 begin
   result := mcfInvalid;
   if (P = nil) or
-     (P^ <> '$') then
+     not (P^ in ['$', '#']) then // allow # prefix for SCRAM-like auth
     exit;
   inc(P);
   GetNextItem(P, '$', salt);
@@ -4714,6 +4819,8 @@ begin
       result := mcfSha256Crypt;
     6:
       result := mcfSha512Crypt;
+    7:
+      result := mcfSCrypt; // as in Unix crypt utility (but not identical)
   else
     result := TModularCryptFormat(FindNonVoidRawUtf8(@MCF_IDENT,
       pointer(salt), length(salt), length(MCF_IDENT)) + ord(low(MCF_IDENT)));
@@ -4784,8 +4891,7 @@ begin
         // rounds := <logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
         rounds := SCryptRounds(sLogN, sR, sP);
         GetNextItem(P, '$', salt);
-        if not Base64uriValid(pointer(salt), @ConvertBase64ToBin) or
-           not Base64uriValid(P, @ConvertBase64ToBin) then
+        if not Base64uriValid(pointer(salt), @ConvertBase64ToBin) then
           exit;
         result := mcfSCrypt;
         exit; // $scrypt$ charset is standard base64 and not passlib b64valid()
@@ -4803,10 +4909,9 @@ begin
   end
   else
     GetNextItem(P, '$', salt);
-  if not b64valid(pointer(salt)) or
-     not b64valid(P) then
+  if not b64valid(pointer(salt)) then
     result := mcfInvalid;
-end; // on success, P points to the {checksum} part
+end; // on success, P^ points to the {checksum} part - its encoding is unchecked
 
 function ModularCryptIdentify(const hash: RawUtf8; info: PRawUtf8): TModularCryptFormat;
 var
@@ -4848,7 +4953,8 @@ begin
   end;
 end;
 
-function ModularCryptHash(const format, password: RawUtf8): RawUtf8;
+function ModularCryptHash(const format, password: RawUtf8;
+  decodedFormat: PModularCryptFormat): RawUtf8;
 var
   mcf: TModularCryptFormat;
   P: PUtf8char;
@@ -4858,6 +4964,8 @@ begin
   FastAssignNew(result);
   P := pointer(format);
   mcf := ModularCryptParse(P, rounds, salt);
+  if decodedFormat <> nil then
+    decodedFormat^ := mcf;
   if mcf in mcfValid then
     result := ModularCryptHash(mcf, password, rounds, 0, salt);
 end;
@@ -4914,11 +5022,15 @@ function ModularCryptFakeInfo(const id: RawUtf8; format: TModularCryptFormat): R
 var
   h: THash256Rec; // always return the same fake content for the same id
   enc: PChar64;
-  salt: TShort23;
+  sha: TSha256;
+  salt: TShort23 absolute sha;
 const
   RANGE = cardinal(high(TModularCryptFormat)) - cardinal(mcfMd5Crypt); // = 9
 begin
-  HmacSha256(@SystemEntropy.Startup, pointer(id), 16, length(id), h.b);
+  sha.Init;
+  sha.Update(@SystemEntropy.Startup, SizeOf(SystemEntropy.Startup));
+  sha.Update(id);
+  sha.Final(h.b, {noinit=}true);
   if format <= mcfMd5Crypt then // compute consistent format if none supplied
     format := TModularCryptFormat(h.b[0] mod RANGE + byte(succ(mcfMd5Crypt)));
   Join(['$', MCF_IDENT[format], '$'], result);
@@ -5014,11 +5126,241 @@ begin
 end;
 
 
+// SCRAM-like mutual auth - see https://github.com/synopse/mORMot2/issues/405
+
+function ScramPersistedKey(const Hash, User: RawUtf8): RawUtf8;
+var
+  clientkey: THash256;
+  stored: THash512Rec; // Lo=StoredKey, Hi=ServerKey
+begin
+  result := ''; // error
+  if (Hash = '') or
+     (Hash[1] <> '$') or // should be a true KDF/MCF result
+     not (ModularCryptIdentify(Hash, @result) in mcfValid) then
+    exit;
+  HmacSha256U(pointer(Hash), length(Hash), [User, 'Client Key'], clientkey, '|');
+  Sha256Digest(stored.Lo, clientkey); // store H(clientkey) for ScramClientProof
+  HmacSha256U(pointer(Hash), length(Hash), [User, 'Server Key'], stored.Hi, '|');
+  result[1] := '#'; // "#MCF prefix" + base64uri(StoredKey + ServerKey)
+  Append(result, BinToBase64uri(stored.b));
+  FillZero(clientkey);
+  FillZero(stored.b);
+end;
+
+function ScramPersistedKey(Mcf: TModularCryptFormat; const Password, User: RawUtf8;
+  Rounds: cardinal): RawUtf8;
+begin
+  result := ScramPersistedKey(ModularCryptHash(mcf, Password, Rounds), User);
+end;
+
+function ScramPersistedKey(const McfFormat, Password, User: RawUtf8): RawUtf8;
+begin
+  result := ScramPersistedKey(ModularCryptHash(McfFormat, Password), User);
+end;
+
+function ScramClientProof(const Hash, User: RawUtf8; var ClientSignature: THash256;
+  const Msg: array of RawByteString): RawUtf8;
+var
+  clientkey, storedkey: THash256;
+begin
+  result := ''; // error
+  if (Hash = '') or
+     (Hash[1] <> '$') or // should be a true KDF/MCF result
+     not (ModularCryptIdentify(Hash) in mcfValid) then
+    exit;
+  HmacSha256U(pointer(Hash), length(Hash), [User, 'Client Key'], clientkey, '|');
+  Sha256Digest(storedkey, clientkey);
+  HmacSha256U(@storedkey, SizeOf(storedkey), Msg, ClientSignature, '|');
+  Xor256(@clientkey, @ClientSignature);
+  result := BinToBase64uri(clientkey);
+  FillZero(clientkey);
+  FillZero(storedkey);
+end;
+
+function ScramServerProof(const PersistedKey, ClientProof: RawUtf8;
+  const Msg: array of RawByteString): RawUtf8;
+var
+  l: PtrInt;
+  k: PAnsiChar;
+  clientsig, clientkey: THash256;
+  stored: THash512Rec; // Lo=StoredKey, Hi=ServerKey
+begin
+  result := ''; // error
+  if not Base64uriToBin(ClientProof, @clientkey, SizeOf(clientkey)) then
+    exit;
+  l := length(PersistedKey) - 86;
+  k := pointer(PersistedKey);
+  if (l < 0) or // should end with base64-uri encoded 2*256-bit = 86 chars
+     (k[0] <> '#') or
+     not Base64uriToBin(k + l, @stored, 86, SizeOf(stored)) then
+    exit;
+  HmacSha256U(@stored.Lo, SizeOf(stored.Lo), Msg, clientsig, '|');
+  Xor256(@clientkey, @clientsig);
+  Sha256Digest(clientkey, clientkey);
+  if IsEqual(clientkey, stored.Lo) then // H(candidate_ClientKey) = StoredKey
+  begin
+    Xor256(@stored.Hi, @clientsig);
+    result := BinToBase64uri(stored.Hi); // proof on success
+  end;
+  FillZero(clientkey);
+  FillZero(stored.b);
+end;
+
+function ScramClientServerAuth(const Hash, User, ServerProof: RawUtf8;
+  var ClientSignature: THash256): boolean;
+var
+  serverkey, proof: THash256;
+begin
+  result := false;
+  if (Hash <> '') and
+     (Hash[1] = '$') and // should be a true KDF/MCF result
+     Base64uriToBin(ServerProof, @proof, SizeOf(proof)) then
+  begin
+    HmacSha256U(pointer(Hash), length(Hash), [User, 'Server Key'], serverkey, '|');
+    Xor256(@proof, @ClientSignature);
+    result := IsEqual(proof, serverkey);
+    FillZero(proof);
+    FillZero(serverkey);
+  end;
+  FillZero(ClientSignature);
+end;
+
+
+{ TScramClient }
+
+constructor TScramClient.Create(aAlgo: TSignAlgo; aMcfSupport: boolean);
+begin
+  fAlgo := aAlgo;
+  fSize := SIGN_SIZE[aAlgo];
+  fMcfSupport := aMcfSupport;
+end;
+
+destructor TScramClient.Destroy;
+begin
+  FillZero(fAuthMessage);
+  FillZero(fServerProof);
+  inherited Destroy;
+end;
+
+function TScramClient.ComputeFirstMessage(const User: RawUtf8;
+  out Mechanism: RawUtf8; const TestForceNonce: RawUtf8): RawUtf8;
+var
+  usr: RawUtf8;
+begin
+  Join(['SCRAM-', SIGNER_TXT[fAlgo]], Mechanism);
+  if TestForceNonce <> '' then
+    fClientNonce := TestForceNonce // used against reference vectors
+  else
+  begin
+    Random128(@fSigner); // unpredictable - use fSigner as transient storage
+    fClientNonce := BinToBase64(@fSigner, SizeOf(THash128));
+  end;
+  usr := StringReplaceAll(User, ['=', '=3D', ',', '=2C']);
+  FormatUtf8('n=%,r=%', [usr, fClientNonce], fAuthMessage);
+  if fMcfSupport then
+    Append(fAuthMessage, ',f=y');
+  Join(['n,,', fAuthMessage], result);
+end;
+
+function TScramClient.ComputeFinalMessage(
+  const ServerResponse, Password: RawUtf8): RawUtf8;
+var
+  resp: TDocVariantData;
+  fullnonce, s, i, mcf, key, msg: RawUtf8;
+  salt: RawByteString;
+  iterations: integer;
+  salted, client, stored, server: THash512Rec;
+begin
+  // decode input parameters
+  result := '';
+  fServerProof := '';
+  if (fAuthMessage = '') or
+     (fClientNonce = '') then
+  begin
+    fLastError := 'out of order ComputeFinalMessage() usage';
+    exit;
+  end;
+  iterations := 0;
+  fLastError := 'invalid Server initial response';
+  resp.InitFromPairs(ServerResponse, JSON_FAST, '=', ',');
+  if not resp.GetAsRawUtf8('r', fullnonce) or
+     not StartWithExact(fullnonce, fClientNonce) then
+    exit;
+  if fMcfSupport and
+     resp.GetAsRawUtf8('f', mcf) then // SCRAM-MCF extension
+  begin
+    if fAlgo = saSha1 then
+      exit; // this weak algo is rejected by the draft RFC
+    mcf := ModularCryptHash(Base64ToBin(mcf), Password); // ignore i=..,s=..
+    if mcf = '' then
+      exit; // unsupported Modular Crypt algorithm or invalid prefix
+  end
+  else if not resp.GetAsRawUtf8('s', s) or
+          not Base64ToBin(pointer(s), length(s), salt) or
+          not resp.GetAsRawUtf8('i', i) or
+          not ToInteger(i, iterations) or
+          (iterations <= 0) or
+          (iterations > MAX_PBKDF2_ROUNDS) then // avoid DoS attacks
+    // invalid s=... and i=... standard SCRAM parameters
+    exit;
+  // hash password according to server expectations and compute client signature
+  Join(['c=biws,r=', fullnonce], key);
+  Join([fAuthMessage, ',', ServerResponse, ',', key], msg);
+  if mcf = '' then
+  begin
+    fSigner.Pbkdf2(fAlgo, Password, salt, iterations, @salted);
+    fSigner.Full(fAlgo, @salted, fSize, 'Client Key', @client);
+    fSigner.Full(fAlgo, @salted, fSize, 'Server Key', @server);
+    FillZero(salted, fSize);
+  end
+  else
+  begin
+    fSigner.Full(fAlgo, pointer(mcf), length(mcf), 'Client Key', @client);
+    fSigner.Full(fAlgo, pointer(mcf), length(mcf), 'Server Key', @server);
+    FillZero(mcf);
+  end;
+  // compute client and server proofs
+  fSigner.Hash(fAlgo, @client, fSize, stored);
+  fSigner.Full(fAlgo, @stored, fSize, msg, @stored);
+  XorMemory(@client, @stored, fSize);
+  Join([key, ',p=', BinToBase64(@client, fSize)], result); // client proof
+  fSigner.Full(fAlgo, @server, fSize, msg, @server);
+  fServerProof := BinToBase64(@server, fSize);             // server proof
+  fLastError := '';
+  FillZero(key);
+  FillZero(client, fSize);
+  FillZero(stored, fSize);
+  FillZero(server, fSize);
+end;
+
+function TScramClient.CheckFinalResponse(const ServerResponse: RawUtf8): boolean;
+var
+  resp: TDocVariantData;
+  proof: RawUtf8;
+begin
+  result := false;
+  if fServerProof = '' then
+  begin
+    fLastError := 'out of order CheckFinalResponse() usage';
+    exit;
+  end;
+  resp.InitFromPairs(ServerResponse, JSON_FAST, '=', ',');
+  if resp.GetAsRawUtf8('v', proof) then
+    if proof = fServerProof then
+    begin
+      fLastError := '';
+      result := true;
+    end
+    else
+      fLastError := 'invalid Server proof'
+  else
+    fLastError := 'invalid Server last response';
+end;
+
+
 { TSynSigner }
 
 const
-  SIGN_SIZE: array[TSignAlgo] of byte = (
-    20, 32, 48, 64, 28, 32, 48, 64, 32, 64, 28);
   BLOCK_SIZE: array[TSignAlgo] of byte = (
     15, 15, 31, 31, 0, 0, 0, 0, 0, 0, 15);
 
@@ -5088,9 +5430,9 @@ begin
   fHasher.UpdateBigEndian(aValue);
 end;
 
-procedure TSynSigner.Final(aSignature: PHash512Rec; aNoInit: boolean);
+function TSynSigner.Final(aSignature: PHash512Rec; aNoInit: boolean): integer;
 begin
-  fHasher.Final(aSignature^);
+  result := fHasher.Final(aSignature^);
   if fBlockMax = 0 then
     exit; // SHA-3 needs no HMAC
   fHasher.Update(@fStep7data, fBlockSize);
@@ -5122,6 +5464,20 @@ begin
   Init(aAlgo, aSecret, aSalt, aSecretPbkdf2Round);
   Update(aBuffer, aLen);
   result := Final;
+end;
+
+function TSynSigner.Full(aAlgo: TSignAlgo; aSecret: pointer; aSecretLen: PtrInt;
+  const aMessage: RawByteString; aHmac: PHash512Rec): integer;
+begin
+  Init(aAlgo, aSecret, aSecretLen);
+  Update(aMessage);
+  result := Final(aHMac);
+end;
+
+function TSynSigner.Hash(aAlgo: TSignAlgo; aBuffer: pointer; aLen: integer;
+  out aDigest: THash512Rec): integer;
+begin
+  result := fHasher.Full(SIGN_HASH[fAlgo], aBuffer, aLen, aDigest);
 end;
 
 function TSynSigner.Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
@@ -5270,7 +5626,9 @@ begin
      not (aAlgo in [low(MCF_SIGN) .. high(MCF_SIGN)]) then
     exit;
   if aRounds = 0 then
-    aRounds := MCF_ROUNDS[aAlgo]; // use default of each algorithm
+    aRounds := MCF_ROUNDS[aAlgo] // use default of each algorithm
+  else if aRounds > MAX_PBKDF2_ROUNDS then
+    exit; // avoid naive DoS attacks
   if aSaltSize = 0 then
     aSaltSize := 16;
   if HASH64_DEC[#255] = 0 then // check the last byte for thread-safe init
@@ -5514,12 +5872,12 @@ begin
   signer.Final(result);
 end;
 
-procedure Pbkdf2(algo: TSignAlgo; const password, salt: RawByteString;
-  count: integer; result: PHash512Rec);
+function Pbkdf2(algo: TSignAlgo; const password, salt: RawByteString;
+  count: integer; digest: PHash512Rec): integer;
 var
   signer: TSynSigner;
 begin
-  signer.Pbkdf2(algo, password, salt, count, result);
+  result := signer.Pbkdf2(algo, password, salt, count, digest);
 end;
 
 function Pbkdf2(algo: TSignAlgo; const password, salt: RawByteString;
@@ -8848,7 +9206,7 @@ begin
   // same logic than TJwtAbstract.Verify, but (slower and) with no cache
   // -> TJwtAbstract is to be preferred if the ICryptCert is reused
   result := cvWrongUsage;
-  P := PosChar(pointer(Jwt), '.');
+  P := PosCharU(Jwt, '.');
   if P = nil then
     exit;
   S := PosChar(P + 1, '.');
@@ -8892,24 +9250,11 @@ end;
 function TCryptCert.JwkCompute: RawUtf8;
 var
   x, y: RawByteString;
-  bx, by: RawUtf8;
-  caa: TCryptAsymAlgo;
 begin
-  // retrieve raw public key parameters
+  // retrieve raw public key parameters and export as JWT
   result := '';
-  if not GetKeyParams(x, y) then
-    exit;
-  bx := BinToBase64uri(x);
-  by := BinToBase64uri(y);
-  // parameters are ordered lexicographically, as expected for thumbprints
-  caa := AsymAlgo;
-  if caa in CAA_ECC then
-    // for ECC, GetKeyParams() returned the x,y coordinates
-    FormatUtf8('{"crv":"%","kty":"EC","x":"%","y":"%"}',
-                  [CAA_CRV[caa], bx, by], result)
-  else
-    // for RSA, x was set to the Exponent (e), and y to the Modulus (n)
-    FormatUtf8('{"e":"%","kty":"RSA","n":"%"}', [bx, by], result);
+  if GetKeyParams(x, y) then
+    result := SaveAsJwk(AsymAlgo, x, y);
 end;
 
 function TCryptCert.SharedSecret(const pub: ICryptCert): RawByteString;
@@ -9084,6 +9429,12 @@ begin
   if n > 1 then
     date := c[n - 2].GetNotBefore; // anchor is not main: adjust date
   result := IsValid(c[n - 1], date);
+end;
+
+function TCryptStore.Verify(const Signature, Data: RawByteString;
+  IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
+begin
+  result := Verify(Signature, pointer(Data), length(Data), IgnoreError, TimeUtc);
 end;
 
 function TCryptStore.DefaultCertAlgo: TCryptCertAlgo;
@@ -9630,6 +9981,27 @@ begin
                ord('D') + ord('E') shl 8 + ord('R') shl 16);
 end;
 
+function SaveAsJwk(algo: TCryptAsymAlgo; const x, y: RawByteString): RawUtf8;
+var
+  bx, by: RawUtf8;
+begin
+  result := '';
+  if (x = '') or
+     (y = '') or
+     (algo in [caaEdDSA]) then // EDSA not yet supported (single "x" parameter)
+    exit;
+  bx := BinToBase64uri(x);
+  by := BinToBase64uri(y);
+  // parameters are ordered lexicographically, as expected for thumbprints
+  if algo in CAA_ECC then
+    // for ECC, GetKeyParams() returned the x,y coordinates
+    FormatUtf8('{"crv":"%","kty":"EC","x":"%","y":"%"}',
+                  [CAA_CRV[algo], bx, by], result)
+  else
+    // for RSA, x was set to the Exponent (e), and y to the Modulus (n)
+    FormatUtf8('{"e":"%","kty":"RSA","n":"%"}', [bx, by], result);
+end;
+
 
 { Register mormot.crypt.core and mormot.crypt.secure Algorithms }
 
@@ -10062,7 +10434,7 @@ begin
 end;
 
 const
-  CAA_SIZE: array[TCryptAsymAlgo] of integer = (
+  CAA_SIZE: array[TCryptAsymAlgo] of byte = (
     32,  // caaES256
     48,  // caaES384
     66,  // caaES512

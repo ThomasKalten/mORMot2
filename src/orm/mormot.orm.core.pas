@@ -1062,7 +1062,7 @@ type
     // SessionID=CONST_AUTHENTICATION_NOT_USED=1 parameter)
     // - if you have an external database engine which expect transactions to
     // take place in the same thread, ensure TRestServer force execution of
-    // this method when accessed from RESTful clients in the same thread, e.g.:
+    // this method when accessed from RESTful clients in the same thread, e.g.
     // ! AcquireExecutionMode[execOrmWrite] := amBackgroundThread;
     // ! AcquireWriteMode := amBackgroundThread; // same as previous
     function TransactionBegin(aTable: TOrmClass;
@@ -1085,7 +1085,7 @@ type
     // SessionID=CONST_AUTHENTICATION_NOT_USED=1 parameter)
     // - if you have an external database engine which expect transactions to
     // take place in the same thread, ensure TRestServer force execution of
-    // this method when accessed from RESTful clients in the same thread, e.g.:
+    // this method when accessed from RESTful clients in the same thread, e.g.
     // ! AcquireExecutionMode[execOrmWrite] := amBackgroundThread;
     // ! AcquireWriteMode := amBackgroundThread; // same as previous
     // - by default, any exception will be catch and ignored, unless RaiseException
@@ -2767,7 +2767,7 @@ type
     /// this property stores the record's integer ID
     // - if this TOrm is not a instance, but a field value in a published
     //  property of type oftID (i.e. TOrm(aID)), this method will try
-    //  to retrieve it; but prefered method is to typecast it via PtrInt(aProperty),
+    //  to retrieve it; but preferred method is to typecast it via PtrInt(aProperty),
     //  because GetID() relies on some low-level Windows memory mapping trick, and
     //  will recognize an ID value up to 1,048,576 (i.e. $100000)
     // - notice: the Setter should not be used usualy; you should not have to write
@@ -2847,11 +2847,9 @@ type
   public
     /// ensure the current thread will be taken into account during process
     // - this abstract method won't do anything, but overriden versions may
-    // - low-level method used directly from mormot.rest.core.pas
     procedure BeginCurrentThread(Sender: TThread); virtual;
     /// called when thread is finished to ensure
     // - this abstract method won't do anything, but overriden versions may
-    // - low-level method used directly from mormot.rest.core.pas
     procedure EndCurrentThread(Sender: TThread); virtual;
   end;
 
@@ -3220,7 +3218,7 @@ type
     /// retrieve all records associated to a particular source record, which
     // has a TOrmMany property
     // - returns the Count of records corresponding to this aSource record
-    // - the records are stored in an internal TOrmTable, refered in the private
+    // - the records are stored in an internal TOrmTable, referred in the private
     // fTable field, and initialized via a FillPrepare call: all Dest items
     // are therefore accessible with standard FillRow, FillOne and FillRewind methods
     // - use a "for .." loop or a "while FillOne do ..." loop to iterate
@@ -3999,6 +3997,7 @@ type
     procedure Fts4WithoutContent(ContentTable: TOrmClass);
 
     /// the table index of this TOrm in the associated Model
+    // - in range [0..MAX_TABLES-1] = [0..255] by default
     property TableIndex: integer
       read fTableIndex;
     /// direct access to a property RTTI information, by name
@@ -4252,7 +4251,7 @@ type
     // - use this to create a working copy of a table's record, e.g.
     // - don't forget to Free it when not used any more (use a try...finally
     // block)
-    // - it's prefered in practice to directly call TOrm*.Create()
+    // - it's preferred in practice to directly call TOrm*.Create()
     // in your code
     function NewRecord(const SqlTableName: RawUtf8): TOrm;
 
@@ -4508,11 +4507,11 @@ type
     fInternalBufferSize: integer;
     fCalledWithinRest: boolean;
     fPreviousTableMatch: boolean;
+    fOptions: TRestBatchOptions;
     fBatch: TOrmWriter;
     fTable: TOrmClass;
     fTableIndex: integer;
     fBatchCount: integer;
-    fOptions: TRestBatchOptions;
     fAddCount: integer;
     fUpdateCount: integer;
     fDeleteCount: integer;
@@ -5919,7 +5918,7 @@ dt:     if Value <> 0 then
               if (Value <> 0) and
                  (Model<> nil) then // 'TableName ID'
                 {$ifdef UNICODE}
-                Text := Ansi7ToString(Ref.Text(Model))
+                Ansi7ToString(Ref.Text(Model), Text)
                 {$else}
                 Text := Ref.Text(Model)
                 {$endif UNICODE}
@@ -6039,7 +6038,7 @@ end;
 
 function TOrmTableJson.ParseAndConvert(Buffer: PUtf8Char; BufferLen: PtrInt): boolean;
 var
-  i, max, resmax, f: PtrInt;
+  i, max, resmax, f, fc: PtrInt;
   P: PUtf8Char;
   datavoid: TOrmTableData; // used for all JSON "" values
   info: TGetJsonField;
@@ -6057,19 +6056,18 @@ begin
   fDataStart := Buffer; // before first value, to ensure offset=0 means nil
   {$endif NOPOINTEROFFSET}
   info.Json := GotoNextNotSpace(Buffer);
-  if IsNotExpandedBuffer(info.Json, Buffer + BufferLen, fFieldCount, fRowCount) then
+  if IsNotExpandedBuffer(info.Json, Buffer + BufferLen, fc, max) then
   begin
     // A. Not Expanded (more optimized) format as array of values
     // {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
     // 1. check RowCount and DataLen
-    if fRowCount < 0 then
-    begin
+    if max < 0 then
       // IsNotExpandedBuffer() detected invalid input
-      fRowCount := 0;
       exit;
-    end;
+    fRowCount := max;
+    fFieldCount := fc;
     // 2. initialize and fill fResults[] PPUtf8CharArray memory
-    max := (fRowCount + 1) * fFieldCount;
+    max := (max + 1) * fc;
     SetLength(fJsonData, max);
     {$ifndef NOTORMTABLELEN}
     SetLength(fLen, max);
@@ -6461,10 +6459,8 @@ var
   fieldname: PUtf8Char;
   props: TOrmProperties;
 begin
-  if aTable = nil then // avoid any GPF
-    exit;
   fTable := aTable;
-  if aTable.fData = nil then
+  if aTable.RowCount = 0 then
     exit; // void content
   props := nil;
   if aCheckTableName <> ctnNoCheck then
@@ -8167,8 +8163,7 @@ begin
     exit;
   T := TOrmTableJson.CreateFromTables(ObjectsClass, sql, json,
     {ownJSON=}(GetRefCount(json) = 1));
-  if (T = nil) or
-     (T.fData = nil) then
+  if T.RowCount = 0 then
   begin
     T.Free;
     exit;

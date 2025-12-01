@@ -83,7 +83,7 @@ unit mormot.net.relay;
   down for whatever reason (e.g. network failure), both ends will be notified
   with no dandling sockets.
 
-  Warning: over such relay, rsoSharedNonce is mandatory in TRestServer.Options.
+  Warning: such relay is incompatible with rsoPerConnectionNonce server option.
 
   See Sample "WebSockets Relay" for a stand-alone Public Relay project,
   which could be reused as plain binary - no recompilation is needed.
@@ -269,7 +269,7 @@ type
   end;
 
   /// implements a Public Relay server, e.g. located on a small Linux/BSD box
-  // - warning: over such a relay, rsoSharedNonce is mandatory in TRestServer.Options
+  // - warning: relay is incompatible with rsoPerConnectionNonce server option
   TPublicRelay = class(TAbstractRelay)
   protected
     fServerJwt: TJwtAbstract;
@@ -319,7 +319,7 @@ type
 
   /// implements a Private Relay client, located in a private network behind
   // a restricted firewall
-  // - warning: over such relay, rsoSharedNonce is mandatory in TRestServer.Options
+  // - warning: relay is incompatible with rsoPerConnectionNonce server option
   TPrivateRelay = class(TAbstractRelay)
   protected
     fRelayHost, fRelayPort, fRelayKey, fRelayCustomHeaders,
@@ -663,7 +663,7 @@ begin
         if rest.contenttype = '' then
           rest.contenttype := JSON_CONTENT_TYPE_VAR;
         rest.status := http.Request(rest.url, rest.method, {keepalive=}0,
-          rest.headers, rest.content, rest.contenttype, {retry=}false);
+          rest.headers, rest.content, rest.contenttype, {AsRetry=}false);
         SetRestFrame(Frame, rest.status, '', '', http.Http.Headers,
           http.Http.Content, http.Http.ContentType);
         log.Log(sllTrace, 'ProcessIncomingFrame: answered [%] %',
@@ -969,7 +969,7 @@ begin
     begin
       fLog.Add.Log(sllWarning, 'OnBeforeBody % already connected to %',
         [aRemoteIP, fServerConnected.Protocol.RemoteIP], self);
-      result := HTTP_NOTACCEPTABLE;
+      result := HTTP_NOTACCEPTABLE; // 406
     end
     else
       result := HTTP_SUCCESS // valid bearer -> continue the request
@@ -1002,6 +1002,19 @@ var
   frame: TWebSocketFrame;
   start, diff: Int64;
   log: ISynLog;
+
+  procedure HandleCleanup; // sub-function for FPC Win64-aarch64 compilation
+  begin
+    Safe.Lock;
+    try
+      if PtrArrayDelete(fRestFrame, Ctxt, @fRestFrameCount) < 0 then
+        if log <> nil then
+          log.Log(sllWarning, 'OnClientsRequest: no Ctxt in fRestFrame[]', self);
+    finally
+      Safe.UnLock;
+    end;
+  end;
+
 begin
   fLog.EnterLocal(log, 'OnClientsRequest #% % % %',  [Ctxt.ConnectionID,
     Ctxt.RemoteIP, Ctxt.Method, Ctxt.Url], self);
@@ -1055,14 +1068,7 @@ begin
     until false;
   finally
     LockedDec32(@fRestPending);
-    Safe.Lock;
-    try
-      if PtrArrayDelete(fRestFrame, Ctxt, @fRestFrameCount) < 0 then
-        if log <> nil then
-          log.Log(sllWarning, 'OnClientsRequest: no Ctxt in fRestFrame[]', self);
-    finally
-      Safe.UnLock;
-    end;
+    HandleCleanup;
   end;
 end;
 

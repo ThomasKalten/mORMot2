@@ -641,13 +641,21 @@ type
     acAppend);
 
 {$ifndef NOEXCEPTIONINTERCEPT}
-
   /// callback signature used by TSynLogFamilly.OnBeforeException
   // - should return false to log the exception, or true to ignore it
   TOnBeforeException = function(const Context: TSynLogExceptionContext;
     const ThreadName: shortstring): boolean of object;
+  {$endif NOEXCEPTIONINTERCEPT}
 
-{$endif NOEXCEPTIONINTERCEPT}
+  /// available TSynLogThreadInfo.Flags definition
+  // - tiExceptionIgnore store TSynLogFamily.ExceptionIgnoreCurrentThread
+  // property (used only if NOEXCEPTIONINTERCEPT conditional is undefined)
+  // - tiTemporaryDisable store TSynLogFamily.DisableCurrentThread property
+  TSynLogThreadInfoFlag = (
+    tiExceptionIgnore,
+    tiTemporaryDisable);
+  /// TSynLogThreadInfo.Flags property set type definition
+  TSynLogThreadInfoFlags = set of TSynLogThreadInfoFlag;
 
   /// regroup several logs under an unique family name
   // - you should usualy use one family per application or per architectural
@@ -671,7 +679,7 @@ type
   // ! end; // when logger is out-of-scope, will log the method leaving
   TSynLogFamily = class
   protected
-    fLevel, fLevelStackTrace, fLevelSysInfo: TSynLogLevels;
+    fLevel, fLevelStackTrace, fLevelSysInfo: TSynLogLevels; // 3 * 32-bit
     fHighResolutionTimestamp: boolean;
     fLocalTimestamp: boolean;
     fZonedTimestamp: boolean;
@@ -688,7 +696,7 @@ type
     fNoEnvironmentVariable: boolean;
     {$endif OSWINDOWS}
     {$ifndef NOEXCEPTIONINTERCEPT}
-    fHandleExceptions: boolean;
+    fHandleExceptions, fExceptionIgnoreLibrary: boolean;
     fOnBeforeException: TOnBeforeException;
     {$endif NOEXCEPTIONINTERCEPT}
     fAutoFlushTimeOut: cardinal;
@@ -729,12 +737,10 @@ type
     function GetSynLogClassName: string;
     function ArchiveAndDeleteFile(const aFileName: TFileName): boolean;
     function GetArchiveDestPath(age: TDateTime): TFileName;
-    {$ifndef NOEXCEPTIONINTERCEPT}
-    function GetExceptionIgnoreCurrentThread: boolean;
-    procedure SetExceptionIgnoreCurrentThread(aExceptionIgnoreCurrentThread: boolean);
-    {$endif NOEXCEPTIONINTERCEPT}
+    function GetCurrentThreadFlag(ti: TSynLogThreadInfoFlag): boolean;
+    procedure SetCurrentThreadFlag(ti: TSynLogThreadInfoFlag; value: boolean);
   public
-    /// intialize for a TSynLog class family
+    /// initialize for a TSynLog class family
     // - add it in the global SynLogFileFamily[] list
     constructor Create(aSynLog: TSynLogClass);
     /// close any console echo, and release associated memory
@@ -795,7 +801,22 @@ type
     // - see also ExceptionIgnore property - which is also checked in addition
     // to this flag
     property ExceptionIgnoreCurrentThread: boolean
-      read GetExceptionIgnoreCurrentThread write SetExceptionIgnoreCurrentThread;
+      index tiExceptionIgnore read GetCurrentThreadFlag write SetCurrentThreadFlag;
+    /// set true will log exceptions only from the main executable, not from library
+    // - will follow IsMainExecutable() result
+    property ExceptionIgnoreLibrary: boolean
+      read fExceptionIgnoreLibrary write fExceptionIgnoreLibrary;
+    /// allow to temporarly avoid logging in the current thread
+    // - won't affect exceptions logging, as one would expect for safety reasons
+    // - after setting true to this property, should eventually be reset to false:
+    // ! TSynLog.Family.DisableCurrentThread := true;
+    // ! try
+    // !   ...
+    // ! finally
+    // !   TSynLog.Family.DisableCurrentThread := false;
+    // ! end;
+    property DisableCurrentThread: boolean
+      index tiTemporaryDisable read GetCurrentThreadFlag write SetCurrentThreadFlag;
     /// you can let exceptions be ignored from a callback
     // - if set and returns true, the given exception won't be logged
     // - execution of this event handler is protected via the logs global lock
@@ -1036,13 +1057,15 @@ type
     /// number of recursive calls currently stored in Recursion[]
     // - nothing logged above MAX_SYNLOGRECURSION (53) to keep this record small
     RecursionCount: byte;
-    /// store TSynLogFamily.ExceptionIgnoreCurrentThread property
-    // - used only if NOEXCEPTIONINTERCEPT conditional is defined
-    ExceptionIgnore: boolean;
+    /// store per-thread behavior, e.g. to disable exceptions or whole logging
+    Flags: TSynLogThreadInfoFlags;
     /// the internal number of this thread, stored as text using Int18ToChars3()
+    // - is a value in [1..MAX_SYNLOGTHREADS=65500] range after InitThreadNumber
     // - see SynLogThreads.Ident[ThreadNumber - 1] for ptIdentifiedInOneFile
+    // - raw value can be retrieved from TSynLog.ThreadIndex class method
     ThreadNumber: word;
     /// pre-computed "1 shl ((ThreadNumber - 1) and 31)" value
+    // - equals 0 if InitThreadNumber() needs to be called
     ThreadBitLo: cardinal;
     /// pre-computed "(ThreadNumber - 1) shr 5" value
     ThreadBitHi: word;
@@ -1079,7 +1102,7 @@ type
     fThreadInfo: PSynLogThreadInfo;
     fFlags: set of (logFileHeaderWritten, logInitDone, logAddThreadName);
     fPendingFlags: set of (pendingDisableRemoteLogLeave, pendingRotate);
-    fExceptionIgnoredBackup: boolean; // with NOEXCEPTIONINTERCEPT conditional
+    fThreadInfoBackup: TSynLogThreadInfoFlags;
     fISynLogOffset: integer;
     fStartTimestamp: Int64;
     fWriterEcho: TEchoWriter;
@@ -1100,15 +1123,16 @@ type
     function _Release: TIntCnt;
       {$ifdef OSWINDOWS} stdcall {$else} {$ifdef ISDELPHI} stdcall {$else} cdecl {$endif}{$endif};
     // internal methods
-    function DoEnter: PSynLogThreadInfo;
+    function DoEnter: PSynLogThreadInfo; // returns nil if sllEnter is disabled
       {$ifdef FPC}inline;{$endif}
     procedure RaiseDoEnter;
-    procedure LockAndPrepareEnter(nfo: PSynLogThreadInfo); // no profit inlining
-    procedure LockAndDisableExceptions; // no profit inlining
+    procedure LockAndPrepareEnter(nfo: PSynLogThreadInfo;
+      microsecs: PInt64); // no profit inlining
+    function LockAndDisableExceptions: boolean; // no profit inlining
     procedure LogEnter(nfo: PSynLogThreadInfo; inst: TObject; txt: PUtf8Char
       {$ifdef ISDELPHI} ; addr: PtrUInt = 0 {$endif});
     procedure LogEnterFmt(nfo: PSynLogThreadInfo; inst: TObject;
-      fmt: PUtf8Char; args: PVarRec; argscount: PtrInt);
+      fmt: PUtf8Char; args: PVarRec; argscount: PtrInt; microsecs: PInt64);
     procedure AddLogThreadName;
     procedure CreateLogWriter; virtual;
     procedure OnFlushToStream(Text: PUtf8Char; Len: PtrInt);
@@ -1137,7 +1161,7 @@ type
     function ConsoleEcho(Sender: TEchoWriter; Level: TSynLogLevel;
       const Text: RawUtf8): boolean; virtual;
   public
-    /// intialize for a TSynLog class instance
+    /// initialize for a TSynLog class instance
     // - WARNING: not to be called directly! Use TSynLog.Enter or TSynLog.Add
     // class functions instead
     constructor Create(aFamily: TSynLogFamily = nil); virtual;
@@ -1283,6 +1307,16 @@ type
     /// check some specific level(s) in the family of this TSynLog class type
     class function HasLevel(levels: TSynLogLevels): boolean;
       {$ifndef NOPATCHVMT} {$ifdef HASINLINE}inline;{$endif} {$endif}
+    /// return a sequential 16-bit integer to identify the current thread
+    // - as stored internally by TSynLogThreadInfo.ThreadNumber - 1
+    // - by design, returns a value in range [0 .. MAX_SYNLOGTHREADS - 1]
+    // - could be used as a sequential small alternative to GetCurrentThreadId
+    // if you know that TSynLog.NotifyThreadEnded is properly called
+    // - note that after TSynLog.NotifyThreadEnded call, a number/slot will be
+    // reused so it could be a nice way of implementing per-thread resources
+    // with automatic re-use between short-living threads, e.g. as it is
+    // by TSqlDBConnectionPropertiesThreadSafe.ThreadSafeConnection
+    class function ThreadIndex: PtrInt; {$ifdef HASINLINE} static; {$endif}
     /// returns a logging class which will never log anything
     // - i.e. a TSynLog sub-class with Family.Level := []
     class function Void: TSynLogClass;
@@ -1377,7 +1411,7 @@ type
     // - may be used to log Enter/Leave stack from non-pascal code
     // - each call to ManualEnter should be followed by a matching ManualLeave
     procedure ManualEnter(aInstance: TObject; TextFmt: PUtf8Char;
-      const TextArgs: array of const); overload;
+      const TextArgs: array of const; MicroSecs: PInt64 = nil); overload;
     /// manual low-level ISynLog release after TSynLog.Enter execution
     // - each call to ManualEnter should be followed by a matching ManualLeave
     procedure ManualLeave;
@@ -1482,6 +1516,7 @@ procedure GetLastExceptions(out result: TSynLogExceptionInfoDynArray;
 
 var
   /// a run-time alternative to the NOEXCEPTIONINTERCEPT global conditional
+  // - this global variable affects TSynLogFamily.SetLevel() process
   SynLogNoExceptionIntercept: boolean;
 
 {$endif NOEXCEPTIONINTERCEPT}
@@ -2338,8 +2373,8 @@ const
   DW_LNE_SET_ADDRESS = 2;
   DW_LNE_DEFINE_FILE = 3;
 
-  DW_TAG_class_type = 2;      // map object pascal class or object
-  DW_TAG_structure_type = 19; // map object pascal record
+  DW_TAG_class_type = 2;      // map Object Pascal class or object
+  DW_TAG_structure_type = 19; // map Object Pascal record
   DW_TAG_subprogram = 46;     // map object function or method
 
   DW_AT_name = $3;
@@ -4008,7 +4043,7 @@ begin
         end;
     end;
   until Terminated;
-  // Terminated is set: eventually display delayed console ouput
+  // Terminated is set: eventually display delayed console output
   try
     FlushConsole;
   except
@@ -4045,6 +4080,59 @@ begin
   result := nil;
 end;
 {$endif NOEXCEPTIONINTERCEPT}
+
+type
+  TSynLogThreads = record
+    Safe: TLightLock;       // topmost to ensure aarch64 alignment
+    Name: TRawUtf8DynArray; // Name[ThreadNumber - 1] for ptIdentifiedInOneFile
+    Count: integer;         // as returned by TSynLog.ThreadCount
+    IndexReleasedCount: integer;
+    IndexReleased: TWordDynArray; // reuse TSynLogThreadInfo.ThreadNumber
+  end;
+  PSynLogThreads = ^TSynLogThreads;
+
+var
+  // threads information shared by all TSynLog, protected by its own TLightLock
+  SynLogThreads: TSynLogThreads;
+
+procedure InitThreadNumber(nfo: PSynLogThreadInfo);
+var
+  thd: PSynLogThreads;
+  num: cardinal; // in [1..MAX_SYNLOGTHREADS=65500] range
+begin
+  // compute the thread number - reusing any pre-existing closed thread number
+  thd := @SynLogThreads;
+  thd^.Safe.Lock;
+  try
+    if thd^.IndexReleasedCount <> 0 then // reuse NotifyThreadEnded() slot
+    begin
+      dec(thd^.IndexReleasedCount);
+      num := thd^.IndexReleased[thd^.IndexReleasedCount];
+    end
+    else
+    begin
+      if thd^.Count >= MAX_SYNLOGTHREADS then
+        ESynLogException.RaiseUtf8('Too many threads (%): ' +
+          'check for missing TSynLog.NotifyThreadEnded', [thd^.Count]);
+      inc(thd^.Count);    // new thread number
+      num := thd^.Count;
+    end;
+  finally
+    thd^.Safe.UnLock;
+  end;
+  nfo^.ThreadNumber := num;
+  // pre-compute GetBitPtr() constants for SetThreadInfoAndThreadName()
+  dec(num);
+  nfo^.ThreadBitLo := 1 shl (num and 31); // 32-bit fThreadNameLogged[] value
+  nfo^.ThreadBitHi := num shr 5;          // index in fThreadNameLogged[]
+end;
+
+function GetThreadInfo: PSynLogThreadInfo; {$ifdef HASINLINE} inline; {$endif}
+begin
+  result := @PerThreadInfo; // access the threadvar
+  if result^.ThreadBitLo = 0 then
+    InitThreadNumber(result); // initialized once per thread
+end;
 
 
 { TSynLogFamily }
@@ -4140,20 +4228,22 @@ begin
   fLevelSysInfo := [sllException, sllExceptionOS, sllLastError, sllNewRun];
 end;
 
-{$ifndef NOEXCEPTIONINTERCEPT}
-
-function TSynLogFamily.GetExceptionIgnoreCurrentThread: boolean;
+function TSynLogFamily.GetCurrentThreadFlag(ti: TSynLogThreadInfoFlag): boolean;
 begin
-  result := PerThreadInfo.ExceptionIgnore; // private threadvar access
+  result := ti in PerThreadInfo.Flags; // private threadvar access
 end;
 
-procedure TSynLogFamily.SetExceptionIgnoreCurrentThread(
-  aExceptionIgnoreCurrentThread: boolean);
+procedure TSynLogFamily.SetCurrentThreadFlag(ti: TSynLogThreadInfoFlag;
+  value: boolean);
+var
+  flags: ^TSynLogThreadInfoFlags;
 begin
-  PerThreadInfo.ExceptionIgnore := aExceptionIgnoreCurrentThread;
+  flags := @PerThreadInfo.Flags; // no need of GetThreadInfo/InitThreadNumber
+  if value then
+    include(flags^, ti)
+  else
+    exclude(flags^, ti);
 end;
-
-{$endif NOEXCEPTIONINTERCEPT}
 
 function TSynLogFamily.CreateSynLog: TSynLog;
 begin
@@ -4624,59 +4714,6 @@ begin
   fWriterEcho.AddEndOfLine(Level); // AddCR + any per-line echo suport
 end;
 
-type
-  TSynLogThreads = record
-    Safe: TLightLock; // topmost to ensure aarch64 alignment
-    Name: TRawUtf8DynArray; // Name[ThreadNumber - 1] for ptIdentifiedInOneFile
-    Count: integer; // as returned by TSynLog.ThreadCount
-    IndexReleasedCount: integer;
-    IndexReleased: mormot.core.base. TWordDynArray; // reuse TSynLogThreadInfo.ThreadNumber
-  end;
-  PSynLogThreads = ^TSynLogThreads;
-
-var
-  // threads information shared by all TSynLog, protected by its own TLightLock
-  SynLogThreads: TSynLogThreads;
-
-procedure InitThreadNumber(nfo: PSynLogThreadInfo);
-var
-  thd: PSynLogThreads;
-  num: cardinal;
-begin
-  // compute the thread number - reusing any pre-existing closed thread number
-  thd := @SynLogThreads;
-  thd^.Safe.Lock;
-  try
-    if thd^.IndexReleasedCount <> 0 then // reuse NotifyThreadEnded() slot
-    begin
-      dec(thd^.IndexReleasedCount);
-      num := thd^.IndexReleased[thd^.IndexReleasedCount];
-    end
-    else
-    begin
-      if thd^.Count >= MAX_SYNLOGTHREADS then
-        ESynLogException.RaiseUtf8('Too many threads (%): ' +
-          'check for missing TSynLog.NotifyThreadEnded', [thd^.Count]);
-      inc(thd^.Count); // new thread index
-      num := thd^.Count;
-    end;
-  finally
-    thd^.Safe.UnLock;
-  end;
-  nfo^.ThreadNumber := num;
-  // pre-compute GetBitPtr() constants for SetThreadInfoAndThreadName()
-  dec(num);
-  nfo^.ThreadBitLo := 1 shl (num and 31); // 32-bit fThreadNameLogged[] value
-  nfo^.ThreadBitHi := num shr 5;          // index in fThreadNameLogged[]
-end;
-
-function GetThreadInfo: PSynLogThreadInfo; {$ifdef HASINLINE} inline; {$endif}
-begin
-  result := @PerThreadInfo; // access the threadvar
-  if PInteger(result)^ = 0 then // first access
-    InitThreadNumber(result);
-end;
-
 procedure InternalSetCurrentThreadName(const Name: RawUtf8);
 var
   ndx: PtrInt;
@@ -4684,7 +4721,7 @@ var
 begin
   if SynLogFileFreeing then
     exit; // avoid GPF
-  ndx := GetThreadInfo^.ThreadNumber - 1; // may call InitThreadNumber()
+  ndx := PtrInt(GetThreadInfo^.ThreadNumber) - 1; // may call InitThreadNumber()
   if ndx < 0 then
     exit; // paranoid
   thd := @SynLogThreads;
@@ -4698,18 +4735,27 @@ begin
   end;
 end;
 
+class function TSynLog.ThreadIndex: PtrInt;
+begin
+  result := PtrInt(GetThreadInfo^.ThreadNumber) - 1;
+  // warning: caller should ensure TSynLog.NotifyThreadEnded proper call
+end;
+
 class procedure TSynLog.NotifyThreadEnded;
 var
+  s: PShortString;
   nfo: PSynLogThreadInfo;
   thd: PSynLogThreads;
   num, i: PtrInt;
 begin
-  CurrentThreadNameShort^[0] := #0; // reset TShort31 threadvar for consistency
+  s := CurrentThreadNameShort;
+  if s^[0] <> #0 then // avoid GPF if returned @NULCHAR
+    s^[0] := #0; // reset TShort31 threadvar for consistency
   nfo := @PerThreadInfo; // no automatic InitThreadNumber()
   num := nfo^.ThreadNumber;
   if num = 0 then // not touched yet by TSynLog, or called twice
     exit;
-  PInteger(nfo)^ := 0; // force InitThreadNumber on next thread access
+  nfo^.ThreadBitLo := 0; // force InitThreadNumber on next thread access
   // reset global thread information
   if SynLogFileFreeing then
     exit; // inconsistent call at shutdown
@@ -4749,7 +4795,7 @@ begin
   if ndx < 0 then
     exit; // paranoid
   if ndx >= length(fThreadNameLogged) shl 5 then   // 32-bit array
-    SetLength(fThreadNameLogged, (ndx shr 5)  + 32); // + 1K threads
+    SetLength(fThreadNameLogged, (ndx shr 5)  + 32); // alloc per 1K threads
   SetBitPtr(fThreadNameLogged, ndx);
   // add the "SetThreadName" sllInfo line in the expected format
   // see TSynLogFile.ProcessOneLine() for the expected format
@@ -4792,13 +4838,15 @@ begin // caller just made GlobalThreadLock.Lock
   log.AddLogThreadName;
 end;
 
-procedure TSynLog.LockAndDisableExceptions;
+function TSynLog.LockAndDisableExceptions: boolean;
 var
   nfo: PSynLogThreadInfo;
 begin
-  nfo := @PerThreadInfo; // access the threadvar - inlined GetThreadInfo
-  if PInteger(nfo)^ = 0 then // first access
-    InitThreadNumber(nfo);
+  nfo := @PerThreadInfo; // access the threadvar
+  if not (tiTemporaryDisable in nfo^.Flags) then
+  begin
+    if nfo^.ThreadBitLo = 0 then
+      InitThreadNumber(nfo); // first access - inlined GetThreadInfo
   if not (logInitDone in fFlags) then
     LogFileInit(nfo); // run once, to set start time and write headers
   FillInfo(nfo, nil); // syscall outside of GlobalThreadLock
@@ -4806,11 +4854,15 @@ begin
   SetThreadInfoAndThreadName(self, nfo);
   {$ifndef NOEXCEPTIONINTERCEPT}
   // any exception within logging process will be ignored from now on
-  fExceptionIgnoredBackup := nfo^.ExceptionIgnore;
-  // caller should always perform in its finally ... end block an eventual:
-  //   fThreadInfo^.ExceptionIgnore := fExceptionIgnoredBackup;
-  nfo^.ExceptionIgnore := true;
+    fThreadInfoBackup := nfo^.Flags;
+    // caller should always eventually perform in its finally ... end block:
+    //    fThreadInfo^.Flags := fThreadInfoBackup;
+    include(nfo^.Flags, tiExceptionIgnore);
   {$endif NOEXCEPTIONINTERCEPT}
+    result := true; // normal process, with eventual fThreadInfoBackup + UnLock
+  end
+  else
+    result := false; // TSynLogFamily.DisableCurrentThread=true for this thread
 end;
 
 function TSynLog.QueryInterface(
@@ -4973,16 +5025,20 @@ begin
      (fFamily.fPerThreadLog = ptNoThreadProcess) then // don't mess with recursion
     exit;
   result := GetThreadInfo; // may call InitThreadNumber() if first access
+  if not (tiTemporaryDisable in result^.Flags) then
+  begin
   ndx := result^.RecursionCount;
   inc(ndx);
   if ndx = 0 then
     RaiseDoEnter;
   result^.RecursionCount := ndx;
-  if ndx > high(result^.Recursion) then
-    result := nil; // nothing logged above MAX_SYNLOGRECURSION
+    if ndx <= high(result^.Recursion) then
+      exit; // fine
+  end;
+  result := nil; // logging disabled, or above MAX_SYNLOGRECURSION
 end;
 
-procedure TSynLog.LockAndPrepareEnter(nfo: PSynLogThreadInfo);
+procedure TSynLog.LockAndPrepareEnter(nfo: PSynLogThreadInfo; microsecs: PInt64);
 var
   ms, rec: Int64;
 begin
@@ -4993,6 +5049,8 @@ begin
   if sllLeave in fFamily.Level then
   begin
     QueryPerformanceMicroSeconds(ms);
+    if microsecs <> nil then
+      microsecs^ := ms;
     dec(ms, fStartTimestamp);
     FillInfo(nfo, @ms); // timestamp [+ threadnumber]
     rec := ms shl 8 + {RefCnt=}1;
@@ -5000,6 +5058,8 @@ begin
   else
   begin
     FillInfo(nfo, nil);
+    if microsecs <> nil then
+      microsecs^ := 0;
     rec := {RefCnt=}1; // no timestamp needed if no sllLeave
   end;
   nfo^.Recursion[nfo^.RecursionCount - 1] := rec; // with RefCnt = 1
@@ -5011,7 +5071,7 @@ end;
 procedure TSynLog.LogEnter(nfo: PSynLogThreadInfo; inst: TObject; txt: PUtf8Char
   {$ifdef ISDELPHI} ; addr: PtrUInt {$endif});
 begin
-  LockAndPrepareEnter(nfo);
+  LockAndPrepareEnter(nfo, nil);
   // append e.g. 00000000001FE4DC  !  +       TSqlDatabase(01039c0280).DBClose
   {$ifdef HASFASTTRYFINALLY}
   try
@@ -5035,18 +5095,18 @@ begin
 end;
 
 procedure TSynLog.LogEnterFmt(nfo: PSynLogThreadInfo; inst: TObject;
-  fmt: PUtf8Char; args: PVarRec; argscount: PtrInt);
+  fmt: PUtf8Char; args: PVarRec; argscount: PtrInt; microsecs: PInt64);
 begin
-  LockAndPrepareEnter(nfo);
-  fExceptionIgnoredBackup := nfo^.ExceptionIgnore;
+  LockAndPrepareEnter(nfo, microsecs);
+  fThreadInfoBackup := nfo^.Flags;
   try
-    nfo^.ExceptionIgnore := true;
+    include(nfo^.Flags, tiExceptionIgnore);
     LogHeader(sllEnter, inst);
     fWriter.AddFmt(fmt, args, argscount, twOnSameLine,
       [woDontStoreDefault, woDontStoreVoid, woFullExpand]);
     fWriterEcho.AddEndOfLine(sllEnter);
   finally
-    nfo^.ExceptionIgnore := fExceptionIgnoredBackup;
+    nfo^.Flags := fThreadInfoBackup;
     GlobalThreadLock.UnLock;
   end;
 end;
@@ -5122,7 +5182,7 @@ begin // expects the caller to have set Local = nil
   nfo := result.DoEnter;
   if nfo = nil then
     exit; // nothing to log
-  result.LogEnterFmt(nfo, aInstance, TextFmt, @TextArgs[0], length(TextArgs));
+  result.LogEnterFmt(nfo, aInstance, TextFmt, @TextArgs[0], length(TextArgs), nil);
   pointer(Local) := PAnsiChar(result) + result.fISynLogOffset; // result := self
 end;
 
@@ -5148,7 +5208,7 @@ begin // expects the caller to have set Local = nil
   nfo := result.DoEnter;
   if nfo = nil then
     exit; // nothing to log
-  result.LockAndPrepareEnter(nfo); // inlined result.LogEnter()
+  result.LockAndPrepareEnter(nfo, nil); // inlined result.LogEnter()
   result.LogHeader(sllEnter, aInstance);
   if aMethodName <> '' then // direct string output with no temp conversion
     result.fWriter.AddOnSameLineString(aMethodName);
@@ -5167,13 +5227,13 @@ begin
 end;
 
 procedure TSynLog.ManualEnter(aInstance: TObject; TextFmt: PUtf8Char;
-  const TextArgs: array of const);
+  const TextArgs: array of const; MicroSecs: PInt64);
 var
   nfo: PSynLogThreadInfo;
 begin
   nfo := DoEnter;
   if nfo <> nil then
-    LogEnterFmt(nfo, aInstance, TextFmt, @TextArgs[0], length(TextArgs));
+    LogEnterFmt(nfo, aInstance, TextFmt, @TextArgs[0], length(TextArgs), MicroSecs);
 end;
 
 procedure TSynLog.ManualLeave;
@@ -5469,14 +5529,14 @@ begin
     if pendingDisableRemoteLogLeave in fPendingFlags then
     begin
       GlobalThreadLock.UnLock;
-      ESynLogException.RaiseUtf8('Nested %.DisableRotemoteLog', [self]);
+      ESynLogException.RaiseUtf8('Nested %.DisableRemoteLog', [self]);
     end;
     include(fPendingFlags, pendingDisableRemoteLogLeave);
   end
   else
   begin
     if not (pendingDisableRemoteLogLeave in fPendingFlags) then
-      ESynLogException.RaiseUtf8('Missing %.DisableRotemoteLog(true)', [self]);
+      ESynLogException.RaiseUtf8('Missing %.DisableRemoteLog(true)', [self]);
     // DisableRemoteLog(false) -> add to events, and quit the global mutex
     exclude(fPendingFlags, pendingDisableRemoteLogLeave);
     fWriterEcho.EchoAdd(fFamily.fEchoRemoteEvent);
@@ -5514,11 +5574,10 @@ begin
   if (self = nil) or
      not (Level in fFamily.fLevel) then
     exit;
+  lasterror := 0;
   if Level = sllLastError then
-    lasterror := GetLastError
-  else
-    lasterror := 0;
-  LockAndDisableExceptions;
+    lasterror := GetLastError;
+  if LockAndDisableExceptions then
   try
     LogHeader(Level, nil);
     if lasterror <> 0 then
@@ -5540,7 +5599,7 @@ begin
     {$endif ISDELPHI}
     LogTrailer(Level);
   finally
-    fThreadInfo^.ExceptionIgnore := fExceptionIgnoredBackup;
+    fThreadInfo^.Flags := fThreadInfoBackup;
     GlobalThreadLock.UnLock;
     if lasterror <> 0 then
       SetLastError(lasterror);
@@ -5553,7 +5612,7 @@ begin
      (Text = nil) or
      not (Level in fFamily.fLevel) then
     exit;
-  LockAndDisableExceptions;
+  if LockAndDisableExceptions then
   {$ifdef HASFASTTRYFINALLY}
   try
   {$else}
@@ -5565,7 +5624,7 @@ begin
   {$ifdef HASFASTTRYFINALLY}
   finally
   {$endif HASFASTTRYFINALLY}
-    fThreadInfo^.ExceptionIgnore := fExceptionIgnoredBackup;
+    fThreadInfo^.Flags := fThreadInfoBackup;
     GlobalThreadLock.UnLock;
   end;
 end;
@@ -5822,7 +5881,7 @@ var
 begin
   fWriter.AddDirect(' ', '"');
   GetErrorShortVar(Error, msg);
-  fWriter.AddOnSameLine(@msg[0], ord(msg[0]));
+  fWriter.AddOnSameLine(@msg[1], ord(msg[0]));
   fWriter.AddDirect('"', ' ', '(');
   fWriter.AddU(Error);
   fWriter.AddDirect(')', ' ');
@@ -5873,7 +5932,7 @@ end;
 procedure TSynLog.PerformRotation(nfo: PSynLogThreadInfo);
 var
   currentMaxSynLZ: cardinal;
-  bak: boolean;
+  bak: TSynLogThreadInfoFlags;
   i: PtrInt;
   ext: TFileName;
   FN: array of TFileName;
@@ -5881,8 +5940,8 @@ begin // caller made GlobalThreadLock.Lock
   exclude(fPendingFlags, pendingRotate);
   if nfo = nil then
     nfo := @PerThreadInfo; // from ForceRotation
-  bak := nfo^.ExceptionIgnore;
-  nfo^.ExceptionIgnore := true; // avoid infinite locks
+  bak := nfo^.Flags;
+  include(nfo^.Flags, tiExceptionIgnore); // avoid infinite locks
   try
     CloseLogFile;
     try
@@ -5938,7 +5997,7 @@ begin // caller made GlobalThreadLock.Lock
     // initialize a brand new log file
     LogFileInit(GetThreadInfo);
   finally
-    nfo^.ExceptionIgnore := bak;
+    nfo^.Flags := bak;
   end;
 end;
 
@@ -5947,11 +6006,10 @@ procedure TSynLog.LogInternalFmt(Level: TSynLogLevel; Format: PUtf8Char;
 var
   lasterror: cardinal;
 begin
+  lasterror := 0;
   if Level = sllLastError then
-    lasterror := GetLastError
-  else
-    lasterror := 0;
-  LockAndDisableExceptions;
+    lasterror := GetLastError;
+  if LockAndDisableExceptions then
   try
     LogHeader(Level, Instance);
     fWriter.AddFmt(Format, Values, ValuesCount, twOnSameLine,
@@ -5960,7 +6018,7 @@ begin
       AddErrorMessage(lasterror);
     LogTrailer(Level);
   finally
-    fThreadInfo^.ExceptionIgnore := fExceptionIgnoredBackup;
+    fThreadInfo^.Flags := fThreadInfoBackup;
     GlobalThreadLock.UnLock;
     if lasterror <> 0 then
       SetLastError(lasterror);
@@ -5972,11 +6030,10 @@ procedure TSynLog.LogInternalText(Level: TSynLogLevel; Text: PUtf8Char;
 var
   lasterror, trunclen: PtrInt;
 begin
+  lasterror := 0;
   if Level = sllLastError then
-    lasterror := GetLastError
-  else
-    lasterror := 0;
-  LockAndDisableExceptions;
+    lasterror := GetLastError;
+  if LockAndDisableExceptions then
   try
     LogHeader(Level, Instance);
     if Text = nil then
@@ -6007,7 +6064,7 @@ begin
       AddErrorMessage(lasterror);
     LogTrailer(Level);
   finally
-    fThreadInfo^.ExceptionIgnore := fExceptionIgnoredBackup;
+    fThreadInfo^.Flags := fThreadInfoBackup;
     GlobalThreadLock.UnLock;
     if lasterror <> 0 then
       SetLastError(lasterror);
@@ -6017,7 +6074,7 @@ end;
 procedure TSynLog.LogInternalRtti(Level: TSynLogLevel; const aName: RawUtf8;
   aTypeInfo: PRttiInfo; const aValue; Instance: TObject);
 begin
-  LockAndDisableExceptions;
+  if LockAndDisableExceptions then
   try
     LogHeader(Level, Instance);
     fWriter.AddOnSameLine(pointer(aName));
@@ -6025,7 +6082,7 @@ begin
     fWriter.AddTypedJson(@aValue, aTypeInfo, [woDontStoreVoid]);
     LogTrailer(Level);
   finally
-    fThreadInfo^.ExceptionIgnore := fExceptionIgnoredBackup;
+    fThreadInfo^.Flags := fThreadInfoBackup;
     GlobalThreadLock.UnLock;
   end;
 end;
@@ -6344,18 +6401,20 @@ procedure TSynLog.AddStackTrace(Stack: PPtrUInt);
 
 var
   n, i, logged: integer;
-  BackTrace: array[byte] of PtrUInt;
   {$ifndef NOEXCEPTIONINTERCEPT}
-  nointercept: PBoolean;
-  nointerceptbackup: boolean; // paranoid precaution
+  bak: TSynLogThreadInfoFlags; // paranoid precaution
+  threadflags: ^TSynLogThreadInfoFlags;
   {$endif NOEXCEPTIONINTERCEPT}
+  {$ifdef OSWINDOWS}
+  BackTrace: array[byte] of PtrUInt;
+  {$endif OSWINDOWS}
 begin
   if fFamily.StackTraceLevel <= 0 then
     exit;
   {$ifndef NOEXCEPTIONINTERCEPT}
-  nointercept := @PerThreadInfo.ExceptionIgnore;
-  nointerceptbackup := nointercept^;
-  nointercept^ := true;
+  threadflags := @PerThreadInfo.Flags;
+  bak := threadflags^;
+  include(threadflags^, tiExceptionIgnore);
   {$endif NOEXCEPTIONINTERCEPT}
   try
     {$ifdef OSWINDOWS}
@@ -6379,7 +6438,7 @@ begin
     // just ignore any access violation here
   end;
   {$ifndef NOEXCEPTIONINTERCEPT}
-  nointercept^ := nointerceptbackup;
+  threadflags^ := bak;
   {$endif NOEXCEPTIONINTERCEPT}
 end;
 
@@ -6390,16 +6449,15 @@ end;
 
 {$ifndef NOEXCEPTIONINTERCEPT}
 
-procedure DoLogException(Log: TSynLog; const Ctxt: TSynLogExceptionContext);
-var
-  nfo: PSynLogThreadInfo;
+procedure DoLogException(Log: TSynLog; Info: PSynLogThreadInfo;
+  const Ctxt: TSynLogExceptionContext);
 begin // called by SynLogException() within its GlobalThreadLock.Lock
-  if Log = nil then
-    exit; // this TSynLogFamily has no fGlobalLog (yet)
-  nfo := GetThreadInfo;
-  Log.FillInfo(nfo, nil); // timestamp [+ threadnumber]
-  SetThreadInfoAndThreadName(Log, nfo);
-  LogHeaderNoRecursion(Log.fWriter, Ctxt.ELevel, @nfo^.CurrentTimeAndThread);
+  if (Log = nil) or
+     (Log.fWriter = nil) then
+    exit; // this TSynLogFamily has no fGlobalLog or opened file (yet)
+  Log.FillInfo(Info, nil); // timestamp [+ threadnumber]
+  SetThreadInfoAndThreadName(Log, Info);
+  LogHeaderNoRecursion(Log.fWriter, Ctxt.ELevel, @Info^.CurrentTimeAndThread);
   DefaultSynLogExceptionToStr(Log.fWriter, Ctxt, {addinfo=}false);
   // stack trace only in the main thread
   Log.fWriterEcho.AddEndOfLine(Ctxt.ELevel);
@@ -6427,6 +6485,7 @@ procedure SynLogException(const Ctxt: TSynLogExceptionContext);
 var
   fam: TSynLogFamily;
   log: TSynLog;
+  nfo: PSynLogThreadInfo;
   info: ^TSynLogExceptionInfo;
   thrdnam: PShortString;
   last: ^TLastException;
@@ -6439,7 +6498,6 @@ label
 begin
   if (HandleExceptionFamily = nil) or  // no TSynLogFamily.fHandleExceptions set
      SynLogFileFreeing or              // inconsistent call at shutdown
-     PerThreadInfo.ExceptionIgnore or  // disabled for this thread
      (Ctxt.EClass = ESynLogSilent) or
      HandleExceptionFamily.ExceptionIgnore.Exists(Ctxt.EClass) then
     exit;
@@ -6451,11 +6509,18 @@ begin
     exit;
   {$endif ISDELPHIXE6}
   {$endif WIN64DELPHI}
+  nfo := @PerThreadInfo;
+  if tiExceptionIgnore in nfo^.Flags then
+    exit; // disabled for this thread (avoid nested call)
   log := HandleExceptionFamily.Add;
   if log = nil then
    exit;
+  if log.fFamily.ExceptionIgnoreLibrary and
+     (Ctxt.EAddr <> 0) and
+     not IsMainExecutable(pointer(Ctxt.EAddr)) then // fast guess
+    exit;
   thrdnam := CurrentThreadNameShort;
-  log.LockAndDisableExceptions;
+  log.LockAndDisableExceptions; // ignore result = tiTemporaryDisable flag
   try
     try
       // ensure we need to log this
@@ -6482,8 +6547,7 @@ begin
         MoveFast(Ctxt.EStack[0], last^.Stack[0], n * SizeOf(PtrUInt));
       end;
       // actual exception log - with potential customization
-      LogHeaderNoRecursion(
-        log.fWriter, Ctxt.ELevel, @log.fThreadInfo^.CurrentTimeAndThread);
+      LogHeaderNoRecursion(log.fWriter, Ctxt.ELevel, @nfo^.CurrentTimeAndThread);
       if (Ctxt.ELevel = sllException) and
          (Ctxt.EInstance <> nil) then
       begin
@@ -6534,7 +6598,7 @@ fin:  if Ctxt.ELevel in log.fFamily.fLevelSysInfo then
         if (fam <> HandleExceptionFamily) and // if not already logged above
            (Ctxt.ELevel in fam.Level) then
         try
-          DoLogException(fam.fGlobalLog, Ctxt);
+          DoLogException(fam.fGlobalLog, nfo, Ctxt);
         except
           // paranoid: don't try this family again (without SetLevel)
           fam.fLevel := fam.fLevel - [sllException, sllExceptionOS];
@@ -6544,7 +6608,7 @@ fin:  if Ctxt.ELevel in log.fFamily.fLevelSysInfo then
       // any nested exception should never be propagated to the OS caller
     end;
   finally
-    log.fThreadInfo^.ExceptionIgnore := log.fExceptionIgnoredBackup;
+    nfo^.Flags := log.fThreadInfoBackup;
     GlobalThreadLock.UnLock;
   end;
 end;
@@ -6900,16 +6964,17 @@ end;
 
 function TSynLogFile.EventDateTime(aIndex: integer): TDateTime;
 var
-  Timestamp: Int64;
+  hires: Int64;
   P: PUtf8Char;
-  Y, M, D, HH, MM, SS, MS: cardinal;
+  Y, M, D, HH, MM, SS, MS4: cardinal;
   hex2bin: PByteArray;
 begin
+  result := 0;
   if cardinal(aIndex) >= cardinal(fCount) then
-    result := 0
-  else if fFreq = 0 then
+    exit;
+  P := fLines[aIndex];
+  if fFreq = 0 then
   begin
-    P := fLines[aIndex];
     hex2bin := @ConvertHexToBin;
     if Char4ToWord(P, Y, hex2bin) or
        Char2ToByte(P + 4, M, hex2bin) or
@@ -6917,19 +6982,15 @@ begin
        Char2ToByte(P + 9, HH, hex2bin) or
        Char2ToByte(P + 11, MM, hex2bin) or
        Char2ToByte(P + 13, SS, hex2bin) or
-       Char2ToByte(P + 15, MS, hex2bin) then
+       Char2ToByte(P + 15, MS4, hex2bin) then
       // not exact YYYYMMDD hhmmsszz layout -> try plain ISO-8601
       Iso8601ToDateTimePUtf8CharVar(P, 17, result)
-    else if TryEncodeDate(Y, M, D, result) then
-      // MS shl 4 = 16 ms resolution in TTextWriter.AddCurrentLogTime()
-      result := result + EncodeTime(HH, MM, SS, MS shl 4)
     else
-      result := 0;
+      // MS4 shl 4 = 16 ms resolution in TTextWriter.AddCurrentLogTime()
+      result := EncodeDateTime(Y, M, D, HH, MM, SS, MS4 shl 4);
   end
-  else if HexDisplayToBin(fLines[aIndex], @Timestamp, SizeOf(Timestamp)) then
-    result := fStartDateTime + (Timestamp / fFreqPerDay)
-  else
-    result := 0;
+  else if HexDisplayToBin(PAnsiChar(P), @hires, SizeOf(hires)) then
+    result := fStartDateTime + (hires / fFreqPerDay);
 end;
 
 procedure TSynLogFile.CleanLevels;
@@ -6985,7 +7046,7 @@ var
   ndx, lev: PtrInt;
   enter64, leave64: Int64;
   thd: cardinal;
-begin
+begin // only called when out-of-range '99.xxx.xxx' was written in sllLeave
   lev := 0;
   ndx := p^.Index;
   if fThreads <> nil then
@@ -7012,7 +7073,7 @@ begin
                 p^.Time mod 1000000
             else
             begin
-              // use high resolution values
+              // directly use high resolution timestamps as 64-bit integers
               HexDisplayToBin(fLines[p^.Index], @enter64, SizeOf(enter64));
               HexDisplayToBin(fLines[ndx],      @leave64, SizeOf(leave64));
               p^.Time := ((leave64 - enter64) * (1000 * 1000)) div fFreq;

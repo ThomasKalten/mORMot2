@@ -296,9 +296,9 @@ function DnsQuery(const QName: RawUtf8; out Res: TDnsResult;
   TimeOutMS: integer = DNSQUERY_TIMEOUT; QClass: cardinal = QC_INET): boolean;
 
 /// retrieve the IPv4 address of a DNS host name - using DnsQuery(drrA)
-// - e.g. DnsLookup('synopse.info') currently returns '62.210.254.173'
+// - e.g. DnsLookup('synopse.info') currently returns '82.67.73.95'
 // - for aliases, the CNAME is ignored and only the first A is returned, e.g.
-// DnsLookup('blog.synopse.info') would simply return '62.210.254.173'
+// DnsLookup('blog.synopse.info') would simply return '82.67.73.95'
 // - will also recognize obvious values like 'localhost' or an IPv4 address
 // - this unit will register this function to mormot.net.sock's NewSocketIP4Lookup
 // - default NameServers = '' will call GetDnsAddresses - but NameServers could
@@ -309,7 +309,7 @@ function DnsLookup(const HostName: RawUtf8; const NameServers: RawUtf8 = '';
   TimeoutMS: integer = DNSQUERY_TIMEOUT): RawUtf8;
 
 /// retrieve the IPv4 address(es) of a DNS host name - using DnsQuery(drrA)
-// - e.g. DnsLookups('synopse.info') currently returns ['62.210.254.173'] but
+// - e.g. DnsLookups('synopse.info') currently returns ['82.67.73.95'] but
 // DnsLookups('yahoo.com') returns an array of several IPv4 addresses
 // - will also recognize obvious values like 'localhost' or an IPv4 address
 // - default NameServers = '' will call GetDnsAddresses - but NameServers could
@@ -344,13 +344,13 @@ function DnsServices(const HostName: RawUtf8; const NameServers: RawUtf8 = '';
 function DnsLdapServices(const DomainName: RawUtf8;
   const NameServers: RawUtf8 = ''): TRawUtf8DynArray;
 
-/// retrieve the LDAP controlers from the current system AD domain name
+/// retrieve the LDAP controllers from the current system AD domain name
 // - returns e.g. ['dc-one.mycorp.com:389', 'dc-two.mycorp.com:389']
-// - optionally return the associated AD controler host name, e.g. 'ad.mycorp.com'
+// - optionally return the associated AD controller host name, e.g. 'ad.mycorp.com'
 // - default NameServers = '' will call GetDnsAddresses - but NameServers could
 // be IPv4 address(es) CSV, maybe prefixed as 'tcp@1.2.3.4' to force TCP
 // - see also CldapMyController() from mormot.net.ldap for a safer client approach
-function DnsLdapControlers(const NameServers: RawUtf8 = '';
+function DnsLdapControllers(const NameServers: RawUtf8 = '';
   UsePosixEnv: boolean = false; DomainName: PRawUtf8 = nil): TRawUtf8DynArray;
 
 
@@ -883,7 +883,7 @@ begin
   result := DnsServices('_ldap._tcp.' + DomainName, NameServers);
 end;
 
-function DnsLdapControlers(const NameServers: RawUtf8; UsePosixEnv: boolean;
+function DnsLdapControllers(const NameServers: RawUtf8; UsePosixEnv: boolean;
   DomainName: PRawUtf8): TRawUtf8DynArray;
 var
   ad: TRawUtf8DynArray;

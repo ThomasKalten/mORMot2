@@ -140,15 +140,15 @@ type
   TInterfaceMethodArgument = object
   {$endif USERECORDWITHMETHODS}
   public
-    /// the argument name, as declared in object pascal
+    /// the argument name, as declared in Object Pascal
     // - see also TInterfaceMethod.ArgsName[] array if you need a RawUtf8
     ParamName: PShortString;
-    /// the type name, as declared in object pascal
+    /// the type name, as declared in Object Pascal
     ArgTypeName: PShortString;
     /// the low-level RTTI information of this argument
     // - use ArgRtti.Info to retrieve the TypeInfo() of this argument
     ArgRtti: TRttiJson;
-    /// we do not handle all kind of object pascal variables
+    /// we do not handle all kind of Object Pascal variables
     ValueType: TInterfaceMethodValueType;
     /// the variable direction as defined at code level
     // - you may rather use high-level IsInput/IsOutput inlined methods
@@ -268,7 +268,7 @@ type
   {$endif USERECORDWITHMETHODS}
   public
     /// the method URI, i.e. the method name
-    // - as declared in object pascal code, e.g. 'Add' for ICalculator.Add
+    // - as declared in Object Pascal code, e.g. 'Add' for ICalculator.Add
     // - this property value is hashed internally for faster access
     Uri: RawUtf8;
     /// the method default result, formatted as a JSON array
@@ -322,7 +322,7 @@ type
     /// the index of the last var / out argument in Args[] (signed 8-bit)
     ArgsOutNotResultLast: ShortInt;
     /// the index of the first argument expecting manual stack initialization
-    // - set for Args[].ValueVar >= imvvRawUtf8
+    // - set for Args[].ValueVar >= imvvRawUtf8 (signed 8-bit)
     ArgsManagedFirst: ShortInt;
     /// how manual stack initialization arguments are defined
     // - set for Args[].ValueVar >= imvvRawUtf8
@@ -333,11 +333,11 @@ type
     // - follow Args[].OffsetAsValue distribution, and used to allocate/reset
     // the stack memory buffer before execution
     ArgsSizeAsValue: cardinal;
-    /// the RawUtf8 names of all arguments, as declared in object pascal
+    /// the RawUtf8 names of all arguments, as declared in Object Pascal
     ArgsName: TRawUtf8DynArray;
-    /// the RawUtf8 names of all input arguments, as declared in object pascal
+    /// the RawUtf8 names of all input arguments, as declared in Object Pascal
     ArgsInputName: TRawUtf8DynArray;
-    /// the RawUtf8 names of all output arguments, as declared in object pascal
+    /// the RawUtf8 names of all output arguments, as declared in Object Pascal
     ArgsOutputName: TRawUtf8DynArray;
     /// contains the count of variables for all used kind of arguments
     ArgsUsedCount: array[TInterfaceMethodValueVar] of byte;
@@ -680,7 +680,7 @@ type
     /// reference all known interface arguments per value type
     property ArgUsed: TInterfaceFactoryPerArgumentDynArray
       read fArgUsed;
-    /// identifies a CallbackReleased() method in this interface
+    /// identifies a CallbackReleased() method in this interface (signed 8-bit)
     // - i.e. the index in Methods[] of the following signature:
     // ! procedure CallbackReleased(const callback: IInvokable; const interfaceName: RawUtf8);
     // - this method will be called e.g. by TInterfacedCallback.Destroy, when
@@ -689,7 +689,7 @@ type
     // - contains -1 if no such method do exist in the interface definition
     property MethodIndexCallbackReleased: ShortInt
       read fMethodIndexCallbackReleased;
-    /// identifies a CurrentFrame() method in this interface
+    /// identifies a CurrentFrame() method in this interface (signed 8-bit)
     // - i.e. the index in Methods[] of the following signature:
     // ! procedure CurrentFrame(isLast: boolean);
     // - this method will be called e.g. by TRestHttpClientWebsockets.CallbackRequest
@@ -800,6 +800,13 @@ type
   // return HTTP_SUCCESS if there is an output body, or HTTP_NOCONTENT if void
   TServiceCustomStatus = type cardinal;
 
+  /// indicates how TWebSocketProcess.NotifyCallback() will work
+  // - published early in this unit to be used at pure REST/SOA level
+  // - sometimes respectively logged as 'B', 'W' or 'N'
+  TWebSocketProcessNotifyCallback = (
+    wscBlockWithAnswer,
+    wscBlockWithoutAnswer,
+    wscNonBlockWithoutAnswer);
 
 /// returns the interface name of a registered Guid, or its hexadecimal value
 function ToText({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
@@ -812,13 +819,12 @@ type
   /// exception raised in case of Dependency Injection (aka IoC) issue
   EInterfaceResolver = class(ESynException);
 
-  {$M+}
   /// abstract factory class allowing to call interface resolution in cascade
   // - you can inherit from this class to chain the TryResolve() calls so
   // that several kind of implementations may be asked by a TInjectableObject,
   // e.g. TInterfaceStub, TServiceContainer or TDDDRepositoryRestObjectMapping
   // - this will implement factory pattern, as a safe and thread-safe DI/IoC
-  TInterfaceResolver = class
+  TInterfaceResolver = class(TSynPersistent)
   protected
     /// override this method to resolve an interface from this instance
     function TryResolve(aInterface: PRttiInfo; out Obj): boolean; virtual; abstract;
@@ -864,7 +870,6 @@ type
                       const aObjs: array of pointer;
       aRaiseExceptionIfNotFound: boolean = true); overload;
   end;
-  {$M-}
 
   /// used to store a list of TInterfacedObject instances
   TInterfacedObjectObjArray = array of TInterfacedObject;
@@ -888,11 +893,11 @@ type
     /// this overriden constructor will check and store the supplied class
     // to implement an interface
     constructor Create(aInterface: PRttiInfo;
-      aImplementation: TInterfacedObjectClass); overload;
+      aImplementation: TInterfacedObjectClass); reintroduce; overload;
     /// this overriden constructor will check and store the supplied class
     // to implement an interface by TGuid
     constructor Create(const aInterface: TGuid;
-      aImplementation: TInterfacedObjectClass); overload;
+      aImplementation: TInterfacedObjectClass); reintroduce;overload;
     /// you can use this method to resolve the interface as a new instance
     function GetOneInstance(out Obj): boolean;
     /// check if can resolve the supplied interface RTTI
@@ -929,8 +934,8 @@ type
   // - as used e.g. by TInterfaceResolverInjected.RegisterGlobal()
   TInterfaceResolverList = class(TInterfaceResolver)
   protected
-    fEntry: TInterfaceResolverListEntries;
     fSafe: TRWLightLock;
+    fEntry: TInterfaceResolverListEntries;
     fOnCreateInstance: TOnResolverCreateInstance;
     function PrepareAddAndWriteLock(aInterface: PRttiInfo;
       aImplementationClass: TClass): PInterfaceEntry; // fSafe.WriteUnLock after
@@ -2249,21 +2254,6 @@ type
   // - optFreeTimeout will enable the time check of the _Release call using
   // TRestServer.ServiceReleaseTimeoutMicrosec delay
   TInterfaceMethodOptions = set of TInterfaceMethodOption;
-
-  /// available execution options for an interface-based service provider
-  // - mimics TServiceFactoryServer homonymous boolean properties
-  TInterfaceOption = (
-    optByPassAuthentication,
-    optResultAsJsonObject,
-    optResultAsJsonObjectWithoutResult,
-    optResultAsXMLObject,
-    optResultAsXMLObjectIfAcceptOnlyXML,
-    optExcludeServiceLogCustomAnswer);
-
-  /// set of execution options for an interface-based service provider
-  // - mimics TServiceFactoryServer homonymous boolean properties
-  // - as used by TServiceFactoryServerAbstract.SetWholeOptions()
-  TInterfaceOptions = set of TInterfaceOption;
 
   /// callback called by TInterfaceMethodExecute to process an interface
   // callback parameter
@@ -5235,15 +5225,12 @@ function TInterfaceResolver.Resolve({$ifdef FPC_HAS_CONSTREF}constref{$else}cons
 var
   known: TInterfaceFactory;
 begin
-  if self = nil then
-    result := false
-  else
+  result := false;
+  if self <> nil then
   begin
     known := TInterfaceFactory.Get(aGuid);
     if known <> nil then
-      result := TryResolve(known.fInterfaceRtti.Info, Obj)
-    else
-      result := false;
+      result := TryResolve(known.fInterfaceRtti.Info, Obj);
   end;
   if (aRaiseIfNotFound <> nil) and
      not result then
@@ -7518,6 +7505,7 @@ var
   asJsonObject: boolean;
   a: PInterfaceMethodArgument;
   V: pointer;
+  magic: PCardinal;
 begin
   result := false;
   case Ctxt.Json^ of
@@ -7552,13 +7540,16 @@ begin
     if a <> nil then
     begin
       V := fValues[arg];
-      if (imfInputIsOctetStream in fMethod.Flags) and
-         (PCardinal(Ctxt.Json)^ = JSON_BIN_MAGIC_C) then
+      if imfInputIsOctetStream in fMethod.Flags then
+      begin
+        magic := pointer(Ctxt.Get.Json);
+        if magic^ = JSON_BIN_MAGIC_C then
       begin
         // passed as pointer from TRestServerRoutingRest.ExecuteSoaByInterface
-        inc(PCardinal(Ctxt.Get.Json));
-        PRawByteString(V)^ := PRawByteString(Ctxt.Json)^;
+          inc(magic);
+          PRawByteString(V)^ := PRawByteString(magic)^;
         break; // single parameter
+      end;
       end;
       if (a^.ValueType = imvInterface) and
          not (vIsInterfaceJson in a^.ValueKindAsm) then // e.g. not IDocList
@@ -8244,24 +8235,24 @@ end;
 constructor TWrapperContext.CreateFromUsedInterfaces(
   const aSourcePath, aDescriptions: TFileName);
 var
-  interfaces: TSynObjectListLightLocked;
+  cache: TSynObjectListLightLocked;
   services: TDocVariantData;
   i: PtrInt;
 begin
   Create(aSourcePath, aDescriptions);
-  interfaces := TInterfaceFactory.GetUsedInterfaces;
-  if interfaces = nil then
+  cache := TInterfaceFactory.GetUsedInterfaces;
+  if cache = nil then
     exit;
   {%H-}services.InitFast;
-  interfaces.Safe.ReadLock;
+  cache.Safe.ReadLock;
   try
-    for i := 0 to interfaces.Count - 1 do
+    for i := 0 to cache.Count - 1 do
       services.AddItem(_ObjFast([
         'interfaceName',
-          TInterfaceFactory(interfaces.List[i]).InterfaceRtti.Name,
-        'methods', ContextFromMethods(interfaces.List[i])]));
+          TInterfaceFactory(cache.List[i]).InterfaceRtti.Name,
+        'methods', ContextFromMethods(cache.List[i])]));
   finally
-    interfaces.Safe.ReadUnLock;
+    cache.Safe.ReadUnLock;
   end;
   fSOA.InitObject(['enabled',  true,
                    'services', variant(services)], JSON_FAST);
@@ -8565,7 +8556,7 @@ var
 
   procedure IgnoreIfDef;
   begin
-    // ignore any $ifdef ... $endif lines (should be at the line begining)
+    // ignore any $ifdef ... $endif lines (should be at the line beginning)
     repeat
       P := GotoNextLine(P);
       if P = nil then

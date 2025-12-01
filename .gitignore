@@ -88,6 +88,10 @@ _FOSSIL_
 
 backup/
 .idea/
+
+# Claude Code local settings
+.claude/
+
 Debug
 /test/Win32
 /test/Win64

@@ -116,21 +116,23 @@ procedure XorBlock16(A, B, C: PPtrIntArray);
 // ! dst[i] := src[i] xor mask;
 procedure Xor32By128(dst, src: PCardinalArray; last: PtrUInt; mask: cardinal);
 
-/// logical XOR of 512-bit = 64 bytes - use SSE2 on Intel/AMD
+/// logical "dst := dst XOR src" of 256-bit = 32 bytes
+procedure Xor256(dst, src: PPtrIntArray);
+  {$ifdef CPU64} inline;{$endif}
+
+/// logical "dst := dst XOR src" of 512-bit = 64 bytes - use SSE2 on Intel/AMD
 procedure Xor512(dst, src: PPtrIntArray);
   {$ifndef CPUINTEL} inline;{$endif}
 
-/// efficient Move of 512-bit = 64 bytes - use SSE2 on Intel/AMD
+/// efficient "dst := src" Move of 512-bit = 64 bytes - use SSE2 on Intel/AMD
 procedure Move512(dst, src: PPtrIntArray);
   {$ifndef CPUINTEL} inline;{$endif}
 
-// little endian fast conversion
-// - 160 bits = 5 integers
+// little endian fast conversion of 160 bits = 5 integers values
 // - use fast bswap asm in x86/x64 mode
 procedure bswap160(s, d: PIntegerArray);
 
-// little endian fast conversion
-// - 256-bit = 8 integers = 32 bytes
+// little endian fast conversion of 256-bit = 8 integers = 32 bytes values
 // - use fast bswap asm in x86/x64 mode
 procedure bswap256(s, d: PIntegerArray);
 
@@ -357,10 +359,10 @@ type
     // - first method to call before using this object for encryption
     // - KeySize is in bits, i.e. 128, 192 or 256
     function EncryptInit(const Key; KeySize: cardinal): boolean;
-    /// Initialize AES context for cipher, using 128-bit and CSPRNG
-    // - also set the internal IV field to a random value
+    /// Initialize AES context for cipher, using CSPRNG as transient key source
     // - used e.g. by TAesSignature or Random128() for their initialization
-    procedure EncryptInitRandom;
+    // - Bits=0 will instantiate AES-128 or AES-256 if HasHWAes is available
+    procedure EncryptInitRandom(Bits: integer = 0);
     /// encrypt an AES data block into another data block
     // - this method is thread-safe, unless you call EncryptInit/DecryptInit
     procedure Encrypt(const BI: TAesBlock; var BO: TAesBlock); overload;
@@ -421,9 +423,6 @@ type
     /// TRUE if the context was initialized via EncryptInit/DecryptInit
     function Initialized: boolean;
       {$ifdef FPC}inline;{$endif}
-    /// return TRUE if the AES-NI instruction sets are available on this CPU
-    function UsesAesni: boolean;
-      {$ifdef HASINLINE}inline;{$endif}
     /// returns the key size in bits (128/192/256)
     function KeyBits: integer;
       {$ifdef FPC}inline;{$endif}
@@ -522,10 +521,14 @@ type
       allowavx: boolean = true): boolean;
   end;
 
-  /// transient simple digital signature of a 32-bit number using AES-128
+  /// transient simple digital signature of a 32-bit number/ID using AES-128
   // - typical use is e.g. TRestServerAuthenticationHttpAbstract cookie process
   // when TBinaryCookieGenerator from mormot.crypt.secure is overkill since
   // TRestServer maintains a list of active sessions with proper expiration
+  // - uses a 96-bit signature with AES encryption as secure MAC with a random
+  // nonce (stored in TAesContext.iv), which is similar to CMAC or TLS/AES-GCM
+  // - modern standards consider this sufficient for authenticity in scenarios
+  // with limited message volumes (not billions of tokens issued per secret key)
   {$ifdef USERECORDWITHMETHODS}
   TAesSignature = record
   {$else}
@@ -537,19 +540,29 @@ type
     /// create the transient random secret key needed for this process
     // - the internal secret can't be persisted, and will remain in memory
     procedure Init;
-    /// compute the 128-bit digital signature of given 32-bit value <> 0
+    /// compute the 128-bit digital signature from a given 32-bit value <> 0
     procedure Generate(aValue: cardinal; aSignature: PHash128Rec);
-    /// compute an hexadecimal cookie of given 32-bit value
+    /// compute a 32-chars hexadecimal cookie from a given 32-bit value
     function GenerateCookie(aValue: cardinal): RawUtf8;
     /// check and extract the 32-bit value from a 128-bit digital signature
     // - return 0 if the signature is invalid, or the decoded 32-bit value
     function Validate(aSignature: PHash128Rec): cardinal;
-    /// check and extract the 32-bit value from hexadecimal cookie
+    /// check and extract the 32-bit value from 32-chars hexadecimal cookie
     // - return 0 if the cookie is invalid, or the decoded 32-bit value
     function ValidateCookie(aHex: PUtf8Char; aHexLen: PtrInt): cardinal; overload;
-    /// check and extract the 32-bit value from hexadecimal cookie
+    /// check and extract the 32-bit value from 32-chars hexadecimal cookie
     // - return 0 if the cookie is invalid, or the decoded 32-bit value
     function ValidateCookie(const aCookie: RawUtf8): cardinal; overload;
+      {$ifdef HASSAFEINLINE} inline; {$endif}
+    /// extract the 32-bit value from a 128-bit digital signature
+    // - without validating the AES-128 signature itself
+    // - could be used e.g. when Validate() has already been called once
+    function Extract(const aSignature: THash128Rec): cardinal; overload;
+      {$ifdef FPC} inline; {$endif}
+    /// extract the 32-bit value from a 32-chars hexadecimal bearer
+    // - without validating the AES-128 signature itself
+    // - could be used e.g. when Validate() has already been called once
+    function Extract(aHex: PUtf8Char): cardinal; overload;
   end;
   PAesSignature = ^TAesSignature;
 
@@ -1713,6 +1726,7 @@ type
     /// computes a random ASCII password
     // - will contain uppercase/lower letters, digits and $.:()?%!-+*/@#
     // excluding ;,= to allow direct use in CSV content
+    // - won't return the letters O and I to avoid confusion with digits 0 and 1
     function RandomPassword(Len: integer): SpiUtf8;
     /// validate or generate a random Salt with custom Base64-URI encoding
     // - as used e.g. by the "Modular Crypt" process
@@ -2095,6 +2109,9 @@ function Sha256Digest(Data: pointer; Len: integer): TSha256Digest; overload;
 // safer to use an explicit TSha256Digest variable, which would be filled
 // with zeros by a ... finally FillZero()
 function Sha256Digest(const Data: RawByteString): TSha256Digest; overload;
+
+/// direct SHA-256 hash calculation of one 256-bit data
+procedure Sha256Digest(var Dest, Data: TSha256Digest); overload;
 
 /// direct SHA-224 hash calculation of some binary data
 // - result is returned in TSha224Digest binary format
@@ -2570,6 +2587,10 @@ procedure HmacSha256(const key: TSha256Digest; const msg: RawByteString;
 procedure HmacSha256(key, msg: pointer; keylen, msglen: integer;
   out result: TSha256Digest); overload;
 
+/// compute the HMAC message authentication code using SHA-256 as hash function
+procedure HmacSha256U(key: pointer; len: integer; const msg: array of RawByteString;
+  out result: TSha256Digest; msgSeparator: AnsiChar = #0);
+
 
 { ****************** PBKDF2 Key Derivation over SHA-256 and SHA-3 }
 
@@ -2789,7 +2810,7 @@ type
   end;
 
   TShaContext = packed record
-    // current hash state (TSha256.Init expect this field to be the first)
+    // current hash state (TSha256/224.Init expect this field to be the first)
     Hash: TShaHash;
     // 64-bit msg length
     MLen: QWord;
@@ -2816,7 +2837,7 @@ const
 
 var
   {$ifdef USEAESNIHASH}
-  // 64 SSE2-aligned random bytes set at startup to avoid hash flooding
+  // SSE2-aligned 64 random bytes set at startup to avoid hash flooding
   AesNiHashKey: PHash512; // = AesNiHashAntiFuzzTable
   {$endif USEAESNIHASH}
   // filled by ComputeAesStaticTables if needed - don't change the order below
@@ -2878,6 +2899,20 @@ begin // just XOR 0..15 of bytes
     dec(Size);
     Dest[Size] := Source1[Size] xor Source2[Size];
   end;
+end;
+
+procedure Xor256(dst, src: PPtrIntArray);
+begin
+  dst[0] := dst[0] xor src[0];
+  dst[1] := dst[1] xor src[1];
+  dst[2] := dst[2] xor src[2];
+  dst[3] := dst[3] xor src[3];
+  {$ifdef CPU32}
+  dst[4] := dst[4] xor src[4];
+  dst[5] := dst[5] xor src[5];
+  dst[6] := dst[6] xor src[6];
+  dst[7] := dst[7] xor src[7];
+  {$endif CPU32}
 end;
 
 {$ifndef CPUSSE2}
@@ -3647,12 +3682,12 @@ begin
   rnd128safe.Lock; // ensure thread safe with minimal contention
   aes := @rnd128gen;
   if PPtrUInt(aes)^ = 0 then
-    PAes(aes)^.EncryptInitRandom; // initialize once at startup
-  iv^ := aes^.iv.b;
-  inc(aes^.iv.Lo); // AES-CTR with little endian 64-bit counter
+    PAes(aes)^.EncryptInitRandom;   // initialize AES-128 (or AES-256 if HW AES)
+  iv^ := aes^.iv.b;                 // AES-CTR with little endian 64-bit counter
+  inc(aes^.iv.Lo);                  // overflow after 268,435,456 TB of output
   if iv2 <> nil then
   begin
-    iv2^ := aes^.iv.b;
+    iv2^ := aes^.iv.b;              // additional 128-bit
     inc(aes^.iv.Lo);
   end;
   rnd128safe.UnLock;
@@ -4091,14 +4126,20 @@ begin
   result := true;
 end;
 
-procedure TAes.EncryptInitRandom;
+procedure TAes.EncryptInitRandom(Bits: integer);
 var
-  rnd: THash256Rec;
+  rnd: THash256;
 begin // note: we can't use Random128() here to avoid endless recursion
-  TAesPrng.Main.FillRandom(rnd.b);    // 256-bit from CSPRNG
-  EncryptInit(rnd.Lo, 128);           // transient AES-128 secret
-  TAesContext(Context).iv := rnd.h;   // safe IV
-  FillZero(rnd.b);                    // anti-forensic
+  if Bits = 0 then
+    Bits := 128 shl ord(HasHWAes); // AES-128 or AES-256
+  {$ifdef OSLINUX}
+  if (MainAesPrng <> nil) or
+     not LinuxGetRandom(@rnd, Bits shr 3) then // 128/256-bit in 1 syscall
+  {$endif OSLINUX}
+    TAesPrng.Main.FillRandom(rnd);     // 256-bit from our CSPRNG (if available)
+  EncryptInit(rnd, Bits);              // transient AES-128/256 secret
+  FillZero(TAesContext(Context).iv.b); // as per NIST SP 800-90A
+  FillZero(rnd);                       // anti-forensic
 end;
 
 function TAes.DecryptInitFrom(const Encryption: TAes; const Key;
@@ -4321,15 +4362,6 @@ end;
 function TAes.Initialized: boolean;
 begin
   result := aesInitialized in TAesContext(Context).Flags;
-end;
-
-function TAes.UsesAesni: boolean;
-begin
-  {$ifdef ASMINTEL}
-  result := cfAESNI in CpuFeatures; // Flags may not have been set yet/anymore
-  {$else}
-  result := false;
-  {$endif ASMINTEL}
 end;
 
 function TAes.KeyBits: integer;
@@ -5084,19 +5116,21 @@ end;
 { TAesSignature }
 
 procedure TAesSignature.Init;
-begin
-  fEngine.EncryptInitRandom;
+begin // AES-256 is 40% slower but twice stronger against Quantum attacks
+  fEngine.EncryptInitRandom;           // random AES-128 key (AES-256 if HW AES)
+  Random128(@TAesContext(fEngine).iv); // another random source to obfuscate
 end;
 
 procedure TAesSignature.Generate(aValue: cardinal; aSignature: PHash128Rec);
 var
   aes: TAesContext absolute fEngine;
-begin // 32-bit lower = session, 96-bit upper = digital signature
-  if aValue = 0 then
+begin // 32-bit lower = masked session, 96-bit upper = digital signature
+  if (@self = nil) or
+     (aValue = 0) then
     ESynCrypto.RaiseU('Unexpected TAesSignature.Generate(0)');
-  aValue := aValue xor aes.iv.c0;
+  aValue := aValue xor aes.iv.c0; // masked/obfuscated session ID
   aSignature^.c0 := aValue;
-  aSignature^.c1 := aes.iv.c1;
+  aSignature^.c1 := aes.iv.c1;    // aes.iv is a transient hidden secret
   aSignature^.H  := aes.iv.H;
   aes.DoBlock(aes, aSignature^, aSignature^); // fast and thread-safe
   aSignature^.c0 := aValue;
@@ -5116,7 +5150,8 @@ var
   sign: THash128Rec;
 begin
   result := 0; // failure
-  if aSignature = nil then
+  if (@self = nil) or
+     (aSignature = nil) then
     exit;
   sign.c0 := aSignature^.c0;
   sign.c1 := aes.iv.c1;
@@ -5140,7 +5175,25 @@ end;
 
 function TAesSignature.ValidateCookie(const aCookie: RawUtf8): cardinal;
 begin
-  result := ValidateCookie(pointer(aCookie), length(aCookie));
+  result := 0;
+  if aCookie <> '' then
+    result := ValidateCookie(pointer(aCookie),
+      PStrLen(PAnsiChar(pointer(aCookie)) - _STRLEN)^);
+end;
+
+function TAesSignature.Extract(const aSignature: THash128Rec): cardinal;
+begin
+  result := aSignature.c0 xor TAesContext(fEngine).iv.c0; // just de-obfuscate
+end;
+
+function TAesSignature.Extract(aHex: PUtf8Char): cardinal;
+var
+  sign: THash128Rec;
+begin
+  if HexDisplayToBin(pointer(aHex), @sign, SizeOf(sign)) then
+    result := Extract(sign)
+  else
+    result := 0;
 end;
 
 
@@ -5182,11 +5235,14 @@ end;
 
 constructor TAesAbstract.CreateTemp(aKeySize: cardinal);
 var
-  tmp: THash256;
+  tmp: THash256Rec;
 begin
-  TAesPrng.Main.FillRandom(tmp); // 256-bit from CSPRNG
+  if MainAesPrng <> nil then
+    MainAesPrng.FillRandom(tmp.b)   // 256-bit from our CSPRNG (if available)
+  else
+    Random128(@tmp.l, @tmp.h);      // 256-bit of unpredictable random
   Create(tmp, aKeySize);
-  FillZero(tmp);
+  FillZero(tmp, aKeySize shr 3);
 end;
 
 {$ifndef PUREMORMOT2}
@@ -8241,6 +8297,13 @@ begin
   SHA.Full(Data, Len, result);
 end;
 
+procedure Sha256Digest(var Dest, Data: TSha256Digest);
+var
+  SHA: TSha256;
+begin
+  SHA.Full(@Data, SizeOf(Data), Dest);
+end;
+
 function Sha256Digest(const Data: RawByteString): TSha256Digest;
 var
   SHA: TSha256;
@@ -9268,6 +9331,23 @@ procedure HmacSha256(const key: TSha256Digest; const msg: RawByteString;
   out result: TSha256Digest);
 begin
   HmacSha256(@key, pointer(msg), SizeOf(key), length(msg), result);
+end;
+
+procedure HmacSha256U(key: pointer; len: integer; const msg: array of RawByteString;
+  out result: TSha256Digest; msgSeparator: AnsiChar);
+var
+  mac: THmacSha256;
+  i: PtrInt;
+begin
+  mac.Init(key, len);
+  for i := 0 to high(msg) do
+  begin
+    mac.Update(msg[i]);
+    if (msgSeparator <> #0) and
+       (i < high(msg)) then
+      mac.Update(@msgSeparator, 1);
+  end;
+  mac.Done(result);
 end;
 
 
@@ -10407,12 +10487,15 @@ begin
   end;
   {$endif ASMX64}
   {$ifdef USEAESNIHASH}
+  {$ifdef OSWINDOWS}
+  if not IsWow64Emulation then // PRISM seems inconsistent with only few aesenc
+  {$endif OSWINDOWS}
   if (cfAesNi in CpuFeatures) and   // AES-NI
      (cfSSE3 in CpuFeatures) then   // PSHUFB
   begin
     // 32/64/128-bit aesnihash as implemented in Go runtime, using aesenc opcode
-    AesNiHashKey := GetMemAligned(16 * 4, @BaseEntropy);        // non-void init
-    LecuyerDiffusion(AesNiHashKey, 16 * 4, @SystemEntropy.Startup);   // 512-bit
+    AesNiHashKey := GetMemAligned(64, @BaseEntropy);            // non-void init
+    LecuyerDiffusion(AesNiHashKey, 64, @SystemEntropy.Startup); // 512-bit xor
     AesNiHash32      := @_AesNiHash32;
     AesNiHash64      := @_AesNiHash64;
     AesNiHash128     := @_AesNiHash128;

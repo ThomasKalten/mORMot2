@@ -34,6 +34,7 @@ uses
   mormot.core.rtti,
   mormot.core.json,
   mormot.core.buffers,
+  mormot.core.interfaces,
   mormot.crypt.core,
   mormot.crypt.ecc,
   mormot.crypt.secure, // IProtocol definition
@@ -142,7 +143,7 @@ type
     // - after WebSocketsUpgrade() call, will use WebSockets for the communication
     function Request(const url, method: RawUtf8; KeepAlive: cardinal;
       const header: RawUtf8; const Data: RawByteString; const DataType: RawUtf8;
-      retry: boolean; InStream: TStream = nil; OutStream: TStream = nil): integer; override;
+      AsRetry: boolean; InStream: TStream = nil; OutStream: TStream = nil): integer; override;
     /// upgrade the HTTP client connection to a specified WebSockets protocol
     // - i.e. 'synopsebin' and optionally 'synopsejson' modes
     // - you may specify an URI to as expected by the server for upgrade
@@ -342,6 +343,14 @@ type
     function Emit(out Dest: TDocVariantData; const EventName: RawUtf8;
       const Data: RawUtf8 = ''; const NameSpace: RawUtf8 = '';
       WaitTimeoutMS: integer = 0): boolean; overload;
+    /// disable a callback for a given packet ID
+    // - e.g. when a form is called and we don't need any notification any more
+    function Discard(aAckID: TSocketIOAckID;
+      const aNameSpace: RawUtf8 = ''): boolean; overload;
+    /// disable a given callback from any packet ID redirecting to it
+    // - e.g. when a form is called and we don't need any notification any more
+    function Discard(const aOnAck: TOnSocketIOAck;
+      const aNameSpace: RawUtf8 = ''): boolean; overload;
     /// refine the TSocketsIOClient process
     property Options: TSocketsIOClientOptions
       read fOptions write fOptions;
@@ -598,7 +607,7 @@ end;
 
 function THttpClientWebSockets.Request(const url, method: RawUtf8;
   KeepAlive: cardinal; const header: RawUtf8; const Data: RawByteString;
-  const DataType: RawUtf8; retry: boolean; InStream, OutStream: TStream): integer;
+  const DataType: RawUtf8; AsRetry: boolean; InStream, OutStream: TStream): integer;
 var
   t: TWebSocketProcessClientThread;
   Ctxt: THttpServerRequest;
@@ -609,10 +618,10 @@ begin
   begin
     // standard HTTP/1.1 REST request (before WebSocketsUpgrade call)
     result := inherited Request(url, method, KeepAlive, header, Data, DataType,
-      retry, InStream, OutStream);
+      AsRetry, InStream, OutStream);
     exit;
   end;
-  // WebSocketsUpgrade() did succeed: use the upgraded connection
+  // after successfull WebSocketsUpgrade(): emulate REST over WebSockets
   t := fProcess.fOwnerThread as TWebSocketProcessClientThread;
   if t.fThreadState = sCreate then
     SleepHiRes(10); // paranoid warmup of TWebSocketProcessClientThread.Execute
@@ -630,11 +639,14 @@ begin
     if InStream <> nil then
       body := body + StreamToRawByteString(InStream);
     Ctxt.PrepareDirect(url, method, header, body, DataType, '');
+    // see TRestHttpClientWebsockets.CallbackModeSetHeader
+    block := wscBlockWithAnswer;
     FindNameValue(header, 'SEC-WEBSOCKET-REST:', resthead);
-    if resthead = 'NonBlocking' then
-      block := wscNonBlockWithoutAnswer
-    else
-      block := wscBlockWithAnswer;
+    if resthead <> '' then
+      if resthead = 'NonBlocking' then
+        block := wscNonBlockWithoutAnswer
+      else if resthead = 'WithoutAnswer' then
+       block := wscBlockWithoutAnswer;
     result := fProcess.NotifyCallback(Ctxt, block);
     if IsContentTypeJsonU(Ctxt.OutContentType) then
       HeaderSetText(Ctxt.OutCustomHeaders) // OutContentType='' means JSON
@@ -1176,6 +1188,17 @@ begin
   fWaitEventAckID := SIO_NO_ACK
 end;
 
+function TSocketsIOClient.Discard(aAckID: TSocketIOAckID;
+  const aNameSpace: RawUtf8): boolean;
+begin
+  result := TSocketIORemoteNamespace(GetRemote(aNameSpace)).Discard(aAckID);
+end;
+
+function TSocketsIOClient.Discard(const aOnAck: TOnSocketIOAck;
+  const aNameSpace: RawUtf8): boolean;
+begin
+  result := TSocketIORemoteNamespace(GetRemote(aNameSpace)).Discard(aOnAck);
+end;
 
 
 { TWebSocketEngineIOClientProtocol }

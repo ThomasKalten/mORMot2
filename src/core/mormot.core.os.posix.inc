@@ -691,7 +691,7 @@ begin
   end;
 end;
 
-function GetDesktopWindow: PtrInt;
+function GetDesktopWindow: PtrUInt;
 begin
   result := 0; // fixed result on a window-abstracted system
 end;
@@ -1607,20 +1607,37 @@ begin
             not FpS_ISDIR(st.st_mode);
 end;
 
+var
+  PosixProgramInfo: dl_info; // set at startup
+
+procedure GetDlInfoName(var dlinfo: dl_info; var result: TFileName);
+begin
+  {$ifdef ISDELPHI}
+  result:= dlinfo.dli_fname;
+  {$else}
+  FastSetString(RawUtf8(result), dlinfo.dli_fname, StrLen(dlinfo.dli_fname));
+  {$endif ISDELPHI}  
+  if (result <> '') and
+     (result[1] <> '/') then
+    result := ExpandFileName(string(result));
+end;
+
 function GetExecutableName(aAddress: pointer): TFileName;
 var
   dlinfo: dl_info;
 begin
   FillCharFast(dlinfo, sizeof(dlinfo), 0);
   dladdr(aAddress, @dlinfo);
-  {$ifdef ISDELPHI}
-  result:= dlinfo.dli_fname;
-  {$else}
-  FastSetString(RawUtf8(result), dlinfo.dli_fname, StrLen(dlinfo.dli_fname));
-  {$endif ISDELPHI}
-  if (result <> '') and
-     (result[1] <> '/') then
-    result := ExpandFileName(string(result));
+  GetDlInfoName(dlinfo, result);
+end;
+
+function IsMainExecutable(aAddress: pointer): boolean;
+var
+  dlinfo: dl_info;
+begin
+  FillCharFast(dlinfo, sizeof(dlinfo), 0);
+  dladdr(aAddress, @dlinfo);
+  result := (dlinfo.dli_fbase = PosixProgramInfo.dli_fbase);
 end;
 
 function CopyFile(const Source, Target: TFileName; FailIfExists: boolean): boolean;
@@ -1764,6 +1781,33 @@ begin
     fpmunmap(fBuf, fBufSize);
 end;
 
+// we tried sched_yield() on Linux, but since we spin for a while before calling
+// SwitchToThread, it made more syscalls for no wallclock benefit: nanosleep(10us)
+// seems a better solution, and also prevents pathological spinning if the
+// scheduler policy actually is not adapted to this usage
+{ $define OSLINUX_SCHEDYIELD}     // force sched_yield syscall on Linux
+{ $define OSLINUX_SCHEDYIELDONCE} // yield once during DoSpin() - no benefit
+
+{$ifdef OSLINUX_SCHEDYIELD}
+procedure SwitchToThread;
+begin
+  // called more often than nanosleep, with no actual benefit
+  Do_SysCall(syscall_nr_sched_yield); // properly defined in syscall.pp
+end;
+{$else}
+procedure SwitchToThread;
+var
+  t: TTimeSpec;
+begin
+  // note: nanosleep() may flood the kernel with timer/scheduling events under
+  // repeated calls - but here we spin-and-pause between calls so it is fine
+  t.tv_sec := 0;
+  t.tv_nsec := 1000; // 1us seems fair enough in respect to OS timers resolution
+  fpnanosleep(@t, nil);
+  // benchmarks show consistent 50us minimal for tiny requests, so 1us default
+  // could prevent the kernel to jitter with too small intervals like 10ns
+end;
+{$endif OSLINUX_SCHEDYIELD}
 
 procedure SleepHiRes(ms: cardinal);
 var
@@ -1775,9 +1819,10 @@ begin
     // handle SleepHiRes(0) special case
     if SleepHiRes0Yield then
     begin
-      // warning: reported as buggy by Alan on POSIX, and despitable by Linus
+      // reported as unreliable by Alan on most POSIX, and despitable by Linus
       // - from our testing, it gives worse performance than fpnanosleep()
-      ThreadSwitch; // call e.g. POSIX libc's sched_yield API
+      // when waiting for some event (but may be sometimes used for spinning)
+      ThreadSwitch; // FPC RTL redirects to pthread_yield()
       exit;
     end
     else
@@ -1792,17 +1837,6 @@ begin
   end;
   fpnanosleep(@timeout, nil)
   // no retry loop on ESysEINTR (as with regular RTL's Sleep)
-end;
-
-procedure SwitchToThread;
-var
-  timeout: Ttimespec;
-begin
-  // nanosleep() seems better than FPC RTL ThreadSwitch = POSIX libc sched_yield
-  timeout.tv_sec := 0;
-  timeout.tv_nsec := 10; // empirically identified on a recent Linux Kernel
-  // note: nanosleep() adds a few dozen of microsecs for context switching
-  fpnanosleep(@timeout, nil);
 end;
 
 
@@ -2118,7 +2152,7 @@ begin
     if do_syscall(syscall_nr_getrandom, TSysParam(buf), len, 0) = len then
     begin
       if len >= SizeOf(SystemEntropy.LiveFeed) then
-        crcblock(@SystemEntropy.LiveFeed, buf); // shuffle live state
+        crcblock(@SystemEntropy.LiveFeed, buf); // quickly shuffle live state
       result := true; // "man getrandom" states to read up to 256 bytes per call
     end
     else
@@ -3574,7 +3608,7 @@ procedure XorOSEntropy(var e: THash512Rec);
 var
   tmp: TBuffer4K;
   si: TSysInfo  absolute tmp; // Linuxism
-  rt: TTimeSpec absolute tmp; // with nanoseconds resolution
+  rt: TTimeSpec absolute tmp; // in nanoseconds resolution
 begin
   clock_gettime(CLOCK_MONOTONIC_HIRES, @rt);
   DefaultHasher128(@e.h0, @rt, SizeOf(rt)); // maybe AesNiHash128
@@ -3590,7 +3624,7 @@ begin
   clock_gettime(CLOCK_MONOTONIC_HIRES, @rt); // should have changed in-between
   DefaultHasher128(@e.h3, @rt, SizeOf(rt));
   {$ifdef HASGETRANDOM}
-  // eventually XOR with getrandom syscall if available
+  // eventually XOR with 512-bit getrandom syscall if available
   if LinuxGetRandom(@tmp, SizeOf(e)) then
     XorMemory(@e, @tmp, SizeOf(e))
   else
@@ -3784,8 +3818,12 @@ procedure __Fill256FromOs(out e: THash256Rec);
 var
   si: TSysInfo;  // Linuxism, but properly emulated by thit unit on Mac/BSD
 begin
-  // - no FillSystemRandom() to avoid endless recursive calls in XorEntropy()
-  // - is called once at startup from mormot.core.data
+  {$ifdef HASGETRANDOM}
+  // try to get whole 256-bit from OS crypto-PRNG in 1 syscall
+  if LinuxGetRandom(@e, SizeOf(e)) then
+    exit;
+  {$endif HASGETRANDOM}
+  // no FillSystemRandom() to avoid endless recursive calls in XorEntropy()
   {$ifdef OSDARWIN} // OSX has no clock_gettime() API
   e.d0 := mach_absolute_time   * 2654435761;
   e.d1 := mach_continuous_time * 3266489917;
@@ -3793,11 +3831,7 @@ begin
   if SizeOf(timespec) <= SizeOf(e) then // paranoid (max 128-bit) -> no-op
     clock_gettime(CLOCK_MONOTONIC_FAST, @e); // fast VDSO call
   {$endif OSDARWIN}
-  crcblock(@e.l, @SystemEntropy.Startup); // 128-bit entropy over nanoseconds
-  {$ifdef OSLINUX}
-  if LinuxGetRandom(@e.h, SizeOf(e.h)) then // 128-bit crypto-PRNG in 1 syscall
-    exit;
-  {$endif OSLINUX}
+  crcblock(@e.l, @SystemEntropy.LiveFeed); // obfuscate
   RetrieveSysInfo(si); // at least uptime + cpu load + free mem on all OS
   DefaultHasher128(@e.h, @si, SizeOf(si)); // maybe AesNiHash128
   {$ifndef CPUINTEL}
@@ -3805,7 +3839,7 @@ begin
     crcblocks(@SystemEntropy.LiveFeed, @e, 2) // put something here
   else
   {$endif CPUINTEL}
-    crcblock(@e.h, @SystemEntropy.LiveFeed);  // obfuscate
+    crcblock(@e.h, @SystemEntropy.Startup);  // obfuscate
 end;
 
 const
@@ -3821,17 +3855,16 @@ function FillSystemRandom(Buffer: PByteArray; Len: integer;
   AllowBlocking: boolean): boolean;
 var
   rd, dev: integer;
-  rnd: TLecuyer;
 begin
   result := false;
   if Len <= 0 then
     exit;
   // retrieve up to MAXFROMOS=256 bytes max
   rd := MinPtrInt(Len, MAXFROMOS);
-  {$ifdef OSLINUX} // a single syscall to rule them all on Linux
+  {$ifdef HASGETRANDOM} // a single syscall to rule them all on Linux
   result := LinuxGetRandom(Buffer, rd);
   if not result then
-  {$endif OSLINUX}
+  {$endif HASGETRANDOM}
   begin
     dev := 0;
     if not (fNoURandom in _F0) then
@@ -3864,10 +3897,8 @@ begin
     dec(Len, rd);
     if Len = 0 then
       exit;
-    // pad remaining bytes > rd=MAXFROMOS=256 (unlikely)
-    crcblocks(@rnd, pointer(Buffer), MAXFROMOS div SizeOf(rnd)); // from OS
-    rnd.SeedGenerator;
-    rnd.Fill(@Buffer[MAXFROMOS], Len); // using gsl_rng_taus2 distribution
+    // diffusion/padding of remaining bytes > rd=MAXFROMOS=256 (unlikely)
+    LecuyerDiffusion(@Buffer[MAXFROMOS], Len, pointer(Buffer)); // gsl_rng_taus2
   end
   else
     // on OS API call failure (paranoid): fallback to TLecuyer
@@ -4551,20 +4582,18 @@ begin
     if pid > 0 then
       if (fpkill(pid, 0) = 0) or
          not DeleteFile(pidfilename) then
-        raise EOSException.CreateFmt(
-          '%s.CommandLine Fork failed: %s is already forked as pid=%d',
-          [ClassNameShort(daemon)^, Executable.ProgramName, PtrInt(pid)]);
+        EOSException.RaiseFmt(daemon,
+          'CommandLine Fork failed: %s is already forked as pid=%d',
+          [Executable.ProgramName, PtrInt(pid)]);
     pid := fpFork;
     if pid < 0 then
-      raise EOSException.CreateFmt(
-        '%s.CommandLine Fork failed', [ClassNameShort(daemon)^]);
+      EOSException.RaiseFmt(daemon, 'CommandLine Fork failed', []);
     if pid > 0 then  // main program - just terminate
       exit;
     // clean forked instance
     sid := fpSetSID;
     if sid < 0 then // new session (process group) created?
-      raise EOSException.CreateFmt(
-        '%s.CommandLine SetSID failed', [ClassNameShort(daemon)^]);
+      EOSException.RaiseFmt(daemon, 'CommandLine SetSID failed', []);
     CleanAfterFork;
     // create local .[Executable.ProgramName].pid file
     pid := fpgetpid;
@@ -5380,7 +5409,7 @@ begin
   else
     CpuInfoText := _fmt('%d x %s %s (' + CPU_ARCH_TEXT + ')',
       [SystemInfo.dwNumberOfProcessors, modname, CpuInfoText]);
-  // intialize supported APIs
+  // initialize supported APIs
   TimeZoneLocalBias := -GetLocalTimeOffset;
   _Fill256FromOs    := @__Fill256FromOs;
   {$ifdef OSLINUX}

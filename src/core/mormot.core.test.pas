@@ -723,9 +723,9 @@ begin
     begin
       inc(fInternalTestsCount);
       if Name[1] = '_' then
-        s := Ansi7ToString(copy(Name, 2, 100))
+        Ansi7ToString(copy(Name, 2, 100), s)
       else
-        s := Ansi7ToString(UnCamelCase(Name));
+        Ansi7ToString(UnCamelCase(Name), s);
       Add(TOnSynTest(Method), Name, s);
     end;
 end;
@@ -1201,13 +1201,15 @@ procedure TSynTestCase.Run(const OnTask: TNotifyEvent; Sender: TObject;
   const TaskName: RawUtf8; Threaded, NotifyTask, ForcedThreaded: boolean);
 begin
   if NotifyTask or
-     not fOwner.fMultiThread or
+     ((not fOwner.fMultiThread) and
+      (not ForcedThreaded)) or
      not Threaded then
     NotifyProgress([TaskName]);
   if not Assigned(OnTask) then
     exit;
-  if not fOwner.fMultiThread or // avoid timeout e.g. on slow VMs
-     not Threaded then
+  if ((not fOwner.fMultiThread) or // avoid timeout e.g. on slow VMs
+      (not Threaded)) and
+     not ForcedThreaded then
     OnTask(Sender) // run in main thread
   else
   begin
@@ -1340,12 +1342,13 @@ var
   i: PtrInt;
 begin
   for i := 0 to high(TestCase) do
-    PtrArrayAddOnce(fTestCaseClass, TestCase[i]);
+    AddCase(TestCase[i]);
 end;
 
 procedure TSynTests.AddCase(TestCase: TSynTestCaseClass);
 begin
-  PtrArrayAddOnce(fTestCaseClass, TestCase);
+  if TestCase <> nil then
+    PtrArrayAddOnce(fTestCaseClass, TestCase);
 end;
 
 function TSynTests.BeforeRun: IUnknown;

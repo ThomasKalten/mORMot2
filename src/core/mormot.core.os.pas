@@ -106,10 +106,10 @@ const
   /// human-friendly alias to open a file with no read/write exclusion ($40)
   fmShareReadWrite = fmShareDenyNone;
 
-  /// a convenient constant to open a file for reading without exclusion
+  /// execute FileOpen/TFileStreamEx.Create for reading without exclusion
   fmOpenReadShared = fmOpenRead or fmShareReadWrite;
 
-  /// a convenient constant to open a file for writing without exclusion
+  /// execute FileOpen/TFileStreamEx.Create for writing without exclusion
   fmOpenWriteShared = fmOpenReadWrite or fmShareReadWrite;
 
   /// a convenient constant to create a file without exclusion
@@ -362,6 +362,13 @@ const // some time conversion constants with Milli/Micro/NanoSec resolution
 // - warning: Host should be not nil
 // - would detect both IPv4 '127.x.x.x' pattern and plain IPv6 '::1' constant
 function IsLocalHost(Host: PUtf8Char): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// returns length(Address) if there is no ?parameter nor #anchor in the URI
+function UriTruncLen(const Address: RawUtf8): PtrInt;
+
+/// returns length(Address) if there is no ?#anchor in the URI
+function UriTruncAnchorLen(const Address: RawUtf8): PtrInt;
   {$ifdef HASINLINE} inline; {$endif}
 
 
@@ -724,7 +731,7 @@ var
   // 'Windows 10 64bit 22H2 (10.0.19045.4046)' or 'macOS 13 Ventura (Darwin 22.3.0)' or
   // 'Ubuntu 16.04.5 LTS - Linux 3.13.0 110 generic#157 Ubuntu SMP Mon Feb 20 11:55:25 UTC 2017'
   OSVersionText: RawUtf8;
-  /// some addition system information as text, e.g. 'Wine 1.1.5'
+  /// some addition system information as text, e.g. 'Wine 1.1.5' or 'Prism'
   // - also always appended to OSVersionText high-level description
   // - use if PosEx('Wine', OSVersionInfoEx) > 0 then to check for Wine presence
   OSVersionInfoEx: RawUtf8;
@@ -858,7 +865,7 @@ procedure OsErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean = fals
 /// return the error code number, and its regular constant on the current OS
 // - redirect to WinErrorShort/LinuxErrorShort/BsdErrorShort() functions
 // - e.g. OsErrorShort(5) = '5 ERROR_ACCESS_DENIED' on Windows or '5 EIO' on POSIX
-function OsErrorShort(Code: cardinal; NoInt: boolean = false): TShort47; overload;
+function OsErrorShort(Code: cardinal = 0; NoInt: boolean = false): TShort47; overload;
   {$ifdef HASINLINE} inline; {$endif}
 
 /// append the error code number, and its regular constant on the current OS
@@ -946,8 +953,13 @@ type
     actCortextA725,
     actCortextA520AE,
     actCortextA720AE,
+    actC1Nano,
+    actC1Pro,
+    actC1Ultra,
     actNeoverseN3,
-    actCortextA320);
+    actCortextA320,
+    actC1Premium);
+
   /// a set of recognized ARM/AARCH64 CPU types
   TArmCpuTypes = set of TArmCpuType;
 
@@ -1032,7 +1044,8 @@ const
       {$if declared(RTLVersion122)} + '.2' {$else}
       {$if declared(RTLVersion121)} + '.1' {$ifend} {$ifend} {$ifend}
                               + ' Athens'
-    {$elseif defined(VER370)} + ' 13 Next'
+    {$elseif defined(VER370)} + ' 13 Florence'
+    {$elseif defined(VER380)} + ' 14 Next'
     {$ifend}
   {$endif FPC}
   {$ifdef CPU64} + ' 64 bit' {$else} + ' 32 bit' {$endif};
@@ -1083,63 +1096,6 @@ type
   end;
 
 {$endif UNICODE}
-
-{$endif OSWINDOWS}
-
-var
-  /// system and process 256-bit entropy state
-  // - could be used as 512-bit salt: followed by other system global variables
-  SystemEntropy: record
-    /// 128-bit of entropy quickly gathered during unit/process initialization
-    Startup: THash128Rec;
-    /// 128-bit shuffled each time strong randomness is retrieved from the OS
-    // - together with the intangible Startup value, ensure forward secrecy
-    LiveFeed: THash128Rec;
-  end;
-
-  /// the number of physical memory bytes available to the process
-  // - equals TMemoryInfo.memtotal as retrieved from GetMemoryInfo() at startup
-  SystemMemorySize: PtrUInt;
-
-{$ifdef OSWINDOWS}
-
-  /// the current System information, as retrieved for the current process
-  // - under a WOW64 process, it will use the GetNativeSystemInfo() new API
-  // to retrieve the real top-most system information
-  // - note that the lpMinimumApplicationAddress field is replaced by a
-  // more optimistic/realistic value ($100000 instead of default $10000)
-  // - under BSD/Linux, only contain dwPageSize and dwNumberOfProcessors fields
-  SystemInfo: TSystemInfo;
-  /// the current Windows edition, as retrieved for the current process
-  OSVersion: TWindowsVersion;
-  /// is set to TRUE if the current process is a 32-bit image running under WOW64
-  // - WOW64 is the x86 emulator that allows 32-bit Windows-based applications
-  // to run seamlessly on 64-bit Windows
-  // - equals always FALSE if the current executable is a 64-bit image
-  IsWow64: boolean;
-  /// is set to TRUE if the current process running through a software emulation
-  // - e.g. a Win32/Win64 Intel application running via Prism on Windows for Arm
-  IsWow64Emulation: boolean;
-  /// low-level Operating System information, as retrieved for the current process
-  OSVersionInfo: TOSVersionInfoEx;
-
-{$else OSWINDOWS}
-
-  /// emulate only the most used fields of Windows' TSystemInfo
-  SystemInfo: record
-    /// retrieved from libc's getpagesize() - is expected to not be 0
-    dwPageSize: cardinal;
-    /// the number of available logical CPUs
-    // - retrieved from HW_NCPU (BSD) or /proc/cpuinfo (Linux)
-    // - see CpuSockets for the number of physical CPU sockets
-    dwNumberOfProcessors: cardinal;
-    /// meaningful system information, as returned by fpuname()
-    uts: record
-      sysname, release, version, nodename: RawUtf8;
-    end;
-    /// Linux Distribution release name, retrieved from /etc/*-release
-    release: RawUtf8;
-  end;
 
 {$endif OSWINDOWS}
 
@@ -1430,7 +1386,8 @@ type
     function ConsoleHelpFailed(const exedescription: RawUtf8 = ''): boolean;
     /// fill the stored arguments and options from executable parameters
     // - called e.g. at unit inialization to set Executable.CommandLine variable
-    // - you can execute it again e.g. to customize the switches characters
+    // - you can execute it again e.g. to customize the switches characters -
+    // but to be done at startup, before any Option() or Param() methods
     function Parse(const DescriptionLineFeed: RawUtf8 = CRLF;
       const ShortSwitch: RawUtf8 = {$ifdef OSWINDOWS} '/' {$else} '-' {$endif};
       const LongSwitch: RawUtf8 = {$ifdef OSWINDOWS} '/' {$else} '--' {$endif}): boolean;
@@ -1512,6 +1469,65 @@ type
   end;
 
 var
+  /// system and process 256-bit entropy dual states
+  // - could be used as 512-bit salt: followed by other system global variables
+  SystemEntropy: record
+    /// 128-bit of entropy quickly gathered during unit/process initialization
+    // - not supposed to change during process execution
+    Startup: THash128Rec;
+    /// 128-bit shuffled each time strong randomness is retrieved from the OS
+    // - set at startup e.g. from getauxval(AT_RANDOM) or CoCreateGuid()
+    // - then e.g. by each FillSystemRandom/GetRawSmbios/LinuxGetRandom call
+    // - together with the intangible Startup value, ensure forward secrecy
+    LiveFeed: THash128Rec;
+  end;
+
+  /// the number of physical memory bytes available to the process
+  // - equals TMemoryInfo.memtotal as retrieved from GetMemoryInfo() at startup
+  SystemMemorySize: PtrUInt;
+
+{$ifdef OSWINDOWS}
+
+  /// the current System information, as retrieved for the current process
+  // - under a WOW64 process, it will use the GetNativeSystemInfo() new API
+  // to retrieve the real top-most system information
+  // - note that the lpMinimumApplicationAddress field is replaced by a
+  // more optimistic/realistic value ($100000 instead of default $10000)
+  // - under BSD/Linux, only contain dwPageSize and dwNumberOfProcessors fields
+  SystemInfo: TSystemInfo;
+  /// the current Windows edition, as retrieved for the current process
+  OSVersion: TWindowsVersion;
+  /// is set to TRUE if the current process is a 32-bit image running under WOW64
+  // - WOW64 is the x86 emulator that allows 32-bit Windows-based applications
+  // to run seamlessly on 64-bit Windows
+  // - equals always FALSE if the current executable is a 64-bit image
+  IsWow64: boolean;
+  /// is set to TRUE if the current process running through a software emulation
+  // - e.g. a Win32/Win64 Intel application running via Prism on Windows for Arm
+  IsWow64Emulation: boolean;
+  /// low-level Operating System information, as retrieved for the current process
+  OSVersionInfo: TOSVersionInfoEx;
+
+{$else OSWINDOWS}
+
+  /// emulate only the most used fields of Windows' TSystemInfo
+  SystemInfo: record
+    /// retrieved from libc's getpagesize() - is expected to not be 0
+    dwPageSize: cardinal;
+    /// the number of available logical CPUs
+    // - retrieved from HW_NCPU (BSD) or /proc/cpuinfo (Linux)
+    // - see CpuSockets for the number of physical CPU sockets
+    dwNumberOfProcessors: cardinal;
+    /// meaningful system information, as returned by fpuname()
+    uts: record
+      sysname, release, version, nodename: RawUtf8;
+    end;
+    /// Linux Distribution release name, retrieved from /etc/*-release
+    release: RawUtf8;
+  end;
+
+{$endif OSWINDOWS}
+
   /// global information about the current executable and computer
   // - this structure is initialized in this unit's initialization block below
   // but you need to call GetExecutableVersion to initialize its Version fields
@@ -1554,6 +1570,10 @@ var
 /// try to retrieve the file name of the executable/library holding a function
 // - calls dladdr() on POSIX, or GetModuleFileName() on Windows
 function GetExecutableName(aAddress: pointer): TFileName;
+
+/// check if a function address is known within the main executable module
+// - calls dladdr() on POSIX, or GetModuleHandleEx() on Windows
+function IsMainExecutable(aAddress: pointer): boolean;
 
 var
   /// retrieve the MAC addresses of all hardware network adapters
@@ -2640,7 +2660,7 @@ function SetSystemTime(utctime: TUnixTime): boolean;
 
 /// compatibility function, wrapping Win32 API function
 // - returns the current main Window handle on Windows, or 0 on POSIX/Linux
-function GetDesktopWindow: PtrInt;
+function GetDesktopWindow: PtrUInt;
   {$ifdef OSWINDOWS} stdcall; {$else} inline; {$endif}
 
 /// returns the curent system code page for AnsiString types
@@ -2735,6 +2755,7 @@ function GetTickCount64: Int64;
 /// returns a system-wide current monotonic timestamp as 32-bit seconds
 // - simply wrap GetTickCount64 div 1000 on Windows/Mac, or call clock_gettime()
 // and return directly its timespec.tv_sec part on Linux/BSD
+// - overflow after 136 years when compared as 32-bit, or 68 years as 31-bit
 function GetTickSec: cardinal;
   {$ifdef OSWINDOWS} {$ifdef HASINLINE} inline; {$endif} {$endif}
 
@@ -2743,6 +2764,7 @@ function GetTickSec: cardinal;
 // - on Windows, computes GetTickCount64 div 1000
 // - on Linux/BSD, will use CLOCK_BOOTTIME/CLOCK_UPTIME clock
 // - on MacOS, will use mach_continuous_time() API
+// - overflow after 136 years when compared as 32-bit, or 68 years as 31-bit
 function GetUptimeSec: cardinal;
 
 /// returns the current UTC time
@@ -2831,7 +2853,8 @@ type
 
 /// setup Exception interception for the whole process
 // - the first to call this procedure will be elected until the process ending
-procedure RawExceptionIntercept(const Handler: TOnRawLogException);
+// - returns true on success, false if there is already an handler
+function RawExceptionIntercept(const Handler: TOnRawLogException): boolean;
 
 {$endif NOEXCEPTIONINTERCEPT}
 
@@ -2921,17 +2944,17 @@ function FileAgeToUnixTimeUtc(const FileName: TFileName;
 function FileAgeToWindowsTime(F: THandle): integer;
 
 /// copy the date of one file to another
-// - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
+// - FileSetDate(THandle, Age) is not available on POSIX: filename is needed
 function FileSetDateFrom(const Dest: TFileName; SourceHandle: THandle): boolean; overload;
 
 /// copy the date of one file to another
-// - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
+// - FileSetDate(THandle, Age) is not available on POSIX: filename is needed
 function FileSetDateFrom(const Dest, Source: TFileName): boolean; overload;
 
 /// copy the date of one file from a Windows File 32-bit TimeStamp
 // - this cross-system function is used e.g. by mormot.core.zip which expects
 // Windows TimeStamps in its headers
-// - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
+// - FileSetDate(THandle, Age) is not available on POSIX: filename is needed
 function FileSetDateFromWindowsTime(const Dest: TFileName; WinTime: integer): boolean;
 
 /// set the file date/time from a supplied UTC TUnixTime value
@@ -3282,7 +3305,7 @@ function AnsiCompareFileName(const S1, S2 : TFileName): integer;
 /// creates a directory if not already existing
 // - returns the full expanded directory name, including trailing path delimiter
 // - returns '' on error, unless RaiseExceptionOnCreationFailure is set
-// - you can set NoExpand=true if you now that Directory has already a full path
+// - you can set NoExpand=true if you know that Directory has already a full path
 function EnsureDirectoryExists(const Directory: TFileName;
   RaiseExceptionOnCreationFailure: ExceptionClass = nil;
   NoExpand: boolean = false): TFileName; overload;
@@ -4977,7 +5000,10 @@ function SleepDelay(elapsed: PtrInt): PtrInt;
 function SleepStepTime(var start, tix: Int64; endtix: PInt64 = nil): PtrInt;
 
 /// similar to Windows SwitchToThread API call, to be truly cross-platform
-// - call fpnanosleep(10) on POSIX systems, or the homonymous API on Windows
+// - call the homonymous API on Windows
+// - call direclty the sched_yield Linux syscall or the FPC RTL on BSD
+// - you should not call this function in your own code, especially since
+// sched_yield is reported to be unfair and misleading by Linux kernel devs
 procedure SwitchToThread;
   {$ifdef OSWINDOWS} stdcall; {$endif}
 
@@ -5299,7 +5325,7 @@ var
   WindowsServiceLog: TSynLogProc;
 
 type
-  /// TServiceControler class is intended to create a new Windows Service instance
+  /// TServiceController class is intended to create a new Windows Service instance
   // or to maintain (that is start, stop, pause, resume...) an existing Service
   // - to provide the service itself, use the TService class
   TServiceController = class
@@ -5477,7 +5503,7 @@ type
   public
     /// internal method redirecting to WindowsServiceLog global variable
     class procedure DoLog(Level: TSynLogLevel; Fmt: PUtf8Char;
-      const Args: array of const; Instance: TObject);
+      const Args: array of const; Instance: TObject = nil);
     /// Creates the service
     // - the service is added to the internal registered services
     // - main application must instantiate the TServiceSingle class, then call
@@ -5509,10 +5535,10 @@ type
     /// this is the main method, in which the Service should implement its run
     procedure Execute; virtual;
 
-    /// Number of arguments passed to the service by the service controler
+    /// Number of arguments passed to the service by the service controller
     property ArgCount: integer
       read GetArgCount;
-    /// List of arguments passed to the service by the service controler
+    /// List of arguments passed to the service by the service controller
     // - Idx is in range 0..ArgCount - 1
     property Args[Idx: integer]: RawUtf8
       read GetArgs;
@@ -5638,12 +5664,19 @@ function KillProcess(pid: cardinal; waitseconds: integer = 30): boolean;
 /// install a Windows event handler for Ctrl+C pressed on the Console
 function HandleCtrlC(const OnClose: TThreadMethod): boolean;
 
-/// define a Windows Job to close associated processes together
-// - warning: main process should include the CREATE_BREAKAWAY_FROM_JOB flag
+/// define a Windows Job with the flags to close associated processes together
+// - warning: parent process should include the CREATE_BREAKAWAY_FROM_JOB flag
+// - will create a new Job with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and
+// JOB_OBJECT_LIMIT_BREAKAWAY_OK
+// - allowSilentBreakaway=true will set JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK
+// to avoid any unexpected behavior in sensitive child process (which may not
+// include CREATE_BREAKAWAY_FROM_JOB themselves, e.g. ServiceUI.exe)
 // - you should later call CloseHandle() on the returned handle, if not 0 
-function CreateJobToClose(parentpid: cardinal): THandle;
+function CreateJobToClose(parentpid: cardinal; const ctxt: ShortString;
+  allowSilentBreakaway: boolean = false): THandle;
 
 /// associate a process to a Windows Job created by CreateJobToClose()
+// - is called usually just after CreateJobToClose()
 function AssignJobToProcess(job, process: THandle; const ctxt: ShortString): boolean;
 
 {$else}
@@ -5794,9 +5827,12 @@ type
   /// define how RunCommand() and RunRedirect() run their sub-process
   // - roEnvAddExisting is used when the env pairs should be added to the
   // existing system environment variable
-  // - roWinJobCloseChildren will setup a Windows Job to close any child
-  // process(es) when the created process quits
-  // - roWinNoProcessDetach will avoid creating its own console and Windows group
+  // - roWinJobCloseChildren will use the CREATE_BREAKAWAY_FROM_JOB flag and
+  // run CreateJobToClose(allowSilentBreakaway=true) and AssignJobToProcess()
+  // on the new process so that any of its future children would be
+  // synchronized and closed with their father, in a relaxed way
+  // - on Windows, will create its own console and its own execution group, unless
+  // roWinNoProcessDetach is defined - e.g. as RUN_CMD for RunCommand/RunRedirect
   // - roWinNewConsole won't inherit the parent console, but have its own console
   // - roWinKeepProcessOnTimeout won't make Ctrl+C / WM_QUIT or TerminateProcess
   TRunOptions = set of (
@@ -6052,7 +6088,35 @@ begin
             (PCardinal(Host)^ = ord(':') + ord(':') shl 8 + ord('1') shl 16);
 end;
 
-function _RawToBase64(Bin: pointer; Bytes: PtrInt; Base64Uri: boolean): RawUtf8;
+function UriTruncLen(const Address: RawUtf8): PtrInt;
+var
+  l: PtrInt;
+begin
+  result := PtrUInt(Address);
+  if result = 0 then
+    exit;
+  l := PStrLen(PAnsiChar(result) - _STRLEN)^;
+  result := ByteScanIndex(pointer(Address), l, ord('?')); // exclude ?arguments
+  if result < 0 then
+    result := ByteScanIndex(pointer(Address), l, ord('#')); // exclude #anchor
+  if result < 0 then
+    result := l;
+end;
+
+function UriTruncAnchorLen(const Address: RawUtf8): PtrInt;
+var
+  l: PtrInt;
+begin
+  result := PtrUInt(Address);
+  if result = 0 then
+    exit;
+  l := PStrLen(PAnsiChar(result) - _STRLEN)^;
+  result := ByteScanIndex(pointer(Address), l, ord('#')); // exclude #anchor
+  if result < 0 then
+    result := l;
+end;
+
+function {%H-}_RawToBase64(Bin: pointer; Bytes: PtrInt; Base64Uri: boolean): RawUtf8;
 begin
   raise EOSException.Create('No RawToBase64(): needs mormot.core.buffers.pas');
 end;
@@ -6357,7 +6421,7 @@ type
     EFAULT, EINVAL, EMFILE, EWOULDBLOCK, ENOTSOCK, ENETDOWN,
     ENETUNREACH, ENETRESET, ECONNABORTED, ECONNRESET, ENOBUFS,
     ETIMEDOUT, ECONNREFUSED, TRY_AGAIN,
-    // most common WinHttp API errors (in range 12000...12152)
+    // most common WinHttp API (ERROR_WINHTTP_*) errors in range 12000...12152
     TIMEOUT, OPERATION_CANCELLED, CANNOT_CONNECT,
     CLIENT_AUTH_CERT_NEEDED, INVALID_SERVER_RESPONSE,
     // some SEC_I_* status as returned by SSPI
@@ -6380,10 +6444,10 @@ const
     $c0000092, $c0000093, $c0000094, $c0000095, $c0000096, $c00000fd,
     // sparse system errors
     183, 234, 701, 1150, 1450, 1722, 1907, 1909,
-    // main Windows Socket API (WSA) errors
+    // main Windows Socket API (WSA*) errors
     10014, 10022, 10024, 10035, 10038, 10050, 10051, 10052, 10053, 10054, 10055,
     10060, 10061, 11002,
-    // most common WinHttp API errors (in range 12000...12152)
+    // most common WinHttp API (ERROR_WINHTTP_*) errors in range 12000...12152
     12002, 12017, 12029, 12044, 12152,
     // some SEC_I_* status as returned by SSPI
     $00090312, $00090313, $00090314, $00090317, $00090320, $00090321);
@@ -6531,6 +6595,8 @@ end;
 
 function OsErrorShort(Code: cardinal; NoInt: boolean): TShort47;
 begin
+  if Code = 0 then
+    Code := GetLastError;
   OsErrorShort(Code, @result, NoInt); // redirect to Win/Linux/BsdErrorShort()
 end;
 
@@ -6636,8 +6702,12 @@ const
     $0d87,  // actCortextA725
     $0d88,  // actCortextA520AE
     $0d89,  // actCortextA720AE
+    $0d8a,  // actC1Nano
+    $0d8b,  // actC1Pro
+    $0d8c,  // actC1Ultra
     $0d8e,  // actNeoverseN3
-    $0d8f); // actCortextA320
+    $0d8f,  // actCortextA320
+    $0d90); // actC1Premium
 
   ARMCPU_IMPL: array[TArmCpuImplementer] of byte = (
     0,    // aciUnknown
@@ -6676,8 +6746,8 @@ const
      'Cortex-710',  'Cortex-X2',   'Neoverse-N2', 'Neoverse-E1', 'Cortex-A78C',
      'Cortex-X1C',  'Cortex-A715', 'Cortex-X3',   'Neoverse-V2', 'Cortex-A520',
      'Cortex-A720', 'Cortex-X4',   'Neoverse-V3AE','Neoverse-V3','Cortex-X925',
-     'Cortex-A725', 'Cortex-A520AE', 'Cortex-A720AE', 'Neoverse-N3',
-     'Cortex-A320');
+     'Cortex-A725', 'Cortex-A520AE', 'Cortex-A720AE', 'C1-Nano', 'C1-Pro',
+     'C1-Ultra',    'Neoverse-N3',   'Cortex-A320', 'C1-Premium');
 
   ARMCPU_IMPL_TXT: array[TArmCpuImplementer] of string[18] = (
       '',
@@ -7967,16 +8037,13 @@ procedure SynRaiseProc(Obj: TObject; Addr: CodePointer;
 var
   ctxt: TSynLogExceptionContext;
   backuplasterror: DWord;
-  backuphandler: TOnRawLogException;
 begin
   if (Obj <> nil) and
-     Obj.InheritsFrom(Exception) then
+     Obj.InheritsFrom(Exception) and
+     Assigned(_RawLogException) then
   begin
     backuplasterror := GetLastError;
-    backuphandler := _RawLogException;
-    if Assigned(backuphandler) then
       try
-        _RawLogException := nil; // disable nested exception
         ctxt.EClass := PPointer(Obj)^;
         ctxt.EInstance := Exception(Obj);
         ctxt.EAddr := PtrUInt(Addr);
@@ -7987,11 +8054,13 @@ begin
         ctxt.ETimestamp := UnixTimeUtc;
         ctxt.EStack := pointer(Frame);
         ctxt.EStackCount := FrameCount;
-        backuphandler(ctxt);
+      _RawLogException(ctxt); // e.g. SynLogException() from mormot.core.log
+      // note that SynLogException() will use PerThreadInfo.ExceptionIgnore
+      // to avoid recursive exception loggin: _RawLogException should not be set
+      // to nil or exceptions on concurrent threads would not be logged
       except
         { ignore any nested exception }
       end;
-    _RawLogException := backuphandler;
     SetLastError(backuplasterror); // may have changed above
   end;
   if Assigned(OldRaiseProc) then
@@ -8001,11 +8070,14 @@ end;
 {$endif WITH_RAISEPROC}
 
 var
-  RawExceptionIntercepted: boolean;
+  RawExceptionIntercepted: boolean; // single global Exception interception
 
-procedure RawExceptionIntercept(const Handler: TOnRawLogException);
+function RawExceptionIntercept(const Handler: TOnRawLogException): boolean;
 begin
-  _RawLogException := Handler;
+  result := false;
+  GlobalLock;
+  try
+    _RawLogException := Handler; // e.g. SynLogException() from mormot.core.log
   if RawExceptionIntercepted or
      not Assigned(Handler) then
     exit;
@@ -8016,6 +8088,7 @@ begin
   begin
     OldRaiseProc := RaiseProc;
     RaiseProc := @SynRaiseProc;
+      result := true;
   end;
   {$endif WITH_RAISEPROC}
   {$ifdef WITH_VECTOREXCEPT} // SEH32/SEH64 official API
@@ -8023,6 +8096,7 @@ begin
   begin
     AddVectoredExceptionHandler(0, @SynLogVectoredHandler);
     AddVectoredExceptionHandlerCalled := true;
+      result := true;
   end;
   {$endif WITH_VECTOREXCEPT}
   {$ifdef WITH_RTLUNWINDPROC}
@@ -8031,8 +8105,12 @@ begin
   begin
     OldUnWindProc := RTLUnwindProc;
     RTLUnwindProc := @SynRtlUnwind;
+      result := true;
   end;
   {$endif WITH_RTLUNWINDPROC}
+  finally
+    GlobalUnLock;
+  end;
 end;
 
 {$endif NOEXCEPTIONINTERCEPT}
@@ -8166,8 +8244,7 @@ constructor TSynMemoryStreamMapped.Create(aFile: THandle;
   aCustomSize: PtrUInt; aCustomOffset: Int64);
 begin
   if not fMap.Map(aFile, aCustomSize, aCustomOffset) then
-    raise EOSException.CreateFmt('%s.Create(%s) mapping error',
-      [ClassNameShort(self)^, fFileName]);
+    EOSException.RaiseFmt(self, 'Create(%s) mapping error', [fFileName]);
   inherited Create(fMap.fBuf, fMap.fBufSize);
 end;
 
@@ -8288,7 +8365,7 @@ begin
     GetMem(result, Size + 16); // 15 bytes for alignment + 1 byte for padding
     pad := 16 - (PtrUInt(result) and 15);   // adjust by 1..16 bytes
     inc(PAnsiChar(result), pad);            // Delphi Win32 only needs padding
-    PAnsiChar(result)[-1] := AnsiChar(pad); // always store the padding
+    PAnsiChar(result)[-1] := AnsiChar(pad); // store the padding in p[-1]
   end;
   if FillWith <> nil then
     MoveFast(FillWith^, result^, Size);
@@ -8304,7 +8381,7 @@ begin
     _FreeLargeMem(p, Size);                 // munmap or VirtualFree
     exit;
   end;
-  dec(PAnsiChar(p), ord(PAnsiChar(p)[-1])); // adjust back by 1..16 bytes
+  dec(PAnsiChar(p), ord(PAnsiChar(p)[-1])); // adjust p[-1]=1..16 padding bytes
   FreeMem(p);
 end;
 
@@ -8603,9 +8680,6 @@ var
   function LoadOne(lib: TFileName; current: PtrInt): boolean;
   var
     j: PtrInt;
-    {$ifdef OSWINDOWS}
-    cwd: TFileName;
-    {$endif OSWINDOWS}
   begin
     // check library name
     result := false;
@@ -8638,16 +8712,18 @@ var
     try
       if nwd <> '' then
       begin
-        GlobalLock; // SetCurrentDir() is for the whole process not the thread
-        cwd := GetCurrentDir;
-        SetCurrentDir(nwd);
-        lib := ExtractFileName(lib); // seems more stable that way
+        GlobalLock; // SetDllDirectoryW() is for the whole process not thread
+        if not LibrarySetDirectory(nwd) then // as documented on microsoft.com
+        begin
+          GlobalUnLock;
+          nwd := '';
+        end;
       end;
       fHandle := LibraryOpen(lib); // preserve x87 flags and prevent msg box
     finally
       if nwd <> '' then
       begin
-        SetCurrentDir(cwd{%H-});
+        SetDllDirectoryW(nil); // revert to default
         GlobalUnLock;
       end;
     end;
@@ -8911,7 +8987,8 @@ begin
     dt := FileAgeToDateTime(ProgramFileName);
     {$else}
     dt := 0;
-    ProgramFileName := GetExecutableName(@InitializeProcessInfo);
+    dladdr(@InitializeProcessInfo, @PosixProgramInfo);
+    GetDlInfoName(PosixProgramInfo, ProgramFileName);
     if ProgramFileName <> '' then
     begin
       dt := FileAgeToDateTime(ProgramFileName);
@@ -8920,6 +8997,7 @@ begin
     end;
     if ProgramFileName = '' then
       ProgramFileName := ExpandFileName(ParamStr(0));
+    crcblock(@SystemEntropy.Startup, @PosixProgramInfo); // won't hurt
     {$endif OSWINDOWS}
     ProgramFilePath := ExtractFilePath(ProgramFileName);
     if IsLibrary then
@@ -9500,6 +9578,9 @@ begin
     for i := 0 to n - 1 do
       fRawParams[i] := RawUtf8(ParamStr(i + 1));
   end;
+  Finalize(fNames);
+  Finalize(fValues);
+  Finalize(fRetrieved);
   n := length(fRawParams);
   if n = 0 then
   begin
@@ -10089,23 +10170,43 @@ end;
 { **************** TSynLocker Threading Features }
 
 const
+  // default value for all spining, up to 993 "pause" opcode calls
+  // - on Intel, taking around 5us on old CPU, but modern Intel have bigger pause
+  // latency (up to 100 cycles) so takes up to 50us
+  // - AMD Zen 3 and later has a latency of only 1-2 cycles so we identify them
+  // via CPUID and adjust a SpinFactor global variable at startup to reach 5us
+  // - 5..50us range seems consistent with our eventual nanosleep(10us) syscall
   SPIN_COUNT = pred(6 shl 5); // = 191
 
 // as reference, take a look at Linus insight (TL&WR: better use futex)
 // from https://www.realworldtech.com/forum/?threadid=189711&curpostid=189755
 
+// our light locks do not use the resource of an associated futex, so are easier
+// if there is almost no contention - and really seldom call fpnanosleep(10us)
+
 {$undef HAS_CPU_DOPAUSE}
 {$ifdef CPUINTEL}
 {$define HAS_CPU_DOPAUSE}
+var
+  SpinFactor: PtrUInt = 1; // default value on Intel - set to 10 on AMD Zen3+
 // on Intel/AMD, the pause CPU instruction would relax the core
-procedure DoPause; {$ifdef FPC} assembler; nostackframe; {$endif}
+// - but it is expected to be inlined within the spinning loop itself
+// - sadly, Delphi does not support inlined asm on Win64 so we use a function
+{$ifdef WIN64DELPHI}
+procedure DoPause(n: PtrUInt);
 asm
-      pause // modern CPUs have bigger pause latency (up to 100 cycles)
+@s:   pause          // = "rep nop" opcode
+      dec     rcx
+      jnz     @s     // within its own 1..16x loop (better than nothing)
 end;
+{$endif WIN64DELPHI}
 {$endif CPUINTEL}
 
 {$ifdef FPC_CPUARM}
 {$define HAS_CPU_DOPAUSE}
+const
+  SpinFactor = 2; // ARM yield has smaller latency than Intel's pause
+  
 // "yield" is available since ARMv6K architecture, including ARMv7-A and ARMv8-A
 procedure DoPause; assembler; nostackframe;
 asm
@@ -10119,18 +10220,38 @@ begin
   // adaptive spinning to reduce cache coherence traffic
   result := (SPIN_COUNT - spin) shr 5; // 0..5 range, each 32 times
   if result <> 0 then // no pause up to 32 times (low latency acquisition)
-  begin
-    result := 1 shl pred(result); // exponential backoff: 1,2,4,8,16 x DoPause
+  {$ifdef OSLINUX_SCHEDYIELDONCE}      // yield once during the process
+  {$ifndef OSLINUX_SCHEDYIELD}         // if not already = SwitchToThread
+  if spin = SPIN_COUNT shr 2 then
+    Do_SysCall(syscall_nr_sched_yield) // properly defined in syscall.pp
+  else
+  {$endif OSLINUX_SCHEDYIELD}
+  {$endif OSLINUX_SCHEDYIELDONCE}
+  begin // exponential backoff: 1,2,4,8,16 x DoPause
+    result := SpinFactor shl pred(result);
+    // "pause" called 992 times until SwithToThread = up to 50us on modern CPU
+    {$ifdef WIN64DELPHI}
+    DoPause(result);
+    {$else}
     repeat
-      DoPause; // called 992 times until yield to the OS
+      {$ifdef CPUINTEL}
+      asm
+        pause // "rep nop" opcode should be inlined within the spinning loop
+      end;
+      {$else}
+      DoPause; // "yield" arm/aarch64 opcode
+      {$endif CPUINTEL}
       dec(result);
     until result = 0;
+    {$endif WIN64DELPHI}
   end;
+  {$else}
+  todo_pause; // Todo: will not compile - need something simular
   {$endif HAS_CPU_DOPAUSE}
   dec(spin);
-  if spin = 0 then // eventually yield to the OS for long wait
+  if spin = 0 then // eventually call the OS for long wait
   begin
-    SwitchToThread;     // fpnanosleep on POSIX
+    SwitchToThread; // homonymous Win API call or proper POSIX call
     spin := SPIN_COUNT; // try again
   end;
   result := spin;
@@ -11337,7 +11458,7 @@ end;
 function SleepDelay(elapsed: PtrInt): PtrInt;
 begin
   if elapsed < 50 then
-    result := 0 // 10us on POSIX, SwitchToThread on Windows
+    result := 0 // redirect to SwitchToThread
   else if elapsed < 200 then
     result := 1
   else if elapsed < 500 then
@@ -11774,6 +11895,12 @@ begin
   NULL_STR_VAR := 'null';
   BOOL_UTF8[false] := 'false';
   BOOL_UTF8[true]  := 'true';
+  {$ifdef CPUINTEL}
+  if (CpuManufacturer = icmAmd) and
+     (CpuFamily = $19) and
+     (CpuModel >= $30) then // Zen 3 or later
+    SpinFactor := 10;       // "pause" opcode is only 1-2 cycles
+  {$endif CPUINTEL}
   // minimal stubs which will be properly implemented in other mormot.core units
   GetExecutableLocation := _GetExecutableLocation; // mormot.core.log
   SetThreadName         := _SetThreadName;

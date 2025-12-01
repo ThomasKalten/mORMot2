@@ -12,7 +12,7 @@ unit mormot.lib.win7zip;
 
   *****************************************************************************
 
-  Two meaningful questions:
+  Two meaningful questions (TL&WR):
 
   Can I use the EXE or DLL files from 7-Zip in a commercial application?
   Yes, but you are required to specify in documentation for your application:
@@ -863,7 +863,7 @@ end;
 class procedure E7Zip.RaiseAfterCheck(Caller: TObject;
   const Context: ShortString; Res: HResult);
 begin
-  raise CreateFmt('%s.%s', [ClassNameShort(Caller)^, WinLastError(context, Res)])
+  RaiseFmt(Caller, '%s', [WinLastError(context, Res)])
 end;
 
 class procedure E7Zip.Check(Caller: TObject; const Context: ShortString;

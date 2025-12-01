@@ -2102,11 +2102,12 @@ type
   // - will be fully implemented as TOrmTableJson holding JSON content
   TOrmTableAbstract = class
   protected
-    fRowCount: PtrInt;
-    fFieldCount: PtrInt;
-    fData: TOrmTableDataArray;
+    fRowCount: integer;
+    fFieldCount: integer;
+    fData: TOrmTableDataArray; // 32-bit pointer or fDataStart[] 32-bit offset
     {$ifndef NOPOINTEROFFSET} // reduce memory consumption by half on 64-bit CPU
     fDataStart: PUtf8Char;
+    fDataSafe: TPUtf8CharDynArray; // SetResultsSafe() for TOrmTableWritable
     {$endif NOPOINTEROFFSET}
     {$ifndef NOTORMTABLELEN}
     fLen: TIntegerDynArray;
@@ -2263,19 +2264,19 @@ type
     // - a new RawBlob is created
     // - Blob data is converted from SQLite3 BLOB literals (X'53514C697465' e.g.)
     // or Base64 encoded content ('\uFFF0base64encodedbinary')
-    // - prefered manner is to directly use REST protocol to retrieve a blob field
+    // - preferred manner is to directly use REST protocol to retrieve a blob field
     function GetBlob(Row, Field: PtrInt): RawBlob;
     /// read-only access to a particular Blob value
     // - a new TBytes is created
     // - Blob data is converted from SQLite3 BLOB literals (X'53514C697465' e.g.)
     //   or Base64 encoded content ('\uFFF0base64encodedbinary')
-    // - prefered manner is to directly use REST protocol to retrieve a blob field
+    // - preferred manner is to directly use REST protocol to retrieve a blob field
     function GetBytes(Row, Field: PtrInt): TBytes;
     /// read-only access to a particular Blob value
     // - a new TCustomMemoryStream is created - caller shall free its instance
     // - Blob data is converted from SQLite3 BLOB literals (X'53514C697465' e.g.)
     //   or Base64 encoded content ('\uFFF0base64encodedbinary')
-    // - prefered manner is to directly use REST protocol to retrieve a blob field
+    // - preferred manner is to directly use REST protocol to retrieve a blob field
     function GetStream(Row, Field: PtrInt): TStream;
     /// read-only access to a particular DateTime field value
     // - expect SQLite3 TEXT field in ISO 8601 'YYYYMMDD hhmmss' or
@@ -2679,11 +2680,13 @@ type
     property RowCount: PtrInt
       read GetRowCount;
     /// read-only access to the number of fields for each Row in this table
-    property FieldCount: PtrInt
+    property FieldCount: integer
       read fFieldCount;
     /// raw access to the data values memory pointers
     // - you should rather use the Get*() methods which can use the length
     // - returns the text value, nil for JSON null, or #0 for JSON ""
+    // - setting a value using this property will call SetResultsSafe() which
+    // increase memory consumption on 64-bit targets (but is safe)
     property Results[Offset: PtrInt]: PUtf8Char
       read GetResults write SetResultsSafe;
     /// raw access to the data values UTF-8 length
@@ -4788,7 +4791,7 @@ begin
   if Value = '' then
     result := ''
   else if fOrmFieldType = oftBoolean then // FPC has weird text RTTI for booleans
-    result := Ansi7ToString(BOOL_UTF8[IntValue <> 0])
+    result := {$ifdef UNICODE}Ansi7ToString{$endif}(BOOL_UTF8[IntValue <> 0])
   else
     result := EnumType^.GetCaption(IntValue);
 end;
@@ -5700,7 +5703,7 @@ begin
   if wasSqlString <> nil then
     wasSqlString^ := true;
   fPropInfo.GetLongStrProp(Instance, tmp);
-  result := fEngine.AnsiToUtf8(tmp);
+  fEngine.AnsiToUtf8(tmp, result);
 end;
 
 procedure TOrmPropInfoRttiAnsi.NormalizeValue(var Value: RawUtf8);
@@ -5798,7 +5801,7 @@ procedure TOrmPropInfoRttiAnsi.GetFieldSqlVar(Instance: TObject;
   var aValue: TSqlVar; var temp: RawByteString);
 begin
   fPropInfo.GetLongStrProp(Instance, temp);
-  temp := fEngine.AnsiToUtf8(temp);
+  fEngine.AnsiToUtf8(temp, RawUtf8(temp));
   aValue.Options := [];
   aValue.VType := ftUtf8;
   aValue.VText := pointer(temp);
@@ -7944,7 +7947,7 @@ begin
     rkChar,
     rkWChar,
     rkWString:
-      result := oftUtf8Text;
+      result := oftUtf8Text; // UTF-16 content will be handled as UTF-8 JSON
     rkDynArray:
       result := oftBlobDynArray;
     {$ifdef PUBLISHRECORD}
@@ -8002,6 +8005,7 @@ begin
   fData := source.fData;
   {$ifndef NOPOINTEROFFSET}
   fDataStart := source.fDataStart;
+  fDataSafe := source.fDataSafe;
   {$endif NOPOINTEROFFSET}
   {$ifndef NOTORMTABLELEN}
   fLen := source.fLen;
@@ -8017,7 +8021,13 @@ begin
   {$ifdef NOPOINTEROFFSET}
   result := fData[Offset];
   {$else}
-  result := PUtf8Char(PtrInt(fData[Offset]));
+  result := pointer(fDataSafe);
+  if result <> nil then
+  begin
+    result := PPUtf8CharArray(result)[Offset]; // for TOrmTableWritable
+    exit;
+  end;
+  result := PUtf8Char(PtrUInt(fData[Offset]));
   Offset := PtrUInt(fDataStart); // in two steps for better code generation
   if result = nil then
     Offset := PtrInt(result); // compile as branchless cmove on FPC
@@ -8054,11 +8064,29 @@ begin
   {$else}
   if Value <> nil then
     dec(Value, PtrUInt(fDataStart));
-  fData[Offset] := PtrInt(Value);
+  fData[Offset] := PtrUInt(Value); // we assume fDataSafe = nil
   {$endif NOPOINTEROFFSET}
 end;
 
+{$ifndef NOPOINTEROFFSET}
+procedure FillSafe(s: PInteger; d: PPUtf8Char; start: PUtf8Char; n: PtrInt);
+begin
+  if s <> nil then
+    repeat
+      if s^ <> 0 then
+        d^ := start + s^; // pointer to the existing data
+      inc(s);
+      inc(d);
+      dec(n);
+    until n = 0;
+end;
+{$endif NOPOINTEROFFSET}
+
 procedure TOrmTableAbstract.SetResultsSafe(Offset: PtrInt; Value: PUtf8Char);
+{$ifndef NOPOINTEROFFSET}
+var
+  n: PtrInt;
+{$endif NOPOINTEROFFSET}
 begin
   {$ifndef NOTORMTABLELEN}
   if fLen <> nil then
@@ -8067,20 +8095,17 @@ begin
   {$ifdef NOPOINTEROFFSET}
   fData[Offset] := Value;
   {$else}
-  if Value <> nil then
+  n := length(fDataSafe); // use pointers in fDataSafe[] not offsets in fData[]
+  if n = 0 then
   begin
-    dec(Value, PtrUInt(fDataStart));
-    if (PtrInt(PtrUInt(Value)) > MaxInt) or
-       (PtrInt(PtrUInt(Value)) < -MaxInt) then
-      EOrmTable.RaiseUtf8('%.Results[%] set overflow: all PUtf8Char ' +
-        'should be in a [-2GB..+2GB] 32-bit range (value=% start=%) - ' +
-        'consider forcing NOPOINTEROFFSET conditional for your project'
-        // FPCMM_MEDIUM32BIT may be incompatible with TOrmTable for data >256KB
-        // so may require NOPOINTEROFFSET conditional, so is not set by default
-        {$ifdef FPCMM_MEDIUM32BIT} + ' or disable FPCMM_MEDIUM32BIT' {$endif},
-        [self, Offset, pointer(Value), pointer(fDataStart)]);
-  end;
-  fData[Offset] := PtrInt(Value);
+    n := (fRowCount + 1) * fFieldCount; // first row = field names
+    SetLength(fDataSafe, NextGrow(n));  // initial allocation
+    FillSafe(pointer(fData), pointer(fDataSafe), fDataStart, n); // convert
+    fData := nil; // will use fDataSafe[] pointers from now on
+  end
+  else if Offset >= n then
+    SetLength(fDataSafe, NextGrow(Offset));
+  fDataSafe[Offset] := Value;
   {$endif NOPOINTEROFFSET}
 end;
 
@@ -8100,7 +8125,6 @@ var
   up: PNormTableByte;
 begin
   if (self <> nil) and
-     (fData <> nil) and
      (FieldName <> nil) and
      (fFieldCount > 0) then
     if IsRowID(FieldName) then
@@ -8274,9 +8298,15 @@ begin
     exit; // out of range
   if Row < fRowCount then
   begin
-    Row := Row * FieldCount; // convert row index into position in fData[Offset]
-    MoveFast(fData[Row + FieldCount], fData[Row],
-      (fRowCount * FieldCount - Row) * SizeOf(fData[Row]));
+    Row := Row * FieldCount; // convert row index into offset in fData(Safe)[]
+    {$ifndef NOPOINTEROFFSET}
+    if fDataSafe <> nil then
+      MoveFast(fDataSafe[Row + FieldCount], fDataSafe[Row],
+        (fRowCount * FieldCount - Row) * SizeOf(fDataSafe[Row]))
+    else
+    {$endif NOPOINTEROFFSET}
+      MoveFast(fData[Row + FieldCount], fData[Row],
+        (fRowCount * FieldCount - Row) * SizeOf(fData[Row]));
   end;
   dec(fRowCount);
   result := true;
@@ -8660,7 +8690,6 @@ end;
 function TOrmTableAbstract.GetID(Row: PtrInt): TID;
 begin
   if (self = nil) or
-     (fData = nil) or
      (fFieldIndexID < 0) or
      (PtrUInt(Row) > PtrUInt(fRowCount)) then
     result := 0
@@ -8671,7 +8700,6 @@ end;
 function TOrmTableAbstract.Get(Row, Field: PtrInt): PUtf8Char;
 begin
   if (self = nil) or
-     (fData = nil) or
      (PtrUInt(Row) > PtrUInt(fRowCount)) or
      (PtrUInt(Field) >= PtrUInt(fFieldCount)) then
     result := nil
@@ -8683,24 +8711,15 @@ function TOrmTableAbstract.GetWithLen(Row, Field: PtrInt; out Len: integer): PUt
 begin
   if (self = nil) or
      (PtrUInt(Row) > PtrUInt(fRowCount)) or
-     (PtrUInt(Field) >= PtrUInt(fFieldCount)) or
-     (fData = nil) then
+     (PtrUInt(Field) >= PtrUInt(fFieldCount)) then
   begin
     Len := 0;
     result := nil;
   end
   else
   begin
-    inc(Field, Row * fFieldCount);
-    {$ifdef NOPOINTEROFFSET} // inlined GetResults() for Delphi 7
-    result := fData[Field];
-    {$else}
-    result := PUtf8Char(PtrInt(fData[Field]));
-    Row := PtrUInt(fDataStart); // in two steps for better code generation
-    if result = nil then
-      Row := PtrInt(result); // compile as branchless cmove on FPC
-    inc(result, Row);
-    {$endif NOPOINTEROFFSET}
+    inc(Field, Row * fFieldCount); // now Field = Offset in fData(Safe)[]
+    result := GetResults(Field);
     {$ifdef NOTORMTABLELEN}
     Len := StrLen(result);
     {$else}
@@ -9488,7 +9507,7 @@ type
   // designed field, and, if the field value is identical, the ID value is
   // used (it will therefore sort by time all identical values)
   // - code generated is very optimized: stack and memory usage, CPU registers
-  // prefered, multiplication avoided to calculate memory position from index,
+  // preferred, multiplication avoided to calculate memory position from index,
   // hand tuned assembler...
   {$ifdef USERECORDWITHMETHODS}
   TUtf8QuickSort = record
@@ -9735,6 +9754,8 @@ begin
   quicksort.Len := pointer(fLen);
   {$endif NOTORMTABLELEN}
   {$ifndef NOPOINTEROFFSET}
+  if fDataSafe <> nil then
+    EOrmTable.RaiseUtf8('%.SortFields not allowed after write', [self]);
   quicksort.DataStart := fDataStart;
   {$endif NOPOINTEROFFSET}
   if fFieldIndexID < 0 then // consummed as OffsetID = OffsetField - OField2ID
@@ -9914,6 +9935,8 @@ begin
   quicksort.Len := pointer(fLen);
   {$endif NOTORMTABLELEN}
   {$ifndef NOPOINTEROFFSET}
+  if fDataSafe <> nil then
+    EOrmTable.RaiseUtf8('%.SortFields not allowed after SetResultSafe', [self]);
   quicksort.DataStart := fDataStart;
   {$endif NOPOINTEROFFSET}
   quicksort.FieldCount := FieldCount;
@@ -9966,6 +9989,10 @@ begin
      (FieldCount <= 0) then
     exit;
   // move fData[] in two passes: rows with bit set, then rows with bit unset
+  {$ifndef NOPOINTEROFFSET}
+  if fDataSafe <> nil then
+    EOrmTable.RaiseUtf8('%.SortBitsFirst after write', [self]);
+  {$endif NOPOINTEROFFSET}
   n := fRowCount * FieldCount;
   SetLength(old, n);
   d := @fData[FieldCount]; // ignore first row = header
@@ -10239,8 +10266,7 @@ end;
 function TOrmTableAbstract.FieldLengthMean(Field: PtrInt): cardinal;
 begin
   if (self = nil) or
-     (PtrUInt(Field) >= PtrUInt(fFieldCount)) or
-     (fData = nil) then
+     (PtrUInt(Field) >= PtrUInt(fFieldCount)) then
     result := 0
   else
   begin

@@ -1346,7 +1346,8 @@ end;
 procedure TTestCoreBase._TDynArray;
 var
   AI, AI2: TIntegerDynArray;
-  AU: TRawUtf8DynArray;
+  AU, AU2: TRawUtf8DynArray;
+  AV1, AV2: TVariantDynArray;
   AR: TRecs;
   AF: TFVs;
   AF2: TFV2s;
@@ -1493,6 +1494,30 @@ begin
   Check(not IsRawUtf8DynArray(TypeInfo(TIntegerDynArray)), 'IsRawUtf8DynArray2');
   Check(not IsRawUtf8DynArray(TypeInfo(TPointerDynArray)), 'IsRawUtf8DynArray3');
   Check(not IsRawUtf8DynArray(TypeInfo(TAmountDynArray)), 'IsRawUtf8DynArray4');
+  SetLength(AU, 2);
+  AU[0] := 'true';
+  AU[1] := 'false';
+  SetLength(AU2, 2);
+  AU2[0] := 'True';
+  AU2[1] := 'False';
+  Check(DynArrayEquals(TypeInfo(TRawUtf8DynArray), AU, AU2,
+    nil, nil, {CaseInsensitive=}True));
+  AU := nil; // for test below
+  SetLength(AV1, 2);
+  AV1[0] := 'true';
+  AV1[1] := 'false';
+  SetLength(AV2, 2);
+  AV2[0] := 'True';
+  AV2[1] := 'False';
+  Check(DynArrayEquals(TypeInfo(TVariantDynArray), AV1, AV2,
+    nil, nil, {CaseInsensitive=}True));
+  AV1[0] := SynUnicode('true');
+  AV1[1] := SynUnicode('false');
+  SetLength(AV2, 2);
+  AV2[0] := SynUnicode('True');
+  AV2[1] := SynUnicode('False');
+  Check(DynArrayEquals(TypeInfo(TVariantDynArray), AV1, AV2,
+    nil, nil, {CaseInsensitive=}True));
   W := TJsonWriter.CreateOwnedStream;
   // validate TBooleanDynArray
   dyn1.Init(TypeInfo(TBooleanDynArray), AB);
@@ -2494,15 +2519,17 @@ var
   m: TRttiMap;
   fo, fr: TRttiFilter;
   err, err2: string;
+  oa: TOrmPeopleObjArray;
+  pa: array of TRecordPeople;
 begin
   // FillZeroRtti()
-  CheckEqual(lic.CustomerName, '');
+  CheckEqual(lic.CustomerName, '', 'c1');
   lic.CustomerName := 'Toto';
   FillZeroRtti(TypeInfo(TLicenseData), lic);
-  CheckEqual(lic.CustomerName, '');
+  CheckEqual(lic.CustomerName, '', 'c2');
   lic.CustomerName := '1234';
   FillZeroRtti(TypeInfo(TLicenseData), lic);
-  CheckEqual(lic.CustomerName, '');
+  CheckEqual(lic.CustomerName, '', 'c3');
   // validate RecordCopy()
   FillCharFast(A, SizeOf(A), 0);
   FillCharFast(B, SizeOf(B), 0);
@@ -2520,8 +2547,8 @@ begin
   SetLength(A.Dyn, 10);
   A.Dyn[9] := 9;
   RecordCopy(B, A, TypeInfo(TR)); // mORMot 2 doesn't overload RecordCopy()
-  Check(A.One = B.One);
-  Check(A.S1 = B.S1);
+  Check(A.One = B.One, 'c4');
+  Check(A.S1 = B.S1, 'c5');
   Check(A.Three = B.Three);
   Check(A.S2 = B.S2);
   Check(A.Five = B.Five);
@@ -2563,7 +2590,7 @@ begin
   B.Three := 3;
   B.Dyn[0] := 10;
   RecordCopy(C, B, TypeInfo(TR)); // mORMot 2 doesn't overload RecordCopy()
-  CheckEqual(A.One, C.One);
+  CheckEqual(A.One, C.One, 'c6');
   Check(A.S1 = C.S1);
   CheckEqual(C.Three, 3);
   Check(A.S2 = C.S2);
@@ -2584,8 +2611,8 @@ begin
     o1.YearOfBirth := 1926;
     o1.YearOfDeath := 2010;
     CopyObject(o1, o2);
-    CheckEqual(o1.FirstName, 'toto');
-    Check(o2.FirstName = 'toto');
+    CheckEqual(o1.FirstName, 'toto', 'c7');
+    Check(o2.FirstName = 'toto', 'c8');
     CheckEqual(o1.LastName, 'titi');
     CheckEqual(o1.LastName, o2.LastName);
     CheckEqual(o1.YearOfBirth, o2.YearOfBirth);
@@ -2594,18 +2621,18 @@ begin
     p.YearOfBirth := -1;
     CheckEqual(p.YearOfBirth, -1);
     RecordZero(@p, TypeInfo(TRecordPeople));
-    CheckEqual(p.FirstName, '');
+    CheckEqual(p.FirstName, '', 'c9');
     CheckEqual(p.LastName, '');
     CheckEqual(p.YearOfBirth, 0);
     CheckEqual(p.YearOfDeath, 0);
     ObjectToRecord(o2, p, TypeInfo(TRecordPeople));
-    CheckEqual(p.FirstName, 'toto');
+    CheckEqual(p.FirstName, 'toto', 'c10');
     CheckEqual(p.LastName, 'titi');
     CheckEqual(p.YearOfBirth, o2.YearOfBirth);
     CheckEqual(p.YearOfDeath, o2.YearOfDeath);
     o2.Enum := e1;
     ClearObject(o2);
-    Check(o2.FirstName = '');
+    Check(o2.FirstName = '', 'c11');
     CheckEqual(o2.LastName, '');
     CheckEqual(o2.YearOfBirth, 0);
     CheckEqual(o2.YearOfDeath, 0);
@@ -2713,15 +2740,64 @@ begin
     finally
       fo.Free;
     end;
+    // TRttiMap.RandomA/B and Compare methods - useful e.g. for testing DTOs
+    m.Map('id', 'rowid');
+    CheckEqual(o1.IDValue, 0, 'o1id1');
+    CheckEqual(p.RowID, 0, 'pRowID1');
+    for i := 1 to 100 do
+    begin
+      o1.IDValue := 0;
+      CheckEqual(o1.IDValue, 0, 'o1id');
+      p.RowID := 0;
+      CheckEqual(p.RowID, 0, 'pRowID2');
+      m.RandomA(o1);
+      if o1.IDValue = 0 then
+        m.RandomA(o1); // 1 chance over 2^64 - but not twice = 2^128
+      CheckNotEqual(o1.IDValue, 0, 'rndo1id');
+      CheckNotEqual(m.Compare(o1, @p), 0, 'rndA');
+      CheckEqual(p.RowID, 0, 'pRowID3');
+      m.ToB(o1, @p);
+      CheckNotEqual(p.RowID, 0, 'pRowID4');
+      CheckEqual(p.RowID, o1.IDValue, 'ids1');
+      CheckEqual(m.Compare(o1, @p), 0, 'cmpA');
+      p.RowID := 0;
+      m.RandomB(@p);
+      if p.RowID = 0 then
+        m.RandomB(@p); // 1 chance over 2^64 - but not twice = 2^128
+      CheckNotEqual(p.RowID, 0, 'pRowID4');
+      CheckNotEqual(m.Compare(o1, @p), 0, 'rndB');
+      m.ToA(o1, @p);
+      CheckEqual(m.Compare(o1, @p), 0, 'cmpB');
+      CheckEqual(p.RowID, o1.IDValue, 'ids2');
+    end;
   finally
     o1.Free;
     o2.Free;
   end;
+  // TRttiMap.ToArrayA/B methods
+  Check(oa = nil);
+  Check(pa = nil);
+  m.ToArrayA(oa, pa);
+  Check(oa = nil);
+  Check(pa = nil);
+  m.ToArrayB(oa, pa);
+  Check(oa = nil);
+  Check(pa = nil);
+  SetLength(pa, 1);
+  pa[0] := p;
+  m.ToArrayA(oa, pa);
+  CheckEqual(length(oa), 1);
+  Check(oa[0] <> nil);
+  CheckEqual(oa[0].FirstName, p.FirstName);
+  CheckEqual(m.Compare(oa[0], @pa[0]), 0, 'array1');
+  ObjArrayClear(oa);
   // TRttiFilter validation with p record
   fr := TRttiFilter.Create(TypeInfo(TRecordPeople));
   try
     CheckEqual(fr.Count, 0);
     fr.Filter(nil);
+    p.FirstName := 'toto'; // reset the expected values
+    p.LastName := 'titi';
     fr.Filter(@p);
     Check(fr.Validate(@p) = '');
     fr.AddClass('firstName', [TSynFilterUpperCase, TSynValidateNonVoidText]);
@@ -4002,7 +4078,8 @@ begin
   {$endif OSDARWIN}
   {$ifdef CPUX64}
   if (cfSSE42 in CpuFeatures) and
-     (cfAesNi in CpuFeatures) then
+     (cfAesNi in CpuFeatures) and
+     (cfCLMUL in CpuFeatures) then
     Test(crc32c, 'aesni'); // use SSE4.2+pclmulqdq instructions on x64
   {$endif CPUX64}
   {$else}
@@ -5319,7 +5396,7 @@ procedure TTestCoreBase.Utf8Slow(Context: TObject);
   begin
     C := TSynAnsiConvert.Engine(CP);
     CheckEqual(C.CodePage, CP, 'cpa');
-    U := C.AnsiToUtf8(W);
+    C.AnsiToUtf8(W, U);
     A := C.Utf8ToAnsi(U);
     if W = '' then
       exit;
@@ -5350,7 +5427,7 @@ var
   str: string;
   ss: ShortString;
   up4: RawUcs4;
-  U, U2, res, Up, Up2, json, json1, json2, s1, s2, s3: RawUtf8;
+  U, U1, U2, res, Up, Up2, json, json1, json2, s1, s2, s3: RawUtf8;
   arr, arr2: TRawUtf8DynArray;
   P: PUtf8Char;
   PB: PByte;
@@ -6123,11 +6200,13 @@ begin
     CheckEqual(json2, json, 'jeu2');
     Unic := Utf8DecodeToUnicodeRawByteString(U);
     CheckEqual(Utf8ToWinAnsi(U), W);
-    CheckEqual(WinAnsiConvert.Utf8ToAnsi(WinAnsiConvert.AnsiToUtf8(W)), W);
+    WinAnsiConvert.AnsiToUtf8(W, U1);
+    CheckEqual(WinAnsiConvert.Utf8ToAnsi(U), W);
     CheckEqual(WinAnsiConvert.UnicodeStringToAnsi(WinAnsiConvert.AnsiToUnicodeString(W)), W);
     if CurrentAnsiConvert.InheritsFrom(TSynAnsiFixedWidth) then
     begin
-      CheckEqual(CurrentAnsiConvert.Utf8ToAnsi(CurrentAnsiConvert.AnsiToUtf8(W)), W);
+      CurrentAnsiConvert.AnsiToUtf8(W, U1);
+      CheckEqual(CurrentAnsiConvert.Utf8ToAnsi(U1), W);
       CheckEqual(CurrentAnsiConvert.UnicodeStringToAnsi(CurrentAnsiConvert.AnsiToUnicodeString(W)), W);
     end;
     res := RawUnicodeToUtf8(pointer(Unic), length(Unic) shr 1);
@@ -6227,6 +6306,9 @@ begin
     check(PosChar(pointer(U2), #0) = nil);
     check(PosChar(pointer(U2), #1) = nil);
     check(PosChar(pointer(U2), #10) = @U2[length(U2)]);
+    check(PosCharU(U2, #0) = nil);
+    check(PosCharU(U2, #1) = nil);
+    check(PosCharU(U2, #10) = @U2[length(U2)]);
     if U = '' then
       continue;
     U2 := QuotedStr(U, '"');
@@ -6315,7 +6397,7 @@ begin
   rb1 := '';
   rb1 := eng.Utf8ToAnsi(U);
   CheckEqual(length(rb1), 7);
-  U2 := eng.AnsiToUtf8(rb1);
+  eng.AnsiToUtf8(rb1, U2);
   CheckEqual(U, U2);
   eng := TSynAnsiConvert.Engine(54936);
   Check(eng <> nil, 'Engine(54936)');
@@ -6328,7 +6410,7 @@ begin
     rb1 := '';
     rb1 := eng.Utf8ToAnsi(U);
     CheckEqual(length(rb1), 7, 'cp54936c');
-    U2 := eng.AnsiToUtf8(rb1);
+    eng.AnsiToUtf8(rb1, U2);
     CheckEqual(U, U2, 'cp54936d');
     {$ifdef HASCODEPAGE}
     rb2 := U;
@@ -6348,7 +6430,7 @@ begin
     Check((RB1 <> '') and (PCardinal(RB1)^ = $37EE3598), 'Utf8ToAnsi');
     RB2 := eng.UnicodeStringToAnsi(SU);
     Check(SortDynArrayRawByteString(rb1, rb2) = 0, 'UnicodeStringToAnsi');
-    U2 := eng.AnsiToUtf8(RB1);
+    eng.AnsiToUtf8(RB1, U2);
     CheckEqual(U2, U, 'AnsiToUtf8');
   end;
   CheckEqual(CodePageToText(CP_UTF8), 'utf8');
@@ -6710,11 +6792,11 @@ procedure TTestCoreBase.Charsets;
     eng := TSynAnsiConvert.Engine(cp); // validate "last" cache
     Check(eng <> nil, 'eng3');
     CheckEqual(eng.CodePage, cp, 'eng4');
-    u2 := eng.AnsiToUtf8(a);
+    eng.AnsiToUtf8(a, u2);
     Check(u2 = ru, msg);
     a2 := eng.UnicodeStringToAnsi(su);
     CheckEqual(a2, a, name);
-    u := eng.AnsiToUtf8(ra);
+    eng.AnsiToUtf8(ra, u);
     CheckEqual(u, ru, name);
   end;
 
@@ -7236,13 +7318,19 @@ procedure TTestCoreBase.Iso8601DateAndTime;
       Check(true);
     J.From(E);
     Check(Int64(I) = Int64(J));
-    s := TimeToIso8601(D, Expanded);
+    s := TimeToIso8601(D, Expanded); // e.g. 'T23:36:34'
     Check(PosEx('.', s) = 0);
     Check(abs(frac(D) - Iso8601ToDateTime(s)) < 1 / SecsPerDay);
-    s := TimeToIso8601(D, Expanded, 'T', true);
+    s := TimeToIso8601(D, Expanded, 'T', true); // 'T23:36:34.715'
     Check(PosEx('.', s) > 0);
     F := Iso8601ToDateTime(s);
     Check(abs(frac(D) - F) < 1 / MSecsPerDay, 'withms1');
+    if expanded then
+    begin
+      delete(s, 1, 1); // '23:36:34.715'
+      F := Iso8601ToDateTime(s);
+      Check(abs(frac(D) - F) < 1 / MSecsPerDay, 'withmsNoT');
+    end;
     s := DateToIso8601(D, Expanded);
     Check(trunc(D) = trunc(Iso8601ToDateTime(s)));
     Check(Abs(D - I.ToDateTime) < (1 / SecsPerDay));
@@ -7430,6 +7518,7 @@ var
   buf: RawByteString;
   dt: TDateTime;
   local: TDateTime;
+  s31: TShort31;
 
   procedure testBias(year, expected: integer);
   begin
@@ -7491,8 +7580,8 @@ begin
   dt := HttpDateToDateTime('Sun, 06 Nov 1994 08:49:37 GMT');
   CheckEqual(DateTimeToIso8601Text(dt), '1994-11-06T08:49:37');
   CheckEqual(DateTimeToHttpDate(dt), 'Sun, 06 Nov 1994 08:49:37 GMT');
-  Check(UnixMSTimeUtcToHttpDate(DateTimeToUnixMSTime(dt)) =
-    'Sun, 06 Nov 1994 08:49:37 GMT');
+  UnixMSTimeUtcToHttpDate(DateTimeToUnixMSTime(dt), s31);
+  Check(s31 = 'Sun, 06 Nov 1994 08:49:37 GMT', 'UnixMSTimeUtcToHttpDate');
   CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
     'Sunday, 06-DEC-94 08:49:37 UTC')), '1994-12-06T08:49:37');
   CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
@@ -8953,7 +9042,7 @@ begin
   Check(not IsHttpUserAgentBot(
     'Mozilla/5.0 (Windows NT 10.0; Trident/7.0; rv:11.0) like Gecko'));
   Check(not IsHttpUserAgentBot(DefaultUserAgent(self)),
-    'Mozilla/5.0 (Linux x64; mORMot) TCB/2 mormot2tests');
+    'Mozilla/5.0 (Linux x64; mORMot) TCB/3 mormot2tests');
   Check(IsHttpUserAgentBot(
     'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ' +
     'Amazonbot/0.1; +https://developer.amazon.com/support/amazonbot) ' +
