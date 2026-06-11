@@ -25,12 +25,13 @@ uses
   mormot.core.os,
   mormot.core.unicode,
   mormot.core.text,
-  mormot.core.search, // for TSynMustache.Match helper
+  mormot.core.search, // for TSynMustache.Match/Glob helpers
   mormot.core.buffers,
   mormot.core.datetime,
+  mormot.core.data,
   mormot.core.rtti,
   mormot.core.json,
-  mormot.core.data,
+  mormot.core.fmt,
   mormot.core.variants;
 
 
@@ -390,10 +391,16 @@ type
     class procedure SimpleToHtml(const Value: variant; out Result: variant);
     class procedure Match(const Value: variant; out Result: variant);
     class procedure MatchI(const Value: variant; out Result: variant);
+    class procedure Glob(const Value: variant; out Result: variant);
+    class procedure GlobI(const Value: variant; out Result: variant);
     class procedure Lower(const Value: variant; out Result: variant);
     class procedure Upper(const Value: variant; out Result: variant);
     class procedure CamelCase(const Value: variant; out Result: variant);
+    class procedure UnCamelCase(const Value: variant; out Result: variant);
     class procedure SnakeCase(const Value: variant; out Result: variant);
+    class procedure KebabCase(const Value: variant; out Result: variant);
+    class procedure DotCase(const Value: variant; out Result: variant);
+    class procedure TitleCase(const Value: variant; out Result: variant);
     class procedure EnumTrim(const Value: variant; out Result: variant);
     class procedure EnumTrimRight(const Value: variant; out Result: variant);
     class procedure PowerOfTwo(const Value: variant; out Result: variant);
@@ -424,6 +431,9 @@ type
     // - returns FALSE if the template is not correct
     class function TryRenderJson(const aTemplate, aJson: RawUtf8;
       out aContent: RawUtf8): boolean;
+    /// define a helper to GlobalInfoFind() e.g. {{info os:name}}
+    // - not defined with standard helpers for safety
+    class procedure Info(const Value: variant; out Result: variant);
   public
     /// initialize and parse a pre-rendered {{mustache}} template
     // - you should better use the Parse() class function instead, which
@@ -472,8 +482,8 @@ type
     // (expecting two parameters), NewGuid, ExtractFileName, HumanBytes (calling
     // KB function), Sub (as {{Sub AString,12,3}}), MarkdownToHtml, SimpleToHtml
     // (Markdown with no HTML pass-through), WikiToHtml (calling
-    // TJsonWriter.AddHtmlEscapeWiki), Match / MatchI (as {{Match AString,startwith*}}),
-    // and Values / Keys (over a data object)
+    // TJsonWriter.AddHtmlEscapeWiki), Match / MatchI / Glob / GlobI (as {{Match
+    // AString,startwith*}}), and Values / Keys (over a data object)
     // - an additional #if helper is also registered, which would allow runtime
     // view logic, via = < > <= >= <> operators over two values:
     // $ {{#if .,"=",123}}  {{#if Total,">",1000}}  {{#if info,"<>",""}}
@@ -884,6 +894,9 @@ begin
     end;
 end;
 
+const
+  _IND32 = (ord('-') and $df) + ord('I') shl 8 + ord('N') shl 16 + ord('D') shl 24;
+
 function TSynMustacheContextVariant.GetVarDataFromContext(ValueSpace: integer;
   const ValueName: RawUtf8; var Value: TVarData): TSynMustacheSectionType;
 var
@@ -912,8 +925,7 @@ begin
           if Value.VType >= varNull then
             exit;
         end
-        else if PCardinal(ValueName)^ and $dfdfdfdf = (ord('-') and $df) +
-               ord('I') shl 8 + ord('N') shl 16 + ord('D') shl 24 then
+        else if PCardinal(ValueName)^ and $dfdfdfdf = _IND32 then
         begin
           // {{-index}}
           Value.VType := varInteger;
@@ -1109,8 +1121,7 @@ begin
       if (d <> nil) and
          (ListCount >= 0) then
         // within a list
-        if PCardinal(ValueName)^ and $dfdfdfdf = (ord('-') and $df) +
-             ord('I') shl 8 + ord('N') shl 16 + ord('D') shl 24 then
+        if PCardinal(ValueName)^ and $dfdfdfdf = _IND32 then
         begin
           // {{-index}} pseudo name
           Temp.VInteger := ListCurrent;
@@ -1776,7 +1787,7 @@ function TSynMustache.NewMustacheContextVariant(
   aBufSize: integer): TSynMustacheContextVariant;
 begin
   result := TSynMustacheContextVariant.Create(self,
-    TJsonWriter.CreateOwnedStream(aBufSize, {nosharedstream=}true),
+    TJsonWriter.CreateOwnedStream(aBufSize),
     SectionMaxCount + 4, Null, {ownwriter=}true);
   result.CancelAll; // to be reused from a void context
 end;
@@ -1785,7 +1796,7 @@ function TSynMustache.NewMustacheContextData(
   aBufSize: integer): TSynMustacheContextData;
 begin
   result := TSynMustacheContextData.Create(self,
-    TJsonWriter.CreateOwnedStream(aBufSize, {nosharedstream=}true),
+    TJsonWriter.CreateOwnedStream(aBufSize),
     SectionMaxCount + 4, nil, nil, {ownwriter=}true);
   result.CancelAll; // to be reused from a void context
 end;
@@ -2069,9 +2080,9 @@ begin
     result := 0;
     n := PDALen(PAnsiChar(h) - _DALEN)^ + _DAOFF;
     repeat
-      P := pointer(h^.Name);
-      if (PStrLen(P - _STRLEN)^ = aNameLen) and
-         IdemPropNameUSameLenNotNull(P, aName, aNameLen) then
+      p := pointer(h^.Name);
+      if (PStrLen(p - _STRLEN)^ = aNameLen) and
+         IdemPropNameUSameLenNotNull(p, aName, aNameLen) then
         exit;
       inc(h);
       inc(result);
@@ -2112,10 +2123,15 @@ begin
       'Keys',
       'Match',
       'MatchI',
+      'Glob',
+      'GlobI',
       'Lower',
       'Upper',
       'CamelCase',
-      'SnakeCase'],
+      'UnCamelCase',
+      'SnakeCase',
+      'KebabCase',
+      'DotCase'],
      [DateTimeToText,
       DateToText,
       DateFmt,
@@ -2140,10 +2156,15 @@ begin
       Keys,
       Match,
       MatchI,
+      Glob,
+      GlobI,
       Lower,
       Upper,
       CamelCase,
-      SnakeCase]);
+      UnCamelCase,
+      SnakeCase,
+      KebabCase,
+      DotCase]);
   result := HelpersStandardList;
 end;
 
@@ -2156,67 +2177,58 @@ begin
   HelperAdd(result, aNames, aEvents);
 end;
 
-class procedure TSynMustache.DateTimeToText(
-  const Value: variant; out Result: variant);
+class procedure TSynMustache.DateTimeToText(const Value: variant; out Result: variant);
 var
   Time: TTimeLogBits;
   dt: TDateTime;
 begin
-  if VariantToDateTime(Value, dt) then
-  begin
-    Time.From(dt, false);
-    Result := Time.i18nText;
-  end
-  else
-    SetVariantNull(Result{%H-});
+  PCardinal(@Result)^ := varNull;
+  if not VariantToDateTime(Value, dt) then
+    exit;
+  Time.From(dt, false);
+  Result := Time.i18nText;
 end;
 
-class procedure TSynMustache.DateToText(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.DateToText(const Value: variant; out Result: variant);
 var
   Time: TTimeLogBits;
   dt: TDateTime;
 begin
-  if VariantToDateTime(Value, dt) then
-  begin
-    Time.From(dt, true);
-    Result := Time.i18nText;
-  end
-  else
-    SetVariantNull(Result{%H-});
+  PCardinal(@Result)^ := varNull;
+  if not VariantToDateTime(Value, dt) then
+    exit;
+  Time.From(dt, true);
+  Result := Time.i18nText;
 end;
 
-class procedure TSynMustache.DateFmt(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.DateFmt(const Value: variant; out Result: variant);
 var
   dt: TDateTime;
   dv: PDocVariantData;
 begin
   // {{DateFmt DateValue,"dd/mm/yyy"}}
+  PCardinal(@Result)^ := varNull;
   if _SafeArray(Value, 2, dv) and
        VariantToDateTime(dv^.Values[0], dt) then
-      Result := FormatDateTime(dv^.Values[1], dt)
-    else
-      SetVariantNull(Result{%H-});
+      Result := FormatDateTime(dv^.Values[1], dt);
 end;
 
-class procedure TSynMustache.TimeLogToText(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.TimeLogToText(const Value: variant; out Result: variant);
 var
   Time: TTimeLogBits;
 begin
-  if VariantToInt64(Value, Time.Value) then
-    Result := Time.i18nText
-  else
-    SetVariantNull(Result{%H-});
+  PCardinal(@Result)^ := varNull;
+  if not VarIsEmptyOrNull(Value) and
+     VariantToInt64(Value, Time.Value) then
+    Result := Time.i18nText;
 end;
 
-class procedure TSynMustache.ToJson(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.ToJson(const Value: variant; out Result: variant);
 var
   u, r: RawUtf8;
   wasstring: boolean;
 begin
+  PCardinal(@Result)^ := varNull;
   if VarIsEmptyOrNull(Value) then
     exit;
   VariantToUtf8(Value, u, wasstring);
@@ -2224,14 +2236,13 @@ begin
     QuotedStrJson(u, r)
   else if (u <> '') and
           (GotoNextNotSpace(pointer(u))^ in ['[', '{']) then
-    r := JsonReformat(u) // e.g. from TDocVariantData
+    r := JsonReformat(u, jsonHumanReadable) // e.g. from TDocVariantData
   else
     r := u; // false, true, number
   RawUtf8ToVariant(r, Result);
 end;
 
-class procedure TSynMustache.JsonQuote(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.JsonQuote(const Value: variant; out Result: variant);
 var
   json: RawUtf8;
 begin
@@ -2239,8 +2250,7 @@ begin
     RawUtf8ToVariant(QuotedStrJson(json), Result);
 end;
 
-class procedure TSynMustache.JsonQuoteUri(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.JsonQuoteUri(const Value: variant; out Result: variant);
 var
   json: RawUtf8;
 begin
@@ -2277,253 +2287,261 @@ begin
   RawUtf8ToVariant(txt, Result);
 end;
 
-class procedure TSynMustache.WikiToHtml(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.WikiToHtml(const Value: variant; out Result: variant);
 begin
   ToHtml(Value, Result, [heHtmlEscape, heEmojiToUtf8], {wiki=}true);
 end;
 
-class procedure TSynMustache.MarkdownToHtml(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.MarkdownToHtml(const Value: variant; out Result: variant);
 begin
   // default Markdown is to allow HTML tags
   ToHtml(Value, Result, [heEmojiToUtf8]);
 end;
 
-class procedure TSynMustache.SimpleToHtml(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.SimpleToHtml(const Value: variant; out Result: variant);
 begin
   ToHtml(Value, Result, [heHtmlEscape, heEmojiToUtf8]);
 end;
 
-class procedure TSynMustache.BlobToBase64(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.BlobToBase64(const Value: variant; out Result: variant);
 var
-  tmp: RawUtf8;
+  u: RawUtf8;
   wasString: boolean;
 begin
-  VariantToUtf8(Value, tmp, wasString);
+  VariantToUtf8(Value, u, wasString);
   if wasString and
-     (pointer(tmp) <> nil) then
+     (pointer(u) <> nil) then
   begin
-    if PInteger(tmp)^ and $00ffffff = JSON_BASE64_MAGIC_C then
-      delete(tmp, 1, 3);
-    RawUtf8ToVariant(tmp, Result);
+    if PInteger(u)^ and $00ffffff = JSON_BASE64_MAGIC_C then
+      delete(u, 1, 3);
+    RawUtf8ToVariant(u, Result);
   end
   else
     Result := Value;
 end;
 
-class procedure TSynMustache.EnumTrim(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.EnumTrim(const Value: variant; out Result: variant);
 var
-  tmp: RawUtf8;
+  u: RawUtf8;
   wasString: boolean;
   short: PUtf8Char;
 begin
-  VariantToUtf8(Value, tmp, wasString);
+  VariantToUtf8(Value, u, wasString);
   if not wasString then
     exit;
-  short := TrimLeftLowerCase(tmp);
+  short := TrimLeftLowerCase(u);
   RawUtf8ToVariant(short, StrLen(short), Result);
 end;
 
-class procedure TSynMustache.EnumTrimRight(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.EnumTrimRight(const Value: variant; out Result: variant);
 var
-  tmp: RawUtf8;
+  u: RawUtf8;
   wasString: boolean;
   i, L: PtrInt;
 begin
-  VariantToUtf8(Value, tmp, wasString);
+  VariantToUtf8(Value, u, wasString);
   if not wasString then
     exit;
-  L := length(tmp);
+  L := length(u);
   for i := 1 to L do
-    if not (tmp[i] in ['a'..'z']) then
+    if not (u[i] in ['a'..'z']) then
     begin
       L := i - 1;
       break;
     end;
-  RawUtf8ToVariant(pointer(tmp), L, Result);
+  RawUtf8ToVariant(pointer(u), L, Result);
 end;
 
-class procedure TSynMustache.PowerOfTwo(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.PowerOfTwo(const Value: variant; out Result: variant);
 var
   V: Int64;
 begin
-  if TVarData(Value).VType > varNull then
-    if VariantToInt64(Value, V) then
-      Result := Int64(1) shl V;
+  PCardinal(@Result)^ := varNull;
+  if not VarIsEmptyOrNull(Value) and
+     VariantToInt64(Value, V) then
+    Result := Int64(1) shl V;
 end;
 
-class procedure TSynMustache.Equals_(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.Equals_(const Value: variant; out Result: variant);
 var
   dv: PDocVariantData;
 begin
   // {{#Equals .,12}}
+  PCardinal(@Result)^ := varNull;
   if _SafeArray(Value, 2, dv) and
      (FastVarDataComp(@dv^.Values[0], @dv^.Values[1], false) = 0) then
-    Result := VarTrue
-  else
-    SetVariantNull(Result{%H-});
+    TVarData(Result) := TrueVarData;
 end;
 
 class procedure TSynMustache.If_(const Value: variant; out Result: variant);
 var
-  cmp: integer;
-  oper: RawUtf8;
+  oper: TTempUtf8;
+  co: TCompareOperator;
   dv: PDocVariantData;
-  wasString: boolean;
 begin
   // {{#if .<>""}} or {{#if .,"=",123}}
-  SetVariantNull(result{%H-});
+  PCardinal(@Result)^ := varNull;
   if not _SafeArray(Value, 3, dv) then
     exit;
-  VariantToUtf8(dv^.Values[1], oper, wasString);
-  if (oper = '') or
-     not wasString then
-    exit;
-  cmp := FastVarDataComp(@dv^.Values[0], @dv^.Values[2], false);
-  case cardinal(PWord(oper)^) of
-    ord('='):
-      if cmp = 0 then
-        result := VarTrue;
-    ord('>'):
-      if cmp > 0 then
-        result := VarTrue;
-    ord('<'):
-      if cmp < 0 then
-        result := VarTrue;
-    ord('>') + ord('=') shl 8:
-      if cmp >= 0 then
-        result := VarTrue;
-    ord('<') + ord('=') shl 8:
-      if cmp <= 0 then
-        result := VarTrue;
-    ord('<') + ord('>') shl 8:
-      if cmp <> 0 then
-        result := VarTrue;
-  end;
+  VariantToTempUtf8(dv^.Values[1], oper, [vfNoAlloc]);
+  if (ParseOperator(oper.Text, oper.Len, co) or
+      (ParseOperatorText(oper.Text, co) <> nil)) and // [not] same/contains/glob
+     EvaluateVariantExpression(VariantCompare, dv^.Values[0], dv^.Values[2], co) then
+    TVarData(Result) := TrueVarData;
 end;
 
-class procedure TSynMustache.NewGuid(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.NewGuid(const Value: variant; out Result: variant);
 begin
   RawUtf8ToVariant(GuidToRawUtf8(RandomGuid), Result);
 end;
 
-class procedure TSynMustache.ExtractFileName(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.ExtractFileName(const Value: variant; out Result: variant);
 begin
   Result := SysUtils.ExtractFileName(Value);
 end;
 
-class procedure TSynMustache.HumanBytes(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.HumanBytes(const Value: variant; out Result: variant);
 var
   u: RawUtf8;
   i64: Int64;
 begin
-  if not VarIsEmptyOrNull(Value) then
-    if VariantToInt64(Value, i64) or
-       (VariantToUtf8(Value, u) and
-        ToInt64(u, i64)) then
-      KBU(i64, u);
+  PCardinal(@Result)^ := varNull;
+  if not AnyVariantToInteger(Value, i64) then
+    exit; // Value=null or can't be converted/truncated to an integer
+  KBU(i64, u);
   RawUtf8ToVariant(u, Result);
 end;
 
-class procedure TSynMustache.Sub(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.Sub(const Value: variant; out Result: variant);
 var
-  utf: RawUtf8;
+  u: RawUtf8;
   dv: PDocVariantData;
   i, n: integer;
 begin
   // {{Sub AString,12,3}}
-  SetVariantNull(Result{%H-});
+  PCardinal(@Result)^ := varNull;
   if _SafeArray(Value, 3, dv) and
-      VariantToText(dv^.Values[0], utf) and
+      VariantToText(dv^.Values[0], u) and
       VariantToInteger(dv^.Values[1], i) and
       VariantToInteger(dv^.Values[2], n) then
-    RawUtf8ToVariant(copy(utf, i, n), Result);
+    RawUtf8ToVariant(copy(u, i, n), Result);
 end;
 
-class procedure TSynMustache.Values(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.Values(const Value: variant; out Result: variant);
 begin
   TDocVariantData(Result).InitArrayFromObjectValues(Value, JSON_FAST);
 end;
 
-class procedure TSynMustache.Keys(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.Keys(const Value: variant; out Result: variant);
 begin
   TDocVariantData(Result).InitArrayFromObjectNames(Value, JSON_FAST);
 end;
 
-procedure DoMatch(dv: PDocVariantData; ci: boolean; var res: variant);
+procedure DoMatchGlob(const Value: variant; ci, match: boolean; var res: variant);
 var
-  s, p: RawUtf8;
+  dv: PDocVariantData;
+  m: TMatch;
+  str, pat: TTempUtf8;
 begin
-  // {{Match AString,APattern}}
-  if VariantToText(dv^.Values[0], s) and
-     VariantToText(dv^.Values[1], p) and
-     IsMatch(p, s, ci) then
-    res := VarTrue;
+  // {{Match AString,APattern}} or {{Glob AString,APattern}}
+  PCardinal(@res)^ := varNull;
+  if not _SafeArray(Value, 2, dv) then
+    exit;
+  VariantToTempUtf8(dv^.Values[0], str, [vfNullAsVoid]);
+  VariantToTempUtf8(dv^.Values[1], pat, [vfNoComplex, vfNullAsVoid]);
+  if match then
+  begin
+    m.Prepare(pat.Text, pat.Len, ci, {reuse=}false);
+    if m.Match(str.Text, str.Len) then
+      TVarData(res) := TrueVarData;
+  end
+  else if GlobBuffer(pat.Text, str.Text, pat.Len, str.Len, ci) then
+    TVarData(res) := TrueVarData;
+  TempUtf8Done(str);
+  TempUtf8Done(pat);
 end;
 
 class procedure TSynMustache.Match(const Value: variant; out Result: variant);
-var
-  dv: PDocVariantData;
 begin
-  if _SafeArray(Value, 2, dv) then
-     DoMatch(dv, {caseinsens=}false, Result);
+  DoMatchGlob(Value, {caseinsens=}false, {match=}true, Result);
 end;
 
 class procedure TSynMustache.MatchI(const Value: variant; out Result: variant);
-var
-  dv: PDocVariantData;
 begin
-  if _SafeArray(Value, 2, dv) then
-     DoMatch(dv, {caseinsens=}true, Result);
+  DoMatchGlob(Value, {caseinsens=}true, {match=}true, Result);
 end;
 
-class procedure TSynMustache.Lower(const Value: variant;
-  out Result: variant);
+class procedure TSynMustache.Glob(const Value: variant; out Result: variant);
+begin
+  DoMatchGlob(Value, {caseinsens=}false, {match=}false, Result);
+end;
+
+class procedure TSynMustache.GlobI(const Value: variant; out Result: variant);
+begin
+  DoMatchGlob(Value, {caseinsens=}true, {match=}false, Result);
+end;
+
+class procedure TSynMustache.Info(const Value: variant; out Result: variant);
+var
+  u: RawUtf8;
+  v: PUtf8Char;
+  l: PtrInt;
+begin
+  PCardinal(@Result)^ := varNull;
+  if not VariantToText(Value, u) then
+    exit;
+  v := GlobalInfoFind(pointer(u), length(u), l);
+  if v <> nil then
+    RawUtf8ToVariant(v, l, Result);
+end;
+
+procedure DoCase(const Value: variant; out Result: variant; Kind: TSetCase);
 var
   u: RawUtf8;
 begin
+  PCardinal(@Result)^ := varNull;
   if VariantToText(Value, u) then
-    RawUtf8ToVariant(LowerCaseUnicode(u), Result);
+    RawUtf8ToVariant(SetCase(u, Kind), Result);
 end;
 
-class procedure TSynMustache.Upper(const Value: variant;
-  out Result: variant);
-var
-  u: RawUtf8;
+class procedure TSynMustache.Lower(const Value: variant; out Result: variant);
 begin
-  if VariantToText(Value, u) then
-    RawUtf8ToVariant(UpperCaseUnicode(u), Result);
+  DoCase(Value, Result, scLowerCase);
 end;
 
-class procedure TSynMustache.CamelCase(const Value: variant;
-  out Result: variant);
-var
-  u: RawUtf8;
+class procedure TSynMustache.Upper(const Value: variant; out Result: variant);
 begin
-  if VariantToText(Value, u) then
-    RawUtf8ToVariant(LowerCamelCase(u), Result);
+  DoCase(Value, Result, scUpperCase);
 end;
 
-class procedure TSynMustache.SnakeCase(const Value: variant;
-  out Result: variant);
-var
-  u: RawUtf8;
+class procedure TSynMustache.CamelCase(const Value: variant; out Result: variant);
 begin
-  if VariantToText(Value, u) then
-    RawUtf8ToVariant(mormot.core.unicode.SnakeCase(u), Result);
+  DoCase(Value, Result, scCamelCase);
+end;
+
+class procedure TSynMustache.UnCamelCase(const Value: variant; out Result: variant);
+begin
+  DoCase(Value, Result, scUnCamelCase);
+end;
+
+class procedure TSynMustache.SnakeCase(const Value: variant; out Result: variant);
+begin
+  DoCase(Value, Result, scSnakeCase);
+end;
+
+class procedure TSynMustache.KebabCase(const Value: variant; out Result: variant);
+begin
+  DoCase(Value, Result, scKebabCase);
+end;
+
+class procedure TSynMustache.DotCase(const Value: variant; out Result: variant);
+begin
+  DoCase(Value, Result, scDotCase);
+end;
+
+class procedure TSynMustache.TitleCase(const Value: variant; out Result: variant);
+begin
+  DoCase(Value, Result, scTitleCase);
 end;
 
 

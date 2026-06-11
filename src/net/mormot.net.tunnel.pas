@@ -123,7 +123,6 @@ type
     /// accept/connect the connection, then crypt/redirect to fTransmit
     procedure DoExecute; override;
   public
-    // how much data has been processed by this background thread
     /// initialize the thread - called from Open()
     constructor Create(owner: TTunnelLocal; const transmit: ITunnelTransmit;
       const key, iv: THash128; sock: TNetSocket; acceptSecs: cardinal); reintroduce;
@@ -136,6 +135,7 @@ type
     function Processing: boolean;
       {$ifdef HASINLINE} inline; {$endif}
   published
+    /// how much time this background thread should wait for accept()
     property TimeoutAcceptSecs: cardinal
       read fTimeoutAcceptSecs;
   end;
@@ -1168,7 +1168,7 @@ function TTunnelLocal.LocalPort: RawUtf8;
 begin
   if (self = nil) or
      (fPort = 0) then
-    result := ''
+    FastAssignNew(result)
   else
     UInt32ToUtf8(fPort, result);
 end;
@@ -1723,7 +1723,7 @@ begin
           DeleteTransient(i);
           inc(gc);
         end;
-      FormatShort16('gc=%, ', [gc], gctxt);
+      FormatShort('gc=%, ', [gc], gctxt);
     finally
       fSafe.WriteUnLock;
     end;

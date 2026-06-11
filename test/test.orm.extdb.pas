@@ -17,6 +17,7 @@ uses
   mormot.core.datetime,
   mormot.core.rtti,
   mormot.crypt.core,
+  mormot.crypt.secure,
   mormot.core.data,
   mormot.core.variants,
   mormot.core.json,
@@ -180,15 +181,11 @@ type
 { TTestExternalDatabase }
 
 procedure TTestExternalDatabase.ExternalRecords;
-var
-  sql: RawUtf8;
 begin
   if CheckFailed(fExternalModel = nil) then
     exit; // should be called once
   fExternalModel := TOrmModel.Create([TOrmPeopleExt, TOrmOnlyBlob, TOrmTestJoin,
     TOrmASource, TOrmADest, TOrmADests, TOrmPeople, TOrmMyHistory]);
-  ReplaceParamsByNames(RawUtf8OfChar('?', 200), sql);
-  CheckHash(sql, $AD27D1E0, 'excludes :IF :OF');
 end;
 
 procedure TTestExternalDatabase.AutoAdaptSQL;
@@ -224,6 +221,46 @@ var
   end;
 
 begin
+  CheckEqual(ReplaceParamsByNames('', s), 0);
+  CheckEqual(s, '');
+  CheckEqual(ReplaceParamsByNames('toto titi', s), 0);
+  CheckEqual(s, 'toto titi');
+  CheckEqual(ReplaceParamsByNames('toto titi  ', s), 0);
+  CheckEqual(s, 'toto titi');
+  CheckEqual(ReplaceParamsByNames('insert (titi);', s), 0);
+  CheckEqual(s, 'insert (titi)');
+  CheckEqual(ReplaceParamsByNames('insert (titi); ', s), 0);
+  CheckEqual(s, 'insert (titi)');
+  CheckEqual(ReplaceParamsByNames('insert (titi);', s, false), 0);
+  CheckEqual(s, 'insert (titi);');
+  CheckEqual(ReplaceParamsByNames('insert (titi); ', s, false), 0);
+  CheckEqual(s, 'insert (titi); ');
+  CheckEqual(ReplaceParamsByNames('begin titi end;', s), 0);
+  CheckEqual(s, 'begin titi end;');
+  CheckEqual(ReplaceParamsByNames('begin titi end; ', s), 0);
+  CheckEqual(s, 'begin titi end;');
+  CheckEqual(ReplaceParamsByNames('begin titi end;', s, false), 0);
+  CheckEqual(s, 'begin titi end;');
+  CheckEqual(ReplaceParamsByNames('begin titi end; ', s, false), 0);
+  CheckEqual(s, 'begin titi end; ');
+  CheckEqual(ReplaceParamsByNames('toto=? titi', s), 1);
+  CheckEqual(s, 'toto=:AA titi');
+  CheckEqual(ReplaceParamsByNames('toto=? titi=?', s), 2);
+  CheckEqual(s, 'toto=:AA titi=:AB');
+  CheckEqual(ReplaceParamsByNames('toto=? titi=? and a=''''', s), 2);
+  CheckEqual(s, 'toto=:AA titi=:AB and a=''''');
+  CheckEqual(ReplaceParamsByNames('toto=? titi=? and a=''', s), 0, 'unfinished');
+  CheckEqual(s, 'toto=? titi=? and a=''');
+  CheckEqual(ReplaceParamsByNames('toto=? titi=? and a=''d?d''', s), 2);
+  CheckEqual(s, 'toto=:AA titi=:AB and a=''d?d''');
+  CheckEqual(ReplaceParamsByNames('toto=? titi=? and a=''d''''d''?', s), 3);
+  CheckEqual(s, 'toto=:AA titi=:AB and a=''d''''d'':AC');
+  CheckEqual(ReplaceParamsByNames('toto=? titi=? and a=''d?d''', s), 2);
+  CheckEqual(s, 'toto=:AA titi=:AB and a=''d?d''');
+  CheckEqual(ReplaceParamsByNames('1?2?3?4?5?6?7?8?9?10?11?12? x', s), 12);
+  CheckEqual(s, '1:AA2:AB3:AC4:AD5:AE6:AF7:AG8:AH9:AI10:AJ11:AK12:AL x');
+  CheckEqual(ReplaceParamsByNames('(1,2,3,4,5,6,7,8) values (?,?,?,?,?,?,?,?)', s), 8);
+  CheckEqual(s, '(1,2,3,4,5,6,7,8) values (:AA,:AB,:AC,:AD,:AE,:AF,:AG,:AH)');
   CheckEqual(ReplaceParamsByNumbers('', s), 0);
   CheckEqual(s, '');
   CheckEqual(ReplaceParamsByNumbers('toto titi', s), 0);
@@ -232,16 +269,56 @@ begin
   CheckEqual(s, 'toto=$1 titi');
   CheckEqual(ReplaceParamsByNumbers('toto=? titi=?', s), 2);
   CheckEqual(s, 'toto=$1 titi=$2');
+  CheckEqual(ReplaceParamsByNumbers('toto=?;titi=?', s), 0);
+  CheckEqual(s, 'toto=?;titi=?');
   CheckEqual(ReplaceParamsByNumbers('toto=? titi=? and a=''''', s), 2);
   CheckEqual(s, 'toto=$1 titi=$2 and a=''''');
   CheckEqual(ReplaceParamsByNumbers('toto=? titi=? and a=''dd''', s), 2);
   CheckEqual(s, 'toto=$1 titi=$2 and a=''dd''');
-  CheckEqual(ReplaceParamsByNumbers('toto=? titi=? and a=''d''''d''', s), 2);
-  CheckEqual(s, 'toto=$1 titi=$2 and a=''d''''d''');
+  CheckEqual(ReplaceParamsByNumbers('toto=? titi=? and a=''dd''eee', s), 2);
+  CheckEqual(s, 'toto=$1 titi=$2 and a=''dd''eee');
+  CheckEqual(ReplaceParamsByNumbers('toto=? titi=? and a=''dd''e''e''', s), 2);
+  CheckEqual(s, 'toto=$1 titi=$2 and a=''dd''e''e''');
+  CheckEqual(ReplaceParamsByNumbers('toto=? titi=? and a=''d''d'' end', s), 0);
+  CheckEqual(s, 'toto=? titi=? and a=''d''d'' end');
+  CheckEqual(ReplaceParamsByNumbers('toto=? titi=? and a=''d''''d'' end', s), 2);
+  CheckEqual(s, 'toto=$1 titi=$2 and a=''d''''d'' end');
   CheckEqual(ReplaceParamsByNumbers('toto=? titi=? and a=''d?d''', s), 2);
   CheckEqual(s, 'toto=$1 titi=$2 and a=''d?d''');
+  CheckEqual(ReplaceParamsByNumbers('(1,2,3,4,5,6,7,8) values (?,?,?,?,?,?,?,?)', s), 8);
+  CheckEqual(s, '(1,2,3,4,5,6,7,8) values ($1,$2,$3,$4,$5,$6,$7,$8)');
   CheckEqual(ReplaceParamsByNumbers('1?2?3?4?5?6?7?8?9?10?11?12? x', s), 12);
   CheckEqual(s, '1$12$23$34$45$56$67$78$89$910$1011$1112$12 x');
+  SqlOrigin := RawUtf8OfChar('?', 100);
+  CheckEqual(ReplaceParamsByNumbers(SqlOrigin, s), 100);
+  CheckEqual(s,
+    '$1$2$3$4$5$6$7$8$9$10$11$12$13$14$15$16$17$18$19$20$21$22$23$24$25$26$27$' +
+    '28$29$30$31$32$33$34$35$36$37$38$39$40$41$42$43$44$45$46$47$48$49$50$51$5' +
+    '2$53$54$55$56$57$58$59$60$61$62$63$64$65$66$67$68$69$70$71$72$73$74$75$76' +
+    '$77$78$79$80$81$82$83$84$85$86$87$88$89$90$91$92$93$94$95$96$97$98$99$100');
+  CheckHash(s, $284F9F2A);
+  CheckEqual(ReplaceParamsByNames(SqlOrigin, s), 100);
+  CheckEqual(s,
+    ':AA:AB:AC:AD:AE:AF:AG:AH:AI:AJ:AK:AL:AM:AN:AO:AP:AQ:AR:AU:AV:AW:AX:AY:AZ:' +
+    'BA:BB:BC:BD:BE:BF:BG:BH:BI:BJ:BK:BL:BM:BN:BO:BP:BQ:BR:BS:BT:BU:BV:BW:BX:B' +
+    'Z:CA:CB:CC:CD:CE:CF:CG:CH:CI:CJ:CK:CL:CM:CN:CO:CP:CQ:CR:CS:CT:CU:CV:CW:CX' +
+    ':CY:CZ:DA:DB:DC:DD:DE:DF:DG:DH:DI:DJ:DK:DL:DM:DN:DP:DQ:DR:DS:DT:DU:DV:DW:' +
+    'DX:DY:DZ');
+  Check(PosEx(':CO', s) <> 0);
+  Check(PosEx(':AS', s) = 0);
+  Check(PosEx(':AT', s) = 0);
+  Check(PosEx(':BY', s) = 0);
+  Check(PosEx(':DO', s) = 0);
+  CheckHash(s, $3A1DB9C2);
+  ReplaceParamsByNames(RawUtf8OfChar('?', 300), s);
+  Check(PosEx(':CO', s) <> 0);
+  Check(PosEx(':AS', s) = 0);
+  Check(PosEx(':AT', s) = 0);
+  Check(PosEx(':BY', s) = 0);
+  Check(PosEx(':DO', s) = 0);
+  Check(PosEx(':IE', s) <> 0);
+  Check(PosEx(':IF', s) = 0);
+  CheckHash(s, $B2377655, 'excludes :IF :OF');
   checkequal(BoundArrayToJsonArray(TRawUtf8DynArrayFrom([])), '');
   checkequal(BoundArrayToJsonArray(TRawUtf8DynArrayFrom(['1'])), '{1}');
   checkequal(BoundArrayToJsonArray(TRawUtf8DynArrayFrom(['''1'''])), '{"1"}');
@@ -766,10 +843,13 @@ begin
       DoTest(TSqlDBSocketConnectionProperties.Create(
         ADDR, 'root', 'user', 'pass'), 'socket');
       {$ifdef USEWININET}
-      DoTest(TSqlDBWinHTTPConnectionProperties.Create(
-        ADDR, 'root', 'user', 'pass'), 'winhttp');
-      DoTest(TSqlDBWinINetConnectionProperties.Create(
-        ADDR, 'root', 'user', 'pass'), 'wininet');
+      if not IsWow64Emulation then
+      begin
+        DoTest(TSqlDBWinHTTPConnectionProperties.Create(
+          ADDR, 'root', 'user', 'pass'), 'winhttp');
+        DoTest(TSqlDBWinINetConnectionProperties.Create(
+          ADDR, 'root', 'user', 'pass'), 'wininet');
+      end;
       {$endif USEWININET}
       {$ifdef USELIBCURL}
       DoTest(TSqlDBCurlConnectionProperties.Create(
@@ -785,27 +865,59 @@ end;
 
 procedure TTestExternalDatabase.DBPropertiesPersistence;
 var
-  Props: TSqlDBConnectionProperties;
+  props: TSqlDBConnectionProperties;
+  def: TSynConnectionDefinition;
   json: RawUtf8;
+  pwd: SpiUtf8;
 begin
-  Props := TSqlDBSQLite3ConnectionProperties.Create('server', '', '', '');
-  json := Props.DefinitionToJson(14);
-  Check(json = '{"Kind":"TSqlDBSQLite3ConnectionProperties",' +
-    '"ServerName":"server","DatabaseName":"","User":"","Password":""}');
-  Props.Free;
-  Props := TSqlDBSQLite3ConnectionProperties.Create('server', '', '', '1234');
-  json := Props.DefinitionToJson(14);
-  Check(json = '{"Kind":"TSqlDBSQLite3ConnectionProperties",' +
-    '"ServerName":"server","DatabaseName":"","User":"","Password":"MnVfJg=="}');
-  Props.DefinitionToFile(WorkDir + 'connectionprops.json');
-  Props.Free;
-  Props := TSqlDBConnectionProperties.CreateFromFile(WorkDir + 'connectionprops.json');
-  Check(Props.ClassType = TSqlDBSQLite3ConnectionProperties);
-  Check(Props.ServerName = 'server');
-  Check(Props.DatabaseName = '');
-  Check(Props.UserID = '');
-  Check(Props.PassWord = '1234');
-  Props.Free;
+  def := TSynConnectionDefinition.Create;
+  try
+    props := TSqlDBSQLite3ConnectionProperties.Create('server', '', '', '');
+    try
+      json := props.DefinitionToJson(14);
+      Check(json = '{"Kind":"TSqlDBSQLite3ConnectionProperties",' +
+        '"ServerName":"server","DatabaseName":"","User":"","Password":""}');
+      props.Free;
+      props := TSqlDBSQLite3ConnectionProperties.Create('server', '', '', '1234');
+      json := props.DefinitionToJson(14);
+      Check(json = '{"Kind":"TSqlDBSQLite3ConnectionProperties",' +
+        '"ServerName":"server","DatabaseName":"","User":"","Password":"MnVfJg=="}');
+      props.DefinitionToFile(WorkDir + 'connectionprops.json');
+      def.Key := 14; // same encoding as props.DefinitionToJson(14) above
+      props.DefinitionTo(def);
+    finally
+      props.Free;
+    end;
+    CheckEqual(def.Password, 'MnVfJg==');
+    CheckEqual(def.PasswordPlain, '1234');
+    def.Key := OBJECTPASSWORD_PLAIN;
+    CheckEqual(def.PasswordPlain, 'MnVfJg==');
+    def.PasswordPlain := '1222';
+    CheckEqual(def.Password, '1222');
+    CheckEqual(def.PasswordPlain, '1222');
+    def.SetPassWordPlainCurrentUser('731');
+    CheckNotEqual(def.Password, '731');
+    CheckEqual(def.PasswordPlain, '731');
+    def.SetPassWordPlainCurrentUser('777', 'app');
+    CheckNotEqual(def.Password, '777');
+    CheckEqual(def.PasswordPlain, '');
+    def.GetPassWordSafe(pwd, 'app');
+    CheckEqual(pwd, '777');
+    FillZero(pwd);
+    CheckEqual(pwd, '');
+  finally
+    def.Free;
+  end;
+  props := TSqlDBConnectionProperties.CreateFromFile(WorkDir + 'connectionprops.json');
+  try
+    Check(props.ClassType = TSqlDBSQLite3ConnectionProperties);
+    Check(props.ServerName = 'server');
+    Check(props.DatabaseName = '');
+    Check(props.UserID = '');
+    Check(props.PassWord = '1234');
+  finally
+    props.Free;
+  end;
   DeleteFile(WorkDir + 'connectionprops.json');
 end;
 

@@ -379,7 +379,7 @@ const
     dMariaDB, dSQLite, dPostgreSQL, dJet {e.g. ADO[JET]} );
     // expecting Sybase + ASA support in TSqlDBDefinition
 var
-  BrakedPos: integer;
+  BrakedPos: PtrInt;
 begin
   // return e.g. mysql://192.168.2.60:3306/world?username=root;password=dev
   // make syntax like "ADO[ORACLE]"/"ADO[MSSQL]:"/"ADO[JET]" etc... possible
@@ -390,7 +390,7 @@ begin
   begin
     fServerName := Copy(aServerName, 1, BrakedPos - 1);
     fDbmsName := Copy(aServerName, BrakedPos + 1,
-      PosExChar(']', aServerName) - 1 - BrakedPos);
+      PtrInt(PosExChar(']', aServerName)) - 1 - BrakedPos);
   end
   else
     fServerName := aServerName;
@@ -1280,7 +1280,7 @@ begin
   blob := fResultSet.GetBlob(Col + FirstDbcIndex);
   if (blob = nil) or
      blob.IsEmpty then
-    result := ''
+    FastAssignNew(result)
   else
     result := blob.GetString; // ZAnsiString = RawByteString
 end;

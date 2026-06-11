@@ -567,6 +567,7 @@ type
     function GetMethod(index: integer): RawUtf8;
     function GetIsFolder(index: integer): boolean;
     function GetAttributes(index: integer): cardinal;
+    function GetEncrypted(index: integer): boolean;
     function GetInstance: TObject;
     /// the file name specified to OpenFile() or SaveToFile()
     function FileName: TFileName;
@@ -631,6 +632,10 @@ type
     // - may be 0 for some packers (e.g. zip)
     property Attributes[index: integer]: cardinal
       read GetAttributes;
+    /// the kpidEncrypted property value
+    property Encrypted[index: integer]: boolean
+      read GetEncrypted;
+
   end;
 
   /// reading acccess to an archive content using the 7z.dll
@@ -1002,6 +1007,7 @@ type
     function GetModDate(index: integer): TDateTime; virtual; abstract;
     function GetCreateDate(index: integer): TDateTime; virtual; abstract;
     function GetAttributes(index: integer): cardinal; virtual; abstract;
+    function GetEncrypted(index: integer): boolean; virtual; abstract;
     // IProgress methods
     function SetTotal(total: Int64): HRESULT; overload; stdcall;
     function SetCompleted(completeValue: PInt64): HRESULT; overload; stdcall;
@@ -1053,6 +1059,7 @@ type
     function GetPackSize(index: integer): Int64; override;
     function GetCrc(index: integer): cardinal; override;
     function GetComment(index: integer): RawUtf8; override;
+    function GetEncrypted(index: integer): boolean; override;
     function GetModDate(index: integer): TDateTime; override;
     function GetCreateDate(index: integer): TDateTime; override;
     function GetAttributes(index: integer): cardinal; override;
@@ -1430,8 +1437,7 @@ begin
       exit;
   end;
   // fallback to guess from file extension
-  ext := RawUtf8(ExtractFileExt(FileName));
-  delete(ext, 1, 1);
+  StringToUtf8(ExtractExt(FileName, {withoutdot=}true), ext);
   l := length(ext);
   if l = 1 then
     case ext[1] of
@@ -1626,11 +1632,10 @@ end;
 
 function VariantToClsid(const v: T7zVariant): TGuid;
 begin
-  with TVarData(v) do
-    if VType = VT_CLSID then // = varOleClsid
-      result := PGuid(VAny)^
-    else
-      FillZero(result{%H-});
+  if TVarData(v).VType = VT_CLSID then // = varOleClsid
+    result := PGuid(TVarData(v).VAny)^
+  else
+    FillZero(result{%H-});
 end;
 
 constructor T7zCodec.Create(lib: T7zLib);
@@ -1882,21 +1887,23 @@ const
     VT_UI8);        // kpidVa
 
 function T7zReader.GetProp(item: cardinal; prop: TPropID): T7zVariant;
+var
+  vt: cardinal;
 begin
   EnsureOpened;
   VarClear(result);
   E7Zip.CheckOK(self, 'GetProp',
     fInArchive.GetProperty(Item, prop, result));
-  with TVarData(result) do
-    if VType = VT_FILETIME then
-      E7Zip.RaiseUtf8('GetProperty(%): VT_FILETIME is unsupported - ' +
-        'use GetPropDateTime instead', [prop])
-    else if (VType <> varEmpty) and
-            (prop >= low(KPID_VTYPE)) and
-            (prop <= high(KPID_VTYPE)) and
-            (VType <> KPID_VTYPE[prop]) then
-      E7Zip.RaiseUtf8('GetProperty(%): expected %, returned %',
-        [prop, KPID_VTYPE[prop], VType])
+  vt := TVarData(result).VType;
+  if vt = VT_FILETIME then
+    E7Zip.RaiseUtf8('GetProperty(%): VT_FILETIME is unsupported - ' +
+      'use GetPropDateTime instead', [prop])
+  else if (vt  <> varEmpty) and
+          (prop >= low(KPID_VTYPE)) and
+          (prop <= high(KPID_VTYPE)) and
+          (vt <> KPID_VTYPE[prop]) then
+    E7Zip.RaiseUtf8('GetProperty(%): expected %, returned %',
+      [prop, KPID_VTYPE[prop], vt])
 end;
 
 procedure T7zReader.GetPropUtf8(item: cardinal; prop: TPropID; out dest: RawUtf8);
@@ -1973,6 +1980,11 @@ begin
   result := VariantToInt64Def(GetProp(index, kpidCRC), -1);
 end;
 
+function T7zReader.GetEncrypted(index: integer): boolean;
+begin
+  result := boolean(GetProp(index, kpidEncrypted));
+end;
+
 function T7zReader.GetName(index: integer): RawUtf8;
 begin
   GetPropUtf8(index, kpidName, result);
@@ -1989,12 +2001,15 @@ begin
 end;
 
 function T7zReader.Count: integer;
+var
+  n: cardinal; // safe with a local variable
 begin
   if fInArchive = nil then
-    result := 0
+    n := 0
   else
     E7Zip.CheckOk(self, 'GetNumberOfItems',
-      fInArchive.GetNumberOfItems(PCardinal(@result)^));
+      fInArchive.GetNumberOfItems(n));
+  result := n;
 end;
 
 function T7zReader.NameToIndex(const zipname: RawUtf8): integer;
@@ -2072,7 +2087,7 @@ function T7zReader.Extract(const zipname: RawUtf8): RawByteString;
 var
   s: TRawByteStringStream;
 begin
-  result := '';
+  FastAssignNew(result);
   s := TRawByteStringStream.Create;
   try
     if Extract(zipname, s) then
@@ -2556,45 +2571,44 @@ begin
     exit;
   end;
   item := fEntries[index];
-  with TVarData(Value) do
-    case propID of
-      kpidNoProperty:
-        VType := varNull;
-      kpidAttributes:
-        begin
-          VType := VT_UI4; // = varLongWord
-          VLongWord := item.Attributes;
-        end;
-      kpidLastWriteTime:
-        if Int64(item.LastWriteTime) <> 0 then
-        begin
-          VType := VT_FILETIME; // = varOleFileTime
-          VInt64 := Int64(item.LastWriteTime);
-        end;
-      kpidCreationTime:
-        if Int64(item.CreationTime) <> 0 then
-        begin
-          VType := VT_FILETIME;
-          VInt64 := Int64(item.CreationTime);
-        end;
-      kpidTimeType:
-        begin
-          VType := VT_UI4;
-          VLongWord := ord(fttWindows);
-        end;
-      kpidPath:
-        if item.ZipName <> '' then
-          value := Utf8ToWideString(item.ZipName);
-      kpidIsFolder:
-        Value := item.IsFolder;
-      kpidIsAnti:
-        value := item.IsAnti;
-      kpidSize:
-        begin
-          VType := VT_UI8; // = varWord64
-          VInt64 := item.Size;
-        end;
-    end;
+  case propID of
+    kpidNoProperty:
+      TVarData(Value).VType := varNull;
+    kpidAttributes:
+      begin
+        TVarData(Value).VType := VT_UI4; // = varLongWord
+        TVarData(Value).VLongWord := item.Attributes;
+      end;
+    kpidLastWriteTime:
+      if Int64(item.LastWriteTime) <> 0 then
+      begin
+        TVarData(Value).VType := VT_FILETIME; // = varOleFileTime
+        TVarData(Value).VInt64 := Int64(item.LastWriteTime);
+      end;
+    kpidCreationTime:
+      if Int64(item.CreationTime) <> 0 then
+      begin
+        TVarData(Value).VType := VT_FILETIME;
+        TVarData(Value).VInt64 := Int64(item.CreationTime);
+      end;
+    kpidTimeType:
+      begin
+        TVarData(Value).VType := VT_UI4;
+        TVarData(Value).VLongWord := ord(fttWindows);
+      end;
+    kpidPath:
+      if item.ZipName <> '' then
+        Value := Utf8ToWideString(item.ZipName);
+    kpidIsFolder:
+      Value := item.IsFolder;
+    kpidIsAnti:
+      value := item.IsAnti;
+    kpidSize:
+      begin
+        TVarData(Value).VType := VT_UI8; // = varWord64
+        TVarData(Value).VInt64 := item.Size;
+      end;
+  end;
   result := S_OK;
 end;
 
@@ -2762,7 +2776,7 @@ function T7zWriter.GetName(index: integer): RawUtf8;
 begin
   index := Get(index).UpdateItemIndex;
   if index < 0 then
-    result := ''
+    FastAssignNew(result)
   else
     result := fUpdateReader.GetName(index);
 end;
@@ -2771,7 +2785,7 @@ function T7zWriter.GetMethod(index: integer): RawUtf8;
 begin
   index := Get(index).UpdateItemIndex;
   if index < 0 then
-    result := ''
+    FastAssignNew(result)
   else
     result := fUpdateReader.GetMethod(index);
 end;
@@ -2808,7 +2822,7 @@ function T7zWriter.GetComment(index: integer): RawUtf8;
 begin
   index := Get(index).UpdateItemIndex;
   if index < 0 then
-    result := ''
+    FastAssignNew(result)
   else
     result := fUpdateReader.GetComment(index);
 end;

@@ -263,7 +263,9 @@ type
   // ! Server.ServiceRegister(TServiceCalculator,[TypeInfo(ICalculator)],sicShared);
   // - TRestClientUri will have to register an interface remote access as:
   // ! Client.ServiceRegister([TypeInfo(ICalculator)],sicShared));
-  // note that the implementation (TServiceCalculator) remain on the server side
+  // but after Client.SetUser() you could directly call Client.Services.Resolve<>
+  // which will register the interface type using the "soa" information - note
+  // that the implementation (TServiceCalculator) remain on the server side
   // only: the client only needs the ICalculator interface
   // - then TRestServer and TRestClientUri will both have access to the
   // service, via their Services property, e.g. as:
@@ -274,6 +276,9 @@ type
   // !   result := I.Add(10,20);
   // which is in practice to be used with the faster wrapper method:
   // ! if Services.Resolve(ICalculator,I) then
+  // !   result := I.Add(10,20);
+  // or, using generics:
+  // ! if Services.Resolve<ICalculator>(I) then
   // !   result := I.Add(10,20);
   TServiceFactory = class(TInjectableObject)
   protected
@@ -350,6 +355,7 @@ type
       read fContract;
     /// the published service contract, as expected by both client and server
     // - by default, will contain ContractHash property value (for security)
+    // - already quoted as '"xxxxx"' (or '"*"' for SERVICE_CONTRACT_NONE_EXPECTED)
     // - but you can override this value using plain Contract or any custom
     // value (e.g. a custom version number) - in this case, both TServiceFactoryClient
     // and TServiceFactoryServer instances must have a matching ContractExpected
@@ -633,6 +639,7 @@ type
     property ExcludeServiceLogCustomAnswer: boolean
       index optExcludeServiceLogCustomAnswer read GetOption write SetOption;
     /// the HTTP methods used for TRestServerUriContext.UriComputeRoutes
+    // - call fluent SetMethods() to customize it
     property Methods: TUriMethods
       read fMethods;
     /// index of the first method of this interface in the global container
@@ -699,6 +706,7 @@ type
     fInterfaceMethod: TServiceContainerInterfaceMethods; // dynamic array
     fInterfaceMethods: TDynArrayHashed;
     fExpectMangledUri: boolean;
+    fAsSoa: TDocVariantData;
     procedure SetExpectMangledUri(Mangled: boolean);
     procedure SetInterfaceMethodBits(MethodNamesCsv: PUtf8Char;
       IncludePseudoMethods: boolean; out bits: TServiceContainerInterfaceMethodBits);
@@ -724,7 +732,7 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// retrieve a service provider from its index in the list
     // - returns nil if out of range index
-    function Index(aIndex: integer): TServiceFactory; overload;
+    function Index(aIndex: PtrInt): TServiceFactory; overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// retrieve a service provider from its GUID / Interface type
     // - you shall have registered the interface by a previous call to
@@ -754,9 +762,14 @@ type
     // - i.e. all interface names without the initial 'I', e.g. 'Calculator' for
     // ICalculator
     procedure SetInterfaceNames(out Names: TRawUtf8DynArray);
-    /// retrieve all registered Services contracts as a JSON array
+    /// retrieve all registered Services contracts as a verbose JSON array
     // - i.e. a JSON array of TServiceFactory.Contract JSON objects
     function AsJson: RawJson;
+    /// retrieve all registered Services as a short TDocVariant array
+    // - defined as ["name","contractexpected",ord(sic*),...] triplets e.g.
+    // ["Calculator","*",0,...] for a sicSingle ICalculator with no contract
+    // - used e.g. for "soa" in TRestServerAuthentication.SessionCreateReturns
+    function AsSoa: variant;
     /// retrieve a service provider from its URI
     // - it expects the supplied URI variable  to be e.g. '00amyWGct0y_ze4lIsj2Mw'
     // or 'Calculator', depending on the ExpectMangledUri property
@@ -1097,7 +1110,7 @@ begin
   inherited CreateWithResolver(aOwner, {raiseIfNotFound=}true);
   fInterface := TInterfaceFactory.Get(aInterface);
   if fInterface = nil then // paranoid
-    EServiceException.RaiseUtf8('%.Create: no I%', [self, aInterface^.RawName]);
+    EServiceException.RaiseUtf8('%.Create: no %', [self, aInterface^.RawName]);
   fInstanceCreation := aInstanceCreation;
   fInterfaceMangledUri := BinToBase64Uri(PHash128(fInterface.InterfaceGuid)^);
   fInterfaceUri := fInterface.InterfaceUri;
@@ -1111,17 +1124,17 @@ begin
   FormatUtf8('{"contract":"%","implementation":"%","methods":%}',
     [fInterfaceUri, LowerCase(TrimLeftLowerCaseShort(ToText(InstanceCreation))),
      fInterface.Contract], fContract);
-  fContractHash := '"' + CardinalToHex(Hash32(fContract)) +
-    CardinalToHex(crc32(0, pointer(fContract), length(fContract))) + '"';
-    // 2 hashes to avoid collision
+  // combine two 32-bit hashes to avoid collision (paranoid)
+  Join(['"', CardinalToHex(Hash32(fContract)), CardinalToHex(
+        crc32(0, pointer(fContract), length(fContract))), '"'], fContractHash);
   if aContractExpected <> '' then // override default contract
     if aContractExpected[1] <> '"' then
       // stored as JSON string
-      fContractExpected := '"' + aContractExpected + '"'
+      Join(['"', aContractExpected, '"'], fContractExpected)
     else
       fContractExpected := aContractExpected
   else
-    fContractExpected := fContractHash; // for security
+    fContractExpected := fContractHash; // default to safe and short hash
 end;
 
 function TServiceFactory.ServiceMethodIndex(const aUri: RawUtf8): PtrInt;
@@ -1555,7 +1568,7 @@ function TServiceContainer.AddServiceInternal(aService: TServiceFactory): PtrInt
 var
   ndx: integer;
   im: TServiceInternalMethod;
-  m: PtrInt;
+  m, n: PtrInt;
   int: PServiceContainerInterface;
   uri: RawUtf8;
 begin
@@ -1567,7 +1580,8 @@ begin
     uri := aService.fInterfaceMangledUri
   else
     uri := aService.fInterfaceUri;
-  int := fInterfaces.AddUniqueName(uri, @result);
+  n := 0;
+  int := fInterfaces.AddUniqueName(uri, @n);
   int^.Service := aService;
   // add associated methods - first SERVICE_PSEUDO_METHOD[], then from interface
   Append(uri, '.');
@@ -1576,6 +1590,7 @@ begin
     AddServiceMethodInternal(uri + SERVICE_PSEUDO_METHOD[im], aService, ndx);
   for m := 0 to aService.fInterface.MethodsCount - 1 do
     AddServiceMethodInternal(uri + aService.fInterface.Methods[m].Uri, aService, ndx);
+  result := n; // safer with a transient local variable
 end;
 
 procedure TServiceContainer.CheckInterface(const aInterfaces: array of PRttiInfo);
@@ -1653,7 +1668,7 @@ end;
 function TServiceContainer.GetMethodName(ListInterfaceMethodIndex: integer): RawUtf8;
 begin
   if cardinal(ListInterfaceMethodIndex) >= cardinal(length(fInterfaceMethod)) then
-    result := ''
+    FastAssignNew(result)
   else
     with fInterfaceMethod[ListInterfaceMethodIndex] do
       result := InterfaceService.fInterface.GetMethodName(InterfaceMethodIndex);
@@ -1757,7 +1772,7 @@ var
   i: PtrInt;
   temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
-  result := '';
+  FastAssignNew(result);
   if (self = nil) or
      (fInterface = nil) then
     exit;
@@ -1766,14 +1781,37 @@ begin
     WR.AddDirect('[');
     for i := 0 to high(fInterface) do
     begin
-      WR.AddString(fInterface[i].Service.Contract);
+      WR.AddString(fInterface[i].Service.Contract); // as JSON object
       WR.AddComma;
     end;
-    WR.CancelLastComma(']');
+    WR.ReplaceLastComma(']');
     WR.SetText(RawUtf8(result));
   finally
     WR.Free;
   end;
+end;
+
+procedure _Set(var v: TDocVariantData; p: PServiceContainerInterface; n: integer);
+begin
+  v.InitFast(n * 3, dvArray);
+  repeat
+    v.AddItems([p^.InterfaceName,
+                UnQuoteSqlString(p^.Service.ContractExpected),
+                ord(p^.Service.InstanceCreation)]);
+    inc(p);
+    dec(n);
+  until n = 0;
+end;
+
+function TServiceContainer.AsSoa: variant;
+begin
+  VarClear(result);
+  if (self = nil) or
+     (fInterface = nil) then
+    exit;
+  if fAsSoa.Count = 0 then
+    _Set(fAsSoa, pointer(fInterface), length(fInterface)); // compute once
+  result := PVariant(@fAsSoa)^;
 end;
 
 function TServiceContainer.TryResolve(aInterface: PRttiInfo; out Obj): boolean;
@@ -1787,10 +1825,10 @@ begin
     result := factory.Get(Obj);
 end;
 
-function TServiceContainer.Index(aIndex: integer): TServiceFactory;
+function TServiceContainer.Index(aIndex: PtrInt): TServiceFactory;
 begin
   if (self = nil) or
-     (cardinal(aIndex) > cardinal(high(fInterface))) then
+     (PtrUInt(aIndex) > PtrUInt(high(fInterface))) then
     result := nil
   else
     result := fInterface[aIndex].Service;
@@ -1943,7 +1981,7 @@ begin
             aWriter.AddRecordJson(@List[i].PublicUri, TypeInfo(TRestServerUri));
             aWriter.AddComma;
           end;
-    aWriter.CancelLastComma(']');
+    aWriter.ReplaceLastComma(']');
   finally
     Safe.ReadUnLock;
   end;
@@ -2043,7 +2081,7 @@ const
   _TRestServerUri =
     'Address,Port,Root: RawUtf8';
   _TServicesPublishedInterfaces =
-    'PublicUri:TRestServerUri Names: array of RawUtf8';
+    'PublicUri:TRestServerUri Names:array of RawUtf8';
 
 procedure InitializeUnit;
 begin

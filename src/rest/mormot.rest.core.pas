@@ -39,6 +39,7 @@ uses
   mormot.core.data,
   mormot.core.rtti,
   mormot.core.json,
+  mormot.core.fmt,
   mormot.core.threads,
   mormot.core.perf,
   mormot.crypt.core,
@@ -559,6 +560,8 @@ type
     procedure SetServerTimestamp(const Value: TTimeLog);
 
     /// main access to the IRestOrm methods of this instance
+    // - you should NEVER use any TRestOrm class themself, but only an IRestOrm
+    // interface via this property or TRestServer.Server as IRestOrmServer
     property Orm: IRestOrm
       read fOrm;
     /// low-level access to the associated Data Model
@@ -573,6 +576,9 @@ type
     // - safer typical use, following the DI/IoC pattern, and which will not
     // trigger any access violation if Services=nil, could be:
     // ! if fServer.Services.Resolve(ICalculator, Calc) then
+    // !   ...
+    // or, using generics:
+    // ! if fServer.Services.Resolve<ICalculator>(Calc) then
     // !   ...
     property Services: TServiceContainer
       read fServices;
@@ -1113,10 +1119,11 @@ type
     // - warning: you should re-call SetPassword(aMutualAuth=true) when this
     // LogonName field is changed, since PasswordHashHexa is bound to LogonName
     // - so in this field, you may encounter such values:
-    // $ 0123abc.....ffee = 256-bit hexa of mORMot 1 SHA256('salt'+password)
-    // $ bc01a89.....2b07 = HA0 = Hash(username:realm:password) for DIGEST
-    // $ $mcf$params$checkum = standard "Modular Crypt" hash
-    // $ #mcf$params$scramkeys = SCRAM-like "Modular" hash with mutual auth
+    // $ '0123abc.....ffee' = 256-bit hexa of mORMot 1 SHA256('salt'+password)
+    // $ 'bc01a89.....2b07' = HA0 = Hash(username:realm:password) for DIGEST
+    // $ '$mcf$params$checkum' = standard "Modular Crypt" hash
+    // $ '#mcf$params$scramkeys' = SCRAM-like "Modular" hash with mutual auth
+    // $ '' for password-less authentication e.g. with GSSAPI/SSPI Kerberos
     property PasswordHashHexa: RawUtf8
       index 192 read fPasswordHashHexa write fPasswordHashHexa;
     /// the associated access rights of this user
@@ -1921,7 +1928,7 @@ var
   ndx: integer;
   new: TInterfacedObjectMultiDest;
 const
-  NAM: array[boolean] of string[11] = ('Unsubscribe', 'Subscribe');
+  NAM: array[boolean] of TShort15 = ('Unsubscribe', 'Subscribe');
 begin
   if (self = nil) or
      (fFakeCallback = nil) then
@@ -2416,8 +2423,8 @@ class function TRest.CreateFromFile(aModel: TOrmModel;
   const aJsonFile: TFileName; aServerHandleAuthentication: boolean;
   aKey: cardinal): TRest;
 begin
-  result := CreateFromJson(
-    aModel, RawUtf8FromFile(aJsonFile), aServerHandleAuthentication, aKey);
+  result := CreateFromJson(aModel, JsonNormalizeFromFile(aJsonFile),
+    aServerHandleAuthentication, aKey);
 end;
 
 procedure TRest.ServicesRelease(Caller: TServiceContainer);
@@ -3962,13 +3969,13 @@ var
   up: TByteToAnsiChar;
 begin
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else if fInHeaderLastName = HeaderName then
     result := fInHeaderLastValue
   else
   begin
-    PWord(UpperCopy255(up{%H-}, HeaderName))^ := ord(':');
-    FindNameValue(fCall^.InHead, up, result); // = fCall^.Header(up)
+    PWord(UpperCopy255(@up, HeaderName))^ := ord(':');
+    FindNameValue(fCall^.InHead, @up, result); // = fCall^.Header(up)
     if result <> '' then
     begin
       fInHeaderLastName := HeaderName;
@@ -4020,7 +4027,7 @@ var
 begin
   if self = nil then
     exit;
-  c := TrimU(aOutSetCookie);
+  TrimU(aOutSetCookie, c);
   if not IsValidUtf8WithoutControlChars(c) then
     ERestException.RaiseUtf8('Unsafe %.SetOutSetCookie', [self]);
   if PosExChar('=', c) < 2 then
@@ -4090,7 +4097,7 @@ begin
   if server = '' then
     server := crc32cUtf8ToHex(Call^.OutBody);
   server := Join(['"', server, '"']);
-  if client <> server then
+  if client <> server then // ETAG value is case sensitive by RFV 7232
     AppendLine(Call^.OutHead, ['ETag: ', server])
   else
   begin
@@ -4248,10 +4255,12 @@ begin
         AddDirect('[');
         repeat
           AddJsonEscapeVarRec(v);
+          dec(n);
+          if n = 0 then
+            break;
           AddComma;
           inc(v);
-          dec(n);
-        until n = 0;
+        until false;
         AddDirect(']');
       end;
       AddDirect('}');

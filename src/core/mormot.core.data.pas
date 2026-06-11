@@ -8,14 +8,12 @@ unit mormot.core.data;
 
    Low-Level Data Processing Functions shared by all framework units
     - RTL TPersistent or Root Classes with Custom Constructor
-    - IAutoFree and IAutoLocker Reference-Counted Process
     - TSynList TSynObjectList TSynLocker classes
     - TObjectStore with proper Binary Serialization
-    - INI Files and In-memory Access
     - Efficient RTTI Values Binary Serialization and Comparison
     - TDynArray and TDynArrayHashed Wrappers
     - Integer Arrays Extended Process
-    - RawUtf8 String Values Interning and TRawUtf8List
+    - RawUtf8 String Values Interning and TRawUtf8List/TBinDictionary
     - Abstract Radix Tree Classes
 
   *****************************************************************************
@@ -35,6 +33,7 @@ uses
   {$endif ISDELPHI}
   mormot.core.base,
   mormot.core.os,
+  mormot.core.os.security,
   mormot.core.rtti,
   mormot.core.datetime,
   mormot.core.unicode,
@@ -80,9 +79,9 @@ type
     function VirtualRelease: integer; virtual; abstract;
     // IUnknown methods
     function QueryInterface({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
-      IID: TGuid; out Obj): TIntQry; {$if defined(OSWINDOWS) or defined(ISDELPHI)}stdcall{$else}cdecl{$ifend};
-    function _AddRef: TIntCnt;       {$if defined(OSWINDOWS) or defined(ISDELPHI)}stdcall{$else}cdecl{$ifend};
-    function _Release: TIntCnt;      {$if defined(OSWINDOWS) or defined(ISDELPHI)}stdcall{$else}cdecl{$ifend};
+      IID: TGuid; out Obj): TIntQry; {$ifdef FPCPOSIX}cdecl{$else}stdcall{$endif};
+    function _AddRef: TIntCnt;       {$ifdef FPCPOSIX}cdecl{$else}stdcall{$endif};
+    function _Release: TIntCnt;      {$ifdef FPCPOSIX}cdecl{$else}stdcall{$endif};
   public
     /// the associated reference count
     property RefCount: integer
@@ -108,243 +107,6 @@ type
 
   /// class-reference type (metaclass) of a TInterfacedCollection kind
   TInterfacedCollectionClass = class of TInterfacedCollection;
-
-
-{ ************ IAutoFree and IAutoLocker Reference-Counted Process }
-
-{ WARNING:
-    FPC and Delphi 10.4+ do require an explicit local variable or "with"
-    clause to keep the reference locked - previous behavior was to keep the
-    variable up to the end of the method, which is not the case any more.
-}
-
-type
-  /// interface for TAutoFree to register another TObject instance
-  // to an existing IAutoFree local variable
-  // - WARNING: both FPC and Delphi 10.4+ don't keep the IAutoFree instance
-  // up to the end-of-method -> you should not use TAutoFree for new projects :(
-  IAutoFree = interface
-    procedure Another(var objVar; obj: TObject);
-    /// do-nothing method to circumvent the Delphi 10.4 IAutoFree early release
-    procedure ForMethod;
-  end;
-
-  /// simple reference-counted storage for local objects
-  // - WARNING: both FPC and Delphi 10.4+ don't keep the IAutoFree instance
-  // up to the end-of-method -> you should not use TAutoFree for new projects :(
-  // - be aware that it won't implement a full ARC memory model, but may be
-  // just used to avoid writing some try ... finally blocks on local variables
-  // - use with caution, only on well defined local scope, via a "with" clause
-  // or a local variable
-  TAutoFree = class(TInterfacedObject, IAutoFree)
-  protected
-    fObject: TObject;
-    fObjectList: array of TObject;
-    // do-nothing method to circumvent the Delphi 10.4 IAutoFree early release
-    procedure ForMethod;
-  public
-    /// initialize the TAutoFree class for one local variable
-    // - do not call this constructor, but class function One() instead
-    constructor Create(var localVariable; obj: TObject); reintroduce; overload;
-    /// initialize the TAutoFree class for several local variables
-    // - do not call this constructor, but class function Several() instead
-    constructor Create(const varObjPairs: array of pointer); reintroduce; overload;
-    /// protect one local TObject variable instance life time
-    // - for instance, instead of writing:
-    // !var
-    // !  myVar: TMyClass;
-    // !begin
-    // !  myVar := TMyClass.Create;
-    // !  try
-    // !    ... use myVar
-    // !  finally
-    // !    myVar.Free;
-    // !  end;
-    // !end;
-    // - you may write:
-    // !var
-    // !  myVar: TMyClass;
-    // !begin
-    // !  with TAutoFree.One(myVar,TMyClass.Create) do
-    // !  begin
-    // !  ... use myVar
-    // !  end; // Delphi 10.4 and later: myVar will be released here
-    // !  ... some other code
-    // !end; // Delphi 10.3 and sooner: myVar will be released here
-    // - warning: under FPC, you should assign the result of this method to a local
-    // IAutoFree variable - see bug http://bugs.freepascal.org/view.php?id=26602
-    // - Delphi 10.4 also did change it and release the IAutoFree before the
-    // end of the current method, so we inlined a void method call trying to
-    // circumvent this problem - https://quality.embarcadero.com/browse/RSP-30050
-    // - for both Delphi 10.4+ and FPC, you may use with TAutoFree.One() do
-    class function One(var localVariable; obj: TObject): IAutoFree;
-      {$ifdef ISDELPHI104} inline; {$endif}
-    /// protect several local TObject variable instances life time
-    // - specified as localVariable/objectInstance pairs
-    // - you may write:
-    // !var
-    // !  var1, var2: TMyClass;
-    // !begin
-    // !  with TAutoFree.Several([
-    // !    @var1,TMyClass.Create,
-    // !    @var2,TMyClass.Create]) do
-    // !  begin
-    // !  ... use var1 and var2
-    // !  end;
-    // !  ... some other code
-    // !end;
-    // - warning: under FPC, you should assign the result of this method to a local
-    // IAutoFree variable - see bug http://bugs.freepascal.org/view.php?id=26602
-    // - Delphi 10.4 also did change it and release the IAutoFree before the
-    // end of the current method, and an "array of pointer" cannot be inlined
-    // by the Delphi compiler, so you could explicitly call ForMethod:
-    // !  TAutoFree.Several([
-    // !    @var1,TMyClass.Create,
-    // !    @var2,TMyClass.Create]).ForMethod;
-    class function Several(const varObjPairs: array of pointer): IAutoFree;
-    /// protect another TObject variable to an existing IAutoFree instance life time
-    // - you may write:
-    // !var
-    // !  var1, var2: TMyClass;
-    // !  auto: IAutoFree;
-    // !begin
-    // !  auto := TAutoFree.One(var1,TMyClass.Create);,
-    // !  .... do something
-    // !  auto.Another(var2,TMyClass.Create);
-    // !  ... use var1 and var2
-    // !end; // here var1 and var2 will be released since local auto is explicit
-    procedure Another(var localVariable; obj: TObject);
-    /// will finalize the associated TObject instances
-    // - note that releasing the TObject instances won't be protected, so
-    // any exception here may induce a memory leak: use only with "safe"
-    // simple objects, e.g. mORMot's TOrm
-    destructor Destroy; override;
-  end;
-
-
-  /// an interface used by TAutoLocker to protect multi-thread execution
-  IAutoLocker = interface
-    ['{97559643-6474-4AD3-AF72-B9BB84B4955D}']
-    /// enter the mutex
-    // - any call to Enter should be ended with a call to Leave, and
-    // protected by a try..finally block, as such:
-    // !begin
-    // !  ... // unsafe code
-    // !  fSharedAutoLocker.Enter;
-    // !  try
-    // !    ... // thread-safe code
-    // !  finally
-    // !    fSharedAutoLocker.Leave;
-    // !  end;
-    // !end;
-    procedure Enter;
-    /// leave the mutex
-    // - any call to Leave should be preceded with a call to Enter
-    procedure Leave;
-    /// will enter the mutex until the IUnknown reference is released
-    // - using an IUnknown interface to let the compiler auto-generate a
-    // try..finally block statement to release the lock for the code block
-    // - could be used as such under Delphi:
-    // !begin
-    // !  ... // unsafe code
-    // !  fSharedAutoLocker.ProtectMethod;
-    // !  ... // thread-safe code
-    // !end; // local hidden IUnknown will release the lock for the method
-    // - warning: under FPC, you should assign its result to a local variable -
-    // see bug http://bugs.freepascal.org/view.php?id=26602
-    // !var
-    // !  LockFPC: IUnknown;
-    // !begin
-    // !  ... // unsafe code
-    // !  LockFPC := fSharedAutoLocker.ProtectMethod;
-    // !  ... // thread-safe code
-    // !end; // LockFPC will release the lock for the method
-    // or
-    // !begin
-    // !  ... // unsafe code
-    // !  with fSharedAutoLocker.ProtectMethod do
-    // !  begin
-    // !    ... // thread-safe code
-    // !  end; // local hidden IUnknown will release the lock for the method
-    // !end;
-    function ProtectMethod: IUnknown;
-    /// gives an access to the internal low-level TSynLocker instance used
-    function Safe: PSynLocker;
-  end;
-
-  /// reference-counted block code critical section
-  // - you can use one instance of this to protect multi-threaded execution
-  // - the main class may initialize a IAutoLocker property in Create, then call
-  // IAutoLocker.ProtectMethod in any method to make its execution thread safe
-  // - this class inherits from TInterfacedPersistent so you could define
-  // one published property of a mormot.core.interface.pas TInjectableObject as
-  // IAutoLocker so that this class may be automatically injected
-  // - consider inherit from high-level TSynLocked or call low-level
-  // fSafe := NewSynLocker / fSafe^.DoneAndFreemem instead
-  // - use with caution, only on well defined local scope, via a "with" clause
-  // or a local variable, especially on FPC or Delphi 10.4+
-  TAutoLocker = class(TInterfacedPersistent, IAutoLocker)
-  protected
-    fSafe: TSynLocker;
-  public
-    /// initialize the mutex
-    constructor Create; override;
-    /// finalize the mutex
-    destructor Destroy; override;
-    /// will enter the mutex until the IUnknown reference is released
-    // - as expected by IAutoLocker interface
-    // - could be used as such under Delphi:
-    // !begin
-    // !  ... // unsafe code
-    // !  fSharedAutoLocker.ProtectMethod;
-    // !  ... // thread-safe code
-    // !end; // local hidden IUnknown will release the lock for the method
-    // - warning: under FPC, you should assign its result to a local variable -
-    // see bug http://bugs.freepascal.org/view.php?id=26602
-    // !var
-    // !  LockFPC: IUnknown;
-    // !begin
-    // !  ... // unsafe code
-    // !  LockFPC := fSharedAutoLocker.ProtectMethod;
-    // !  ... // thread-safe code
-    // !end; // LockFPC will release the lock for the method
-    // or
-    // !begin
-    // !  ... // unsafe code
-    // !  with fSharedAutoLocker.ProtectMethod do
-    // !  begin
-    // !    ... // thread-safe code
-    // !  end; // local hidden IUnknown will release the lock for the method
-    // !end;
-    function ProtectMethod: IUnknown;
-    /// enter the mutex
-    // - as expected by IAutoLocker interface
-    // - any call to Enter should be ended with a call to Leave, and
-    // protected by a try..finally block, as such:
-    // !begin
-    // !  ... // unsafe code
-    // !  fSharedAutoLocker.Enter;
-    // !  try
-    // !    ... // thread-safe code
-    // !  finally
-    // !    fSharedAutoLocker.Leave;
-    // !  end;
-    // !end;
-    procedure Enter;
-      {$ifdef HASINLINE}inline;{$endif}
-    /// leave the mutex
-    // - as expected by IAutoLocker interface
-    procedure Leave;
-      {$ifdef HASINLINE}inline;{$endif}
-    /// access to the locking methods of this instance
-    // - as expected by IAutoLocker interface
-    function Safe: PSynLocker;
-    /// direct access to the locking methods of this instance
-    // - sligtly faster than IAutoLocker.Safe function if you have a TAutoLocker
-    property Locker: TSynLocker
-      read fSafe;
-  end;
-
 
 
 { ************ TSynList TSynObjectList TSynLocker classes }
@@ -961,6 +723,11 @@ function BinaryLoadBase64(Source: PAnsiChar; Len: PtrInt; Data: pointer;
   Info: PRttiInfo; UriCompatible: boolean; Kinds: TRttiKinds;
   WithCrc: boolean = true; TryCustomVariants: PDocVariantOptions = nil): boolean;
 
+// internal methods called for (dynamic) arrays with Data<>nil and n>0
+procedure BinaryLoadSeveral(Data: PAnsiChar; var Source: TFastReader;
+  Info: PRttiInfo; n, datasize: PtrInt);
+procedure BinarySaveSeveral(Data: PAnsiChar; Dest: TBufferWriter;
+  Info: PRttiInfo; n, datasize: PtrInt);
 
 /// check equality of two records by content
 // - will handle packed records, with binaries (byte, word, integer...) and
@@ -1108,11 +875,11 @@ type
 const
   /// redirect to the proper SortDynArrayAnsiString/SortDynArrayAnsiStringI
   SORT_LSTRING: array[{caseins=}boolean] of TDynArraySortCompare = (
-    {$ifdef CPUINTEL}
+    {$ifdef ASMINTEL}
     SortDynArrayAnsiString,
     {$else}
     SortDynArrayRawByteString,
-    {$endif CPUINTEL}
+    {$endif ASMINTEL}
     SortDynArrayAnsiStringI);
 
 {$ifndef PUREMORMOT2}
@@ -1754,8 +1521,7 @@ type
     // - i.e. release any managed type memory, and fill Item with zeros
     procedure ItemClear(Item: pointer);
       {$ifdef HASINLINE}inline;{$endif}
-    /// will fill the element with some random content
-    // - this method is thread-safe using Rtti.DoLock/DoUnLock
+    /// will thread-safe fill the element with some random content
     procedure ItemRandom(Item: pointer);
     /// will copy one element content raw memory using RTTI
     procedure ItemCopy(Source, Dest: pointer);
@@ -1849,7 +1615,7 @@ type
     Safe: TRWLightLock;
     /// the wrapper to a dynamic array
     DynArray: TDynArray;
-    /// will store the length of the TDynArray
+    /// will store the length of the TDynArray - should not be a PtrInt
     Count: integer;
   end;
 
@@ -1905,7 +1671,8 @@ type
   // maintain a hash table over an existing dynamic array: several TDynArrayHasher
   // could be applied to a single TDynArray wrapper or could index one or several
   // fields of an ORM table via TRestStorageInMemoryUnique in mormot.orm.storage
-  // - TDynArrayHashed will use a TDynArrayHasher on its own storage
+  // - TDynArrayHashed will use a TDynArrayHasher on its own storage to implement
+  // a dense array with external hash indexes optimized for read-heavy workloads
   {$ifdef USERECORDWITHMETHODS}
   TDynArrayHasher = record
   {$else}
@@ -1956,6 +1723,7 @@ type
     function Find(Item: pointer): PtrInt; overload;
     /// search for a hashed element value inside the dynamic array with hashing
     function Find(Item: pointer; aHashCode: cardinal): PtrInt; overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// search for a hash position inside the dynamic array with hashing
     function Find(aHashCode: cardinal; aForAdd: boolean): PtrInt; overload;
     /// returns position in array, or next void index in HashTable[] as -(index+1)
@@ -1968,6 +1736,9 @@ type
     // - trigger hashing if Count reaches CountTrigger
     function FindBeforeAdd(Item: pointer; out wasAdded: boolean; aHashCode: cardinal): PtrInt;
     /// search and delete an element value, updating the internal hash table
+    // - this hash table is optimized for read-heavy workloads: deletion needs to
+    // actually move the data in the associated TDynArray and adjust hash indexes
+    // - caller should eventuall call TDynArray.Delete() with the returned result
     function FindBeforeDelete(Item: pointer): PtrInt;
     /// full computation of the internal hash table
     // - to be called after items have been manually updated - e.g. after Clear
@@ -2010,19 +1781,14 @@ type
 
 type
   /// used to access any dynamic arrray items using fast hash
-  // - by default, binary sort could be used for searching items for TDynArray:
-  // using a hash is faster on huge arrays for implementing a dictionary
-  // - in this current implementation, modification (update or delete) of an
-  // element is not handled yet: you should rehash all content - only
-  // TDynArrayHashed.FindHashedForAdding / FindHashedAndUpdate /
-  // FindHashedAndDelete will refresh the internal hash
-  // - this object extends the TDynArray type, since presence of Hashs[] dynamic
-  // array will increase code size if using TDynArrayHashed instead of TDynArray
-  // - in order to have the better performance, you should use an external Count
-  // variable, AND set the Capacity property to the expected maximum count (this
-  // will avoid most re-hashing for FindHashedForAdding+FindHashedAndUpdate)
-  // - consider using TSynDictionary from mormot.core.json for a thread-safe
-  // stand-alone storage of key/value pairs
+  // - this object extends the TDynArray type, adding the TDynArrayHasher logic
+  // - call FindHashedForAdding / FindHashedAndUpdate / FindHashedAndDelete to
+  // set the values, and maintain the hash table accurate - not plain Add/Delete
+  // - call FindHashed for fast O(1) lookup - not plain Find O(n) method
+  // - for best performance, use an external Count and set the Capacity property
+  // to the expected maximum count: this would avoid most rehashing at adding
+  // - consider TSynDictionary from mormot.core.json.pas, the modern TKeyValue<>
+  // from mormot.core.collections.pas, or the smaller TBinDictionary below
   {$ifdef UNDIRECTDYNARRAY}
   TDynArrayHashed = record
   // pseudo inheritance for most used methods
@@ -2417,148 +2183,7 @@ function AnyScanExists(P, V: pointer; Count, VSize: PtrInt): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
 
-{ ************ INI Files and In-memory Access }
-
-/// find a Name= Value in a [Section] of a INI RawUtf8 Content
-// - this function scans the Content memory buffer, and is
-// therefore very fast (no temporary TMemIniFile is created)
-// - if Section equals '', find the Name= value before any [Section]
-function FindIniEntry(const Content, Section, Name: RawUtf8;
-  const DefaultValue: RawUtf8 = ''): RawUtf8;
-
-/// find a Name= Value in a [Section] of a INI WinAnsi Content
-// - same as FindIniEntry(), but the value is converted from WinAnsi into UTF-8
-function FindWinAnsiIniEntry(const Content, Section, Name: RawUtf8): RawUtf8;
-
-/// find a Name= numeric Value in a [Section] of a INI RawUtf8 Content and
-// return it as an integer, or 0 if not found
-// - this function scans the Content memory buffer, and is
-// therefore very fast (no temporary TMemIniFile is created)
-// - if Section equals '', find the Name= value before any [Section]
-function FindIniEntryInteger(const Content, Section, Name: RawUtf8): integer;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// find a Name= Value in a [Section] of a .INI file
-// - if Section equals '', find the Name= value before any [Section]
-// - use internally fast FindIniEntry() function above
-function FindIniEntryFile(const FileName: TFileName;
-  const Section, Name: RawUtf8; const DefaultValue: RawUtf8 = ''): RawUtf8;
-
-/// update a Name= Value in a [Section] of a INI RawUtf8 Content
-// - this function scans and update the Content memory buffer, and is
-// therefore very fast (no temporary TMemIniFile is created)
-// - if Section equals '', update the Name= value before any [Section]
-procedure UpdateIniEntry(var Content: RawUtf8; const Section, Name, Value: RawUtf8);
-
-/// update a Name= Value in a [Section] of a .INI file
-// - if Section equals '', update the Name= value before any [Section]
-// - use internally fast UpdateIniEntry() function above
-procedure UpdateIniEntryFile(const FileName: TFileName; const Section, Name, Value: RawUtf8);
-
-/// find the position of the [SEARCH] section in source
-// - return true if [SEARCH] was found, and store pointer to the line after it in source
-function FindSectionFirstLine(var source: PUtf8Char; search: PAnsiChar): boolean;
-
-/// find the position of the [SEARCH] section in source
-// - return true if [SEARCH] was found, and store pointer to the line after it in source
-// - this version expects source^ to point to an Unicode char array
-function FindSectionFirstLineW(var source: PWideChar; search: PUtf8Char): boolean;
-
-/// retrieve the whole content of a section as a string
-// - SectionFirstLine may have been obtained by FindSectionFirstLine() function above
-function GetSectionContent(SectionFirstLine: PUtf8Char): RawUtf8; overload;
-
-/// retrieve the whole content of a section as a string
-// - use SectionFirstLine() then previous GetSectionContent()
-function GetSectionContent(const Content, SectionName: RawUtf8): RawUtf8; overload;
-
-/// delete a whole [Section]
-// - if EraseSectionHeader is TRUE (default), then the [Section] line is also
-// deleted together with its content lines
-// - return TRUE if something was changed in Content
-// - return FALSE if [Section] doesn't exist or is already void
-function DeleteSection(var Content: RawUtf8; const SectionName: RawUtf8;
-  EraseSectionHeader: boolean = true): boolean; overload;
-
-/// delete a whole [Section]
-// - if EraseSectionHeader is TRUE (default), then the [Section] line is also
-// deleted together with its content lines
-// - return TRUE if something was changed in Content
-// - return FALSE if [Section] doesn't exist or is already void
-// - SectionFirstLine may have been obtained by FindSectionFirstLine() function above
-function DeleteSection(SectionFirstLine: PUtf8Char; var Content: RawUtf8;
-  EraseSectionHeader: boolean = true): boolean; overload;
-
-/// replace a whole [Section] content by a new content
-// - create a new [Section] if none was existing
-procedure ReplaceSection(var Content: RawUtf8; const SectionName,
-  NewSectionContent: RawUtf8); overload;
-
-/// replace a whole [Section] content by a new content
-// - create a new [Section] if none was existing
-// - SectionFirstLine may have been obtained by FindSectionFirstLine() function above
-procedure ReplaceSection(SectionFirstLine: PUtf8Char;
-  var Content: RawUtf8; const NewSectionContent: RawUtf8); overload;
-
-/// return TRUE if Value of UpperName does exist in P, till end of current section
-// - expect UpperName as 'NAME='
-function ExistsIniName(P: PUtf8Char; UpperName: PAnsiChar): boolean;
-
-/// find the Value of UpperName in P, till end of current section
-// - expect UpperName as 'NAME='
-function FindIniNameValue(P: PUtf8Char; UpperName: PAnsiChar;
-  const DefaultValue: RawUtf8 = ''): RawUtf8;
-
-/// return TRUE if one of the Value of UpperName exists in P, till end of
-// current section
-// - expect UpperName e.g. as 'CONTENT-TYPE: ' (i.e. HEADER_CONTENT_TYPE_UPPER)
-// - expect UpperValues to be an array of upper values with left side matching,
-// and ending with nil - as expected by IdemPPChar(), i.e. with at least 2 chars
-function ExistsIniNameValue(P: PUtf8Char; const UpperName: RawUtf8;
-  UpperValues: PPAnsiChar): boolean;
-
-/// find the integer Value of UpperName in P, till end of current section
-// - expect UpperName as 'NAME='
-// - return 0 if no NAME= entry was found
-function FindIniNameValueInteger(P: PUtf8Char; const UpperName: RawUtf8): PtrInt;
-
-/// replace a value from a given set of name=value lines
-// - expect UpperName as 'UPPERNAME=', otherwise returns false
-// - if no UPPERNAME= entry was found, then Name+NewValue is added to Content
-// - a typical use may be:
-// ! UpdateNameValue(headers,HEADER_CONTENT_TYPE,HEADER_CONTENT_TYPE_UPPER,contenttype);
-function UpdateNameValue(var Content: RawUtf8;
-  const Name, UpperName, NewValue: RawUtf8): boolean;
-
-/// fill a class Instance properties from an .ini content
-// - the class property fields are searched in the supplied main SectionName
-// - nested objects and multi-line text values are searched in their own section,
-// named from their section level and property (e.g. [mainprop.nested1.nested2])
-// - returns true if at least one property has been identified
-function IniToObject(const Ini: RawUtf8; Instance: TObject;
-  const SectionName: RawUtf8 = 'Main'; DocVariantOptions: PDocVariantOptions = nil;
-  Level: integer = 0): boolean;
-
-/// serialize a class Instance properties into an .ini content
-// - the class property fields are written in the supplied main SectionName
-// - nested objects and multi-line text values are written in their own section,
-// named from their section level and property (e.g. [mainprop.nested1.nested2])
-function ObjectToIni(const Instance: TObject; const SectionName: RawUtf8 = 'Main';
-  Options: TTextWriterWriteObjectOptions =
-    [woEnumSetsAsText, woRawBlobAsBase64, woHumanReadableEnumSetAsComment];
-    Level: integer = 0): RawUtf8;
-
-/// returns TRUE if the supplied HTML Headers contains 'Content-Type: text/...',
-// 'Content-Type: application/json' or 'Content-Type: application/xml'
-function IsHttpHeadersContentTypeText(Headers: PUtf8Char): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// search if the WebSocketUpgrade() header is present
-// - consider checking the hsrConnectionUpgrade flag instead
-function IsHttpHeadersTextWebSocketUpgrade(headers: PUtf8Char): boolean;
-
-
-{ ************ RawUtf8 String Values Interning and TRawUtf8List }
+{ ************ RawUtf8 String Values Interning and TRawUtf8List/TBinDictionary }
 
 type
   /// store a TRawUtf8DynArray with its efficient hash table
@@ -2799,8 +2424,7 @@ type
     // - if fNoDuplicate was set and aText already exists (using the internal
     // hash table), it will return -1 unless aRaiseExceptionIfExisting is forced
     // - thread-safe method
-    function Add(const aText: RawUtf8;
-      aRaiseExceptionIfExisting: boolean = false): PtrInt;
+    function Add(const aText: RawUtf8; aRaiseExceptionIfExisting: boolean = false): PtrInt;
       {$ifdef HASINLINE}inline;{$endif}
     /// store a new RawUtf8 item, and its associated TObject
     // - without the fNoDuplicate flag, it will always add the supplied value
@@ -2835,7 +2459,7 @@ type
     // - thread-safe method, using an internal Hash Table to speedup IndexOf()
     function AddOrReplaceObject(const aText: RawUtf8; aObject: TObject): PtrInt;
       {$ifdef HASINLINE}inline;{$endif}
-    /// append a specified list to the current content
+    /// append another list content to the current content
     // - thread-safe method
     procedure AddRawUtf8List(List: TRawUtf8List);
     /// delete a stored RawUtf8 item, and its associated TObject
@@ -2871,7 +2495,7 @@ type
     // - if Name is not found, Value is not modified, and false is returned
     // - thread-safe method, but not using the internal Hash Table
     // - consider using TSynNameValue if you expect efficient name/value process
-    function UpdateValue(const Name: RawUtf8; var Value: RawUtf8;
+    function ExtractValue(const Name: RawUtf8; var Value: RawUtf8;
       ThenDelete: boolean): boolean;
     /// retrieve and delete the first RawUtf8 item in the list
     // - could be used as a FIFO, calling Add() as a "push" method
@@ -2908,7 +2532,7 @@ type
     // - this method is not thread-safe since the internal list may change
     // and the returned index may not be accurate any more
     // - by design, aText lookup can't use the internal Hash Table
-    function Contains(const aText: RawUtf8; aFirstIndex: integer = 0): PtrInt;
+    function Contains(const aText: RawUtf8; aFirstIndex: PtrInt = 0): PtrInt;
     /// retrieve the all lines, separated by the supplied delimiter
     // - this method is thread-safe
     function GetText(const Delimiter: RawUtf8 = EOL): RawUtf8;
@@ -2933,6 +2557,11 @@ type
     /// write all lines into a new UTF-8 file
     // - this method is thread-safe
     procedure SaveToFile(const FileName: TFileName; const Delimiter: RawUtf8 = EOL);
+    /// append the lines into a VCL/LCL TStrings instance - ignoring Objects[]
+    procedure AddToStrings(Dest: TStrings; ClearDest: boolean = false);
+    /// convert the lines into VCL/LCL TStrings - caller should Free the result
+    // - with delayed conversion from RawUtf8 to string, and associated Objects[]
+    function ToStrings: TVirtualStringList; overload;
     /// return the count of stored RawUtf8
     // - reading this property is not thread-safe, since size may change
     property Count: PtrInt
@@ -3037,6 +2666,67 @@ procedure CopyRawUtf8List(Dest, Source: TRawUtf8List);
 procedure QuickSortIndexedPUtf8Char(Values: PPUtf8CharArray; Count: integer;
   var SortedIndexes: TCardinalDynArray; CaseSensitive: boolean = false);
 
+type
+  /// store binary key/value pairs with an efficient O(1) hash table
+  // - works with pointers on text or binary, when TSynDictionary is overkill
+  // - each key/value is stored as a single efficient RawByteString instance
+  TBinDictionary = class(TSynPersistent)
+  protected
+    fValue: TRawByteStringDynArray;
+    fCount: integer;
+    fHash: TDynArrayHashed;
+  public
+    /// initialize the data structure
+    constructor Create; override;
+    /// add a key/value pair in the storage directly from memory buffers
+    // - returns -1 if the key was already existing, or if KeyLen > 255
+    function Add(Key, Value: pointer; KeyLen, ValueLen: PtrInt): PtrInt;
+    /// add or replace a binary key/value pair in the storage
+    function Update(Key, Value: pointer; KeyLen, ValueLen: PtrInt): PtrInt;
+    /// add or replace a text key/value pair in the storage
+    function UpdateText(const Key, Value: RawUtf8): PtrInt; overload;
+    /// add or replace a text key/value pair in the storage
+    function UpdateText(const Key, Value: array of const): TBinDictionary; overload;
+    /// add or replace a text key/value pair in the storage if Value <> ''
+    procedure UpdateTextNotVoid(const Key, Value: RawUtf8);
+      {$ifdef HASINLINE} inline; {$endif}
+    /// merge some additional key/value pairs
+    procedure UpdateFrom(Another: TBinDictionary);
+    /// case-sensitive search for a key index in Value[], using the internal hash
+    // - can optionally delete any matching item
+    function IndexOf(Key: pointer; KeyLen: PtrInt;
+      AndDelete: boolean = false): PtrInt; overload;
+    /// raw access to each key buffer as encoded in Value[] - not #0 terminated
+    // - warning: @ValueLen should be a PtrInt, not 32-bit integer
+    function Keys(Index: PtrInt; Len: PPtrInt = nil): pointer;
+    /// raw access to each value buffer as encoded in Value[] - #0 terminated
+    // - warning: @ValueLen should be a PtrInt, not 32-bit integer
+    function Values(Index: PtrInt; Len: PPtrInt = nil): pointer;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// case-sensitive search and return a value, using the internal hash
+    // - returns nil or the found Value (#0 terminated) - with optional ValueLen
+    // - warning: @ValueLen should be a PtrInt, not 32-bit integer
+    function Find(Key: pointer; KeyLen: PtrInt; ValueLen: PPtrInt = nil): pointer; overload;
+    /// case-sensitive search and return a value, using the internal hash
+    // - overload to Find() using a ShortString as convenient constant Key
+    function Find(const Key: ShortString; ValueLen: PPtrInt = nil): pointer; overload;
+    /// erase the whole storage
+    procedure Clear;
+    /// write all key = value pairs as key-ordered human-readable text
+    function AsText(const Sep: RawUtf8 = ' = '; const Feed: RawUtf8 = #10): RawUtf8;
+    /// raw storage, encoded as B[keysize]+key+value so value is #0 terminated
+    property Value: TRawByteStringDynArray
+      read fValue;
+    /// maintain the efficient hash table of the raw storage Value[]/Count
+    property Hash: TDynArrayHashed
+      read fHash;
+    /// number of key/value pairs in Value[]
+    property Count: integer
+      read fCount;
+  end;
+  /// callback used e.g. to registry GlobalInfoRegister() delayed entries
+  TOnBinDictionaryExecute = procedure(Sender: TBinDictionary);
+
 var
   /// low-level JSON unserialization function
   // - defined in this unit to avoid circular reference with mormot.core.json,
@@ -3048,6 +2738,21 @@ var
     EndOfObject: PUtf8Char; Rtti: TRttiCustom;
     CustomVariantOptions: PDocVariantOptions; Tolerant: boolean;
     Interning: TRawUtf8InterningAbstract);
+
+/// search for an entry in GlobalInfoRegister() resolvers e.g. 'os:arch'
+// - this unit registers os: hw: exe: env: user: bios: main namespaces
+// - mormot.net.http.pas/mormot.net.ldap.pas register net: and ldap: namespaces
+function GlobalInfoFind(Key: pointer; KeyLen: PtrInt; var ValueLen: PtrInt): pointer; overload;
+
+/// search for an entry in GlobalInfoRegister() resolvers e.g. 'os:arch'
+function GlobalInfoFind(const Key: RawUtf8): RawUtf8; overload;
+
+/// can be used for delayed resolution of e.g. 'net:' or 'ldap:' namespaces
+procedure GlobalInfoRegister(Prefix: PUtf8Char; OnAdd: TOnBinDictionaryExecute);
+
+/// trigger all pending GlobalInfoRegister() delayed resolution
+// - may take some time, e.g. for 'ldap:' entries from mormot.net.ldap.pas
+function GlobalInfoRegisterAll: TBinDictionary;
 
 
 { ************ Abstract Radix Tree Classes }
@@ -3228,116 +2933,6 @@ end;
 function TSynInterfacedObject.VirtualQueryInterface(IID: PGuid; out Obj): TIntQry;
 begin
   result := E_NOINTERFACE;
-end;
-
-
-{ ************ IAutoFree and IAutoLocker Reference-Counted Process }
-
-{ TAutoFree }
-
-constructor TAutoFree.Create(var localVariable; obj: TObject);
-begin
-  fObject := obj;
-  TObject(localVariable) := obj;
-end;
-
-constructor TAutoFree.Create(const varObjPairs: array of pointer);
-var
-  n, i: PtrInt;
-begin
-  n := length(varObjPairs);
-  if (n = 0) or
-     (n and 1 = 1) then
-    exit;
-  n := n shr 1;
-  if n = 0 then
-    exit;
-  if n = 1 then
-  begin
-    fObject := varObjPairs[1];
-    PPointer(varObjPairs[0])^ := fObject;
-    exit;
-  end;
-  SetLength(fObjectList, n);
-  for i := 0 to n - 1 do
-  begin
-    fObjectList[i] := varObjPairs[i * 2 + 1];
-    PPointer(varObjPairs[i * 2])^ := fObjectList[i];
-  end;
-end;
-
-procedure TAutoFree.ForMethod;
-begin
-  // do-nothing method to circumvent the Delphi 10.4 IAutoFree early release
-end;
-
-class function TAutoFree.One(var localVariable; obj: TObject): IAutoFree;
-begin
-  result := Create(localVariable,obj);
-  {$ifdef ISDELPHI104}
-  result.ForMethod;
-  {$endif ISDELPHI104}
-end;
-
-class function TAutoFree.Several(const varObjPairs: array of pointer): IAutoFree;
-begin
-  result := Create(varObjPairs);
-  // inlining is not possible on Delphi -> Delphi 10.4 caller should run ForMethod :(
-end;
-
-procedure TAutoFree.Another(var localVariable; obj: TObject);
-var
-  n: PtrInt;
-begin
-  n := length(fObjectList);
-  SetLength(fObjectList, n + 1);
-  fObjectList[n] := obj;
-  TObject(localVariable) := obj;
-end;
-
-destructor TAutoFree.Destroy;
-var
-  i: PtrInt;
-begin
-  if fObjectList <> nil then
-    for i := length(fObjectList) - 1 downto 0 do // release FILO
-      fObjectList[i].Free;
-  fObject.Free;
-  inherited;
-end;
-
-
-{ TAutoLocker }
-
-constructor TAutoLocker.Create;
-begin
-  fSafe.Init;
-end;
-
-destructor TAutoLocker.Destroy;
-begin
-  fSafe.Done;
-  inherited Destroy;
-end;
-
-function TAutoLocker.ProtectMethod: IUnknown;
-begin
-  result := TAutoLock.Create(@fSafe);
-end;
-
-procedure TAutoLocker.Enter;
-begin
-  fSafe.Lock;
-end;
-
-procedure TAutoLocker.Leave;
-begin
-  fSafe.UnLock;
-end;
-
-function TAutoLocker.Safe: PSynLocker;
-begin
-  result := @fSafe;
 end;
 
 
@@ -3792,738 +3387,7 @@ begin
 end;
 
 
-
-
-{ ************ INI Files and In-memory Access }
-
-function IdemPChar2(table: PNormTable; p: PUtf8Char; up: PAnsiChar): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
-var
-  u: AnsiChar;
-begin
-  // here p and up are expected to be <> nil
-  result := false;
-  dec(PtrUInt(p), PtrUInt(up));
-  repeat
-    u := up^;
-    if u = #0 then
-      break;
-    if table^[up[PtrUInt(p)]] <> u then
-      exit;
-    inc(up);
-  until false;
-  result := true;
-end;
-
-function FindSectionFirstLine(var source: PUtf8Char; search: PAnsiChar): boolean;
-var
-  table: PNormTable;
-  charset: PTextCharSet;
-begin
-  result := false;
-  if (source = nil) or
-     (search = nil) then
-    exit;
-  table := @NormToUpperAnsi7;
-  charset := @TEXT_CHARS;
-  repeat
-    if source^ = '[' then
-    begin
-      inc(source);
-      result := IdemPChar2(table, source, search);
-    end;
-    while tcNot01013 in charset[source^] do
-      inc(source);
-    while tc1013 in charset[source^] do
-      inc(source);
-    if result then
-      exit; // found
-  until source^ = #0;
-  source := nil;
-end;
-
-function FindSectionFirstLineW(var source: PWideChar; search: PUtf8Char): boolean;
-begin
-  result := false;
-  if source = nil then
-    exit;
-  repeat
-    if source^ = '[' then
-    begin
-      inc(source);
-      result := IdemPCharW(source, search);
-    end;
-    while not (cardinal(source^) in [0, 10, 13]) do
-      inc(source);
-    while cardinal(source^) in [10, 13] do
-      inc(source);
-    if result then
-      exit; // found
-  until source^ = #0;
-  source := nil;
-end;
-
-function FindIniNameValue(P: PUtf8Char; UpperName: PAnsiChar;
-  const DefaultValue: RawUtf8): RawUtf8;
-var
-  u, PBeg: PUtf8Char;
-  by4: cardinal;
-  {$ifdef CPUX86NOTPIC}
-  table: TNormTable absolute NormToUpperAnsi7;
-  {$else}
-  table: PNormTable;
-  {$endif CPUX86NOTPIC}
-begin
-  // expect UpperName as 'NAME='
-  if (P <> nil) and
-     (P^ <> '[') and
-     (UpperName <> nil) then
-  begin
-    {$ifndef CPUX86NOTPIC}
-    table := @NormToUpperAnsi7;
-    {$endif CPUX86NOTPIC}
-    PBeg := nil;
-    u := P;
-    repeat
-      while u^ = ' ' do
-        inc(u); // trim left ' '
-      if u^ = #0 then
-        break;
-      if table[u^] = UpperName[0] then
-        PBeg := u;
-      repeat
-        by4 := PCardinal(u)^;
-        if ToByte(by4) > 13 then
-          if ToByte(by4 shr 8) > 13 then
-            if ToByte(by4 shr 16) > 13 then
-              if ToByte(by4 shr 24) > 13 then
-              begin
-                inc(u, 4);
-                continue;
-              end
-              else
-                inc(u, 3)
-            else
-              inc(u, 2)
-          else
-            inc(u);
-        if u^ in [#0, #10, #13] then
-          break;
-        inc(u);
-      until false;
-      if PBeg <> nil then
-      begin
-        inc(PBeg);
-        P := u;
-        u := pointer(UpperName + 1);
-        repeat
-          if u^ <> #0 then
-            if table[PBeg^] <> u^ then
-              break
-            else
-            begin
-              inc(u);
-              inc(PBeg);
-            end
-          else
-          begin
-            FastSetString(result, PBeg, P - PBeg);
-            exit;
-          end;
-        until false;
-        PBeg := nil;
-        u := P;
-      end;
-      if u^ = #13 then
-        inc(u);
-      if u^ = #10 then
-        inc(u);
-    until u^ in [#0, '['];
-  end;
-  result := DefaultValue;
-end;
-
-function ExistsIniName(P: PUtf8Char; UpperName: PAnsiChar): boolean;
-var
-  table: PNormTable;
-begin
-  result := false;
-  if (P <> nil) and
-     (P^ <> '[') then
-  begin
-    table := @NormToUpperAnsi7;
-    repeat
-      if P^ = ' ' then
-      begin
-        repeat
-          inc(P)
-        until P^ <> ' '; // trim left ' '
-        if P^ = #0 then
-          break;
-      end;
-      if IdemPChar2(table, P, UpperName) then
-      begin
-        result := true;
-        exit;
-      end;
-      repeat
-        if P[0] > #13 then
-          if P[1] > #13 then
-            if P[2] > #13 then
-              if P[3] > #13 then
-              begin
-                inc(P, 4);
-                continue;
-              end
-              else
-                inc(P, 3)
-            else
-              inc(P, 2)
-          else
-            inc(P);
-        case P^ of
-          #0:
-            exit;
-          #10:
-            begin
-              inc(P);
-              break;
-            end;
-          #13:
-            begin
-              if P[1] = #10 then
-                inc(P, 2)
-              else
-                inc(P);
-              break;
-            end;
-        else
-          inc(P);
-        end;
-      until false;
-    until P^ = '[';
-  end;
-end;
-
-function ExistsIniNameValue(P: PUtf8Char; const UpperName: RawUtf8;
-  UpperValues: PPAnsiChar): boolean;
-var
-  table: PNormTable;
-begin
-  if (UpperValues <> nil) and
-     (UpperValues^ <> nil) and
-     (UpperName <> '') then
-  begin
-    result := true;
-    table := @NormToUpperAnsi7;
-    while (P <> nil) and
-          (P^ <> '[') do
-    begin
-      if P^ = ' ' then
-        repeat
-          inc(P)
-        until P^ <> ' '; // trim left ' '
-      if IdemPChar2(table, P, pointer(UpperName)) then
-      begin
-        inc(P, length(UpperName));
-        if IdemPPChar(P, UpperValues) >= 0 then
-          exit; // found one value
-        break;
-      end;
-      P := GotoNextLine(P);
-    end;
-  end;
-  result := false;
-end;
-
-function GetSectionContent(SectionFirstLine: PUtf8Char): RawUtf8;
-var
-  PBeg: PUtf8Char;
-begin
-  PBeg := SectionFirstLine;
-  while (SectionFirstLine <> nil) and
-        (SectionFirstLine^ <> '[') do
-    SectionFirstLine := GotoNextLine(SectionFirstLine);
-  if SectionFirstLine = nil then
-    result := PBeg
-  else
-    FastSetString(result, PBeg, SectionFirstLine - PBeg);
-end;
-
-function GetSectionContent(const Content, SectionName: RawUtf8): RawUtf8;
-var
-  P: PUtf8Char;
-  UpperSection: TByteToAnsiChar;
-begin
-  P := pointer(Content);
-  PWord(UpperCopy255(UpperSection{%H-}, SectionName))^ := ord(']');
-  if FindSectionFirstLine(P, UpperSection) then
-    result := GetSectionContent(P)
-  else
-    result := '';
-end;
-
-function DeleteSection(var Content: RawUtf8; const SectionName: RawUtf8;
-  EraseSectionHeader: boolean): boolean;
-var
-  P: PUtf8Char;
-  UpperSection: TByteToAnsiChar;
-begin
-  result := false; // no modification
-  P := pointer(Content);
-  PWord(UpperCopy255(UpperSection{%H-}, SectionName))^ := ord(']');
-  if FindSectionFirstLine(P, UpperSection) then
-    result := DeleteSection(P, Content, EraseSectionHeader);
-end;
-
-function DeleteSection(SectionFirstLine: PUtf8Char; var Content: RawUtf8;
-  EraseSectionHeader: boolean): boolean;
-var
-  PEnd: PUtf8Char;
-  IndexBegin: PtrInt;
-begin
-  result := false;
-  PEnd := SectionFirstLine;
-  if EraseSectionHeader then // erase [Section] header line
-    while (PtrUInt(SectionFirstLine) > PtrUInt(Content)) and
-          (SectionFirstLine^ <> '[') do
-      dec(SectionFirstLine);
-  while (PEnd <> nil) and
-        (PEnd^ <> '[') do
-    PEnd := GotoNextLine(PEnd);
-  IndexBegin := SectionFirstLine - pointer(Content);
-  if IndexBegin = 0 then
-    exit; // no modification
-  if PEnd = nil then
-    SetLength(Content, IndexBegin)
-  else
-    delete(Content, IndexBegin + 1, PEnd - SectionFirstLine);
-  result := true; // Content was modified
-end;
-
-procedure ReplaceSection(SectionFirstLine: PUtf8Char; var Content: RawUtf8;
-  const NewSectionContent: RawUtf8);
-var
-  PEnd: PUtf8Char;
-  IndexBegin: PtrInt;
-begin
-  if SectionFirstLine = nil then
-    exit;
-  // delete existing [Section] content
-  PEnd := SectionFirstLine;
-  while (PEnd <> nil) and
-        (PEnd^ <> '[') do
-    PEnd := GotoNextLine(PEnd);
-  IndexBegin := SectionFirstLine - pointer(Content);
-  if PEnd = nil then
-    SetLength(Content, IndexBegin)
-  else
-    delete(Content, IndexBegin + 1, PEnd - SectionFirstLine);
-  // insert section content
-  insert(NewSectionContent, Content, IndexBegin + 1);
-end;
-
-procedure ReplaceSection(var Content: RawUtf8; const SectionName, NewSectionContent: RawUtf8);
-var
-  UpperSection: TByteToAnsiChar;
-  P: PUtf8Char;
-begin
-  P := pointer(Content);
-  PWord(UpperCopy255(UpperSection{%H-}, SectionName))^ := ord(']');
-  if FindSectionFirstLine(P, UpperSection) then
-    ReplaceSection(P, Content, NewSectionContent)
-  else
-    Append(Content, ['[', SectionName, ']'#13#10, NewSectionContent]);
-end;
-
-function FindIniNameValueInteger(P: PUtf8Char; const UpperName: RawUtf8): PtrInt;
-var
-  table: PNormTable;
-begin
-  result := 0;
-  if (P = nil) or
-     (UpperName = '') then
-    exit;
-  table := @NormToUpperAnsi7;
-  repeat
-    if IdemPChar2(table, P, pointer(UpperName)) then
-      break;
-    P := GotoNextLine(P);
-    if P = nil then
-      exit;
-  until false;
-  result := GetInteger(P + length(UpperName));
-end;
-
-function FindIniEntry(const Content, Section, Name, DefaultValue: RawUtf8): RawUtf8;
-var
-  P: PUtf8Char;
-  UpperSection, UpperName: TByteToAnsiChar;
-begin
-  result := DefaultValue;
-  P := pointer(Content);
-  if P = nil then
-    exit;
-  // fast UpperName := UpperCase(Name)+'='
-  PWord(UpperCopy255(UpperName{%H-}, Name))^ := ord('=');
-  if Section = '' then
-    // find the Name= entry before any [Section]
-    result := FindIniNameValue(P, UpperName, DefaultValue)
-  else
-  begin
-    // find the Name= entry in the specified [Section]
-    PWord(UpperCopy255(UpperSection{%H-}, Section))^ := ord(']');
-    if FindSectionFirstLine(P, UpperSection) then
-      result := FindIniNameValue(P, UpperName, DefaultValue);
-  end;
-end;
-
-function FindWinAnsiIniEntry(const Content, Section, Name: RawUtf8): RawUtf8;
-begin
-  result := WinAnsiToUtf8(WinAnsiString(FindIniEntry(Content, Section, Name)));
-end;
-
-function FindIniEntryInteger(const Content, Section, Name: RawUtf8): integer;
-begin
-  result := GetInteger(pointer(FindIniEntry(Content, Section, Name)));
-end;
-
-function FindIniEntryFile(const FileName: TFileName;
-  const Section, Name, DefaultValue: RawUtf8): RawUtf8;
-var
-  Content: RawUtf8;
-begin
-  Content := StringFromFile(FileName);
-  if Content = '' then
-    result := DefaultValue
-  else
-    result := FindIniEntry(Content, Section, Name, DefaultValue);
-end;
-
-function UpdateNameValueInternal(var Content: RawUtf8;
-  const NewValue, NewValueCRLF: RawUtf8;
-  var P: PUtf8Char; UpperName: PAnsiChar; UpperNameLength: integer): boolean;
-var
-  next: PUtf8Char;
-  i: PtrInt;
-begin
-  if UpperName <> nil then
-    while (P <> nil) and
-          (P^ <> '[') do
-    begin
-      while P^ = ' ' do
-        inc(P);   // trim left ' '
-      next := GotoNextLine(P);
-      if IdemPChar2(@NormToUpperAnsi7, P, UpperName) then
-      begin // update Name=Value entry
-        result := true;
-        inc(P, UpperNameLength);
-        i := (P - pointer(Content)) + 1;
-        if (i = length(NewValue)) and
-           mormot.core.base.CompareMem(P, pointer(NewValue), i) then
-          exit; // new Value is identical to the old one -> no change
-        if next = nil then // avoid last line (P-PBeg) calculation error
-          SetLength(Content, i - 1)
-        else
-          delete(Content, i, next - P); // delete old Value
-        insert(NewValueCRLF, Content, i); // set new value
-        exit;
-      end;
-      P := next;
-    end;
-  result := false;
-end;
-
-function UpdateNameValue(var Content: RawUtf8;
-  const Name, UpperName, NewValue: RawUtf8): boolean;
-var
-  P: PUtf8Char;
-begin
-  result := false;
-  if UpperName = '' then
-    exit;
-  P := pointer(Content);
-  result := UpdateNameValueInternal(Content, NewValue, NewValue + #13#10,
-    P, pointer(UpperName), length(UpperName));
-  if result or
-     (Name = '') then
-    exit;
-  AppendLine(Content, [Name, NewValue]);
-  result := true;
-end;
-
-procedure UpdateIniEntry(var Content: RawUtf8; const Section, Name, Value: RawUtf8);
-var
-  P: PUtf8Char;
-  SectionFound: boolean;
-  i, len: PtrInt;
-  V: RawUtf8;
-  up: TByteToAnsiChar;
-begin
-  Join([Value, EOL], V);
-  P := pointer(Content);
-  // 1. find Section, and try update within it
-  if Section = '' then
-    SectionFound := true // find the Name= entry before any [Section]
-  else
-  begin
-    PWord(UpperCopy255(up{%H-}, Section))^ := ord(']');
-    SectionFound := FindSectionFirstLine(P, up);
-  end;
-  len := length(Name);
-  PWord(UpperCopy255Buf(up{%H-}, pointer(Name), len))^ := ord('=');
-  inc(len);
-  if SectionFound and
-     UpdateNameValueInternal(Content, Value, V, P, @up, len) then
-      exit;
-  // 2. section or Name= entry not found: add Name=Value
-  V := Join([Name, '=', V]);
-  if not SectionFound then
-    // create not existing [Section]
-    V := Join(['[', Section, (']' + EOL), V]);
-  // insert Name=Value at P^ (end of file or end of [Section])
-  if P = nil then
-    // insert at end of file
-    Append(Content, V)
-  else
-  begin
-    // insert at end of [Section]
-    i := (P - pointer(Content)) + 1;
-    insert(V, Content, i);
-  end;
-end;
-
-procedure UpdateIniEntryFile(const FileName: TFileName; const Section, Name, Value: RawUtf8);
-var
-  Content: RawUtf8;
-begin
-  Content := StringFromFile(FileName);
-  UpdateIniEntry(Content, Section, Name, Value);
-  FileFromString(Content, FileName);
-end;
-
-function IsHttpHeadersContentTypeText(Headers: PUtf8Char): boolean;
-var
-  ct: PUtf8Char;
-  len: PtrInt;
-begin
-  ct := FindNameValuePointer(Headers, HEADER_CONTENT_TYPE_UPPER, len);
-  result := (ct <> nil) and
-            IsContentTypeCompressible(ct, len, {onlytext=}true);
-end;
-
-const
-  WS_UPGRADE: array[0..2] of PAnsiChar = (
-    'UPGRADE',
-    'KEEP-ALIVE, UPGRADE',
-    nil);
-
-function IsHttpHeadersTextWebSocketUpgrade(headers: PUtf8Char): boolean;
-begin
-  result := ExistsIniNameValue(pointer(headers), 'CONNECTION: ', @WS_UPGRADE);
-end;
-
-function IniToObject(const Ini: RawUtf8; Instance: TObject;
-  const SectionName: RawUtf8; DocVariantOptions: PDocVariantOptions;
-  Level: integer): boolean;
-var
-  r: TRttiCustom;
-  i: integer;
-  p: PRttiCustomProp;
-  section, nested, json: PUtf8Char;
-  name: PAnsiChar;
-  n, v: RawUtf8;
-  up: TByteToAnsiChar;
-begin
-  result := false; // true when at least one property has been read
-  if (Ini = '') or
-     (Instance = nil) then
-    exit;
-  PWord(UpperCopy255(up{%H-}, SectionName))^ := ord(']');
-  section := pointer(Ini);
-  if not FindSectionFirstLine(section, @up) then
-    exit; // section not found
-  r := Rtti.RegisterClass(Instance);
-  p := pointer(r.Props.List);
-  for i := 1 to r.Props.Count do
-  begin
-    if p^.Prop <> nil then
-      if p^.Value.Kind = rkClass then
-      begin
-        // recursive load from another per-property section
-        if Level = 0 then
-          n := p^.Name
-        else
-          Join([SectionName, '.', p^.Name], n);
-        if IniToObject(Ini, p^.Prop^.GetObjProp(Instance), n,
-              DocVariantOptions, Level + 1) then
-          result := true;
-      end
-      else
-      begin
-        PWord(UpperCopy255(up{%H-}, p^.Name))^ := ord('=');
-        v := FindIniNameValue(section, @up, #0);
-        if p^.Value.Parser in ptMultiLineStringTypes then
-        begin
-          if v = #0 then // may be stored in a multi-line section body
-          begin
-            name := @up;
-            if Level <> 0 then
-            begin
-              name := UpperCopy255(name, SectionName);
-              name^ := '.';
-              inc(name);
-            end;
-            PWord(UpperCopy255(name, p^.Name))^ := ord(']');
-            nested := pointer(Ini);
-            if FindSectionFirstLine(nested, @up) then
-            begin
-              // multi-line text value has been stored in its own section
-              v := GetSectionContent(nested);
-              if p^.Prop^.SetValueText(Instance, v) then
-                result := true;
-            end;
-          end
-          else if p^.Prop^.SetValueText(Instance, v) then // single line text
-            result := true;
-        end
-        else if v <> #0 then
-          if (p^.OffsetSet <= 0) or // has a setter?
-             (rcfBoolean in p^.Value.Cache.Flags) or // simple value?
-             (p^.Value.Kind in (rkIntegerPropTypes + [rkEnumeration, rkFloat])) then
-          begin
-            if p^.Prop^.SetValueText(Instance, v) then // RTTI conversion
-              result := true;
-          end
-          else // e.g. rkVariant, rkSet, rkDynArray
-          begin
-            json := pointer(v); // convert complex values from JSON
-            GetDataFromJson(@PByteArray(Instance)[p^.OffsetSet], json,
-              nil, p^.Value, DocVariantOptions, true, nil);
-            if json <> nil then
-              result := true;
-          end;
-      end;
-    inc(p);
-  end;
-end;
-
-function TrimAndIsMultiLine(var U: RawUtf8): boolean;
-var
-  L: PtrInt;
-  P: PUtf8Char absolute U;
-begin
-  result := false;
-  L := length(U);
-  if L = 0 then
-    exit;
-  while P[L - 1] in [#13, #10] do
-  begin
-    dec(L);
-    if L = 0 then
-    begin
-      U := ''; // no meaningful text
-      exit;
-    end;
-  end;
-  if L <> length(U) then
-    SetLength(U, L); // trim right
-  if BufferLineLength(P, P + L) = L then // may use x86_64 SSE2 asm
-    exit; // no line feed
-  result := true; // there are line feeds within this text
-  U := TrimChar(U, [#13]); // normalize #13#10 into #10 as ObjectToIni()
-end;
-
-function ObjectToIni(const Instance: TObject; const SectionName: RawUtf8;
-  Options: TTextWriterWriteObjectOptions; Level: integer): RawUtf8;
-var
-  W: TTextWriter;
-  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
-  nested: TRawUtf8DynArray;
-  i, nestedcount: integer;
-  r: TRttiCustom;
-  p: PRttiCustomProp;
-  n, s: RawUtf8;
-begin
-  result := '';
-  if Instance = nil then
-    exit;
-  nestedcount := 0;
-  W := DefaultJsonWriter.CreateOwnedStream(tmp);
-  try
-    W.CustomOptions := [twoTrimLeftEnumSets];
-    W.Add('[%]'#10, [SectionName]);
-    r := Rtti.RegisterClass(Instance);
-    p := pointer(r.Props.List);
-    for i := 1 to r.Props.Count do
-    begin
-      if p^.Prop <> nil then
-        if p^.Value.Kind = rkClass then
-        begin
-          if Level = 0 then
-            n := p^.Name
-          else
-            Join([SectionName, '.', p^.Name], n);
-          s := ObjectToIni(p^.Prop^.GetObjProp(Instance), n, Options, Level + 1);
-          if s <> '' then
-            AddRawUtf8(nested, nestedcount, s);
-        end
-        else if p^.Value.Kind = rkEnumeration then
-        begin
-          if woHumanReadableEnumSetAsComment in Options then
-          begin
-            p^.Value.Cache.EnumInfo^.GetEnumNameAll(
-              s, '; values=', {quoted=}false, #10, {uncamelcase=}true);
-            W.AddString(s);
-          end;
-          // AddValueJson() would have written "quotes"
-          W.AddString(p^.Name);
-          W.Add('=');
-          W.AddTrimLeftLowerCase(p^.Value.Cache.EnumInfo^.GetEnumNameOrd(
-            p^.Prop^.GetOrdProp(Instance)));
-          W.Add(#10);
-        end
-        else if p^.Value.Parser in ptMultiLineStringTypes then
-        begin
-          p^.Prop^.GetAsString(Instance, s);
-          if TrimAndIsMultiLine(s) then
-          begin
-            // store multi-line text values in their own section
-            if Level = 0 then
-              FormatUtf8('[%]'#10'%'#10#10, [p^.Name, s], n)
-            else
-              FormatUtf8('[%.%]'#10'%'#10#10, [SectionName, p^.Name, s], n);
-            AddRawUtf8(nested, nestedcount, n);
-          end
-          else
-          begin
-            W.AddString(p^.Name);
-            W.Add('=');
-            W.AddString(s); // single line text
-            W.Add(#10);
-          end;
-        end
-        else
-        begin
-          W.AddString(p^.Name);
-          W.Add('=');
-          p^.AddValueJson(W, Instance, // simple and complex types
-            Options - [woHumanReadableEnumSetAsComment], twOnSameLine);
-          W.Add(#10);
-        end;
-      inc(p);
-    end;
-    W.Add(#10);
-    for i := 0 to nestedcount - 1 do
-      W.AddString(nested[i]);
-    W.SetText(result);
-  finally
-    W.Free;
-  end;
-end;
-
-
-{ ************ RawUtf8 String Values Interning and TRawUtf8List }
+{ ************ RawUtf8 String Values Interning and TRawUtf8List/TBinDictionary }
 
 var // filled at startup with a 32-bit random value to avoid hash flooding
   HashSeed: cardinal; // defined locally in this unit to avoid symbol export
@@ -4547,12 +3411,12 @@ end;
 
 function HashInternI(P: PUtf8Char; L: PtrUInt): cardinal;
 var
-  tmp: TByteToAnsiChar; // avoid slow heap allocation
+  up: TByteToAnsiChar; // avoid slow heap allocation
 begin
   if (P <> nil) and
      (L <> 0) then
-    result := InterningHasher(HashSeed, tmp{%H-},
-      UpperCopy255Buf(tmp{%H-}, P, L) - {%H-}tmp)
+    result := InterningHasher(HashSeed, @up,
+      UpperCopy255Buf(@up, P, L) - PAnsiChar(@up))
   else
     result := 0;
 end;
@@ -4562,7 +3426,6 @@ const
     HashIntern, HashInternI);
   COMP_PUTF8CHAR: array[{CaseInsensitive:}boolean] of TDynArraySortCompare = (
     SortDynArrayPUtf8Char, SortDynArrayPUtf8CharI);
-
 
 { TRawUtf8Hashed }
 
@@ -4726,11 +3589,7 @@ begin
     begin
       if PStrCnt(PAnsiChar(s^) - _STRCNT)^ <= aMaxRefCount then // also -1
       begin
-        {$ifdef FPC}
         FastAssignNew(PRawUtf8(s)^);
-        {$else}
-        PRawUtf8(s)^ := '';
-        {$endif FPC}
         inc(result);
       end
       else
@@ -4808,7 +3667,7 @@ var
 begin
   result := false; // not added
   if aText = '' then
-    aResult := ''
+    FastAssignNew(aResult)
   else if self = nil then
     aResult := aText
   else
@@ -4908,6 +3767,395 @@ begin
     UniqueText(PRawUtf8(vd.VPointer)^);
 end;
 
+{ TBinDictionary }
+
+function Hash255(Item: PAnsiChar; Hasher: THasher): cardinal;
+begin
+  Item := PPointer(Item)^;
+  result := Hasher(HashSeed, Item + 1, ord(Item^)); // format is B[keysize]+key
+end;
+
+function Sort255(const A, B): integer;
+var
+  pa, pb: PByteArray;
+begin
+  pa := pointer(A);
+  pb := pointer(B);
+  result := pa[0] - pb[0]; // format is B[keysize]+key
+  if result = 0 then       // same key length: compare binary
+    result := MemCmp(@pa[1], @pb[1], pa[0]);
+end;
+
+constructor TBinDictionary.Create;
+begin
+  fHash.Init(TypeInfo(TRawByteStringDynArray), fValue, @Hash255, @Sort255, nil, @fCount);
+end;
+
+function TBinDictionary.Keys(Index: PtrInt; Len: PPtrInt): pointer;
+begin
+  result := nil;
+  if PtrUInt(Index) >= PtrUInt(fCount) then
+    exit;
+  result := pointer(fValue[Index]);
+  if Len <> nil then
+    Len^ := PByte(result)^;
+  inc(PByte(result));
+end;
+
+function TBinDictionary.Values(Index: PtrInt; Len: PPtrInt): pointer;
+var
+  keylen: PtrInt;
+begin
+  result := nil;
+  if (self = nil) or
+     (PtrUInt(Index) >= PtrUInt(fCount)) then
+    exit;
+  result := pointer(fValue[Index]); // never nil
+  keylen := PByte(result)^ + 1;
+  if Len <> nil then
+    Len^ := PtrInt(PStrLen(PAnsiChar(result) - _STRLEN)^) - keylen;
+  inc(PByte(result), keylen);
+end;
+
+function PrepareKeyValue(Key, Value: pointer; KeyLen, ValueLen: PtrInt): PByteArray;
+begin
+  result := nil;
+  if KeyLen > 255 then // Add(nil, nil, 0, 0) is a valid request
+    exit;
+  result := FastNewString(KeyLen + ValueLen + 1); // B[keysize]+key+value
+  result[0] := KeyLen;
+  MoveFast(Key^, result[1], KeyLen);
+  MoveFast(Value^, result[KeyLen + 1], ValueLen);
+end;
+
+function TBinDictionary.Add(Key, Value: pointer; KeyLen, ValueLen: PtrInt): PtrInt;
+var
+  tmp: pointer; // transient RawByteString
+  added: boolean;
+begin
+  tmp := PrepareKeyValue(Key, Value, KeyLen, ValueLen);
+  if tmp <> nil then
+  begin
+    result := fHash.FindHashedForAdding(tmp, added);
+    if added then
+    begin
+      pointer(fValue[result]) := tmp; // direct assign with refcnt=1
+      exit;
+    end;
+    FastAssignNew(tmp);
+  end;
+  result := -1;
+end;
+
+function TBinDictionary.Update(Key, Value: pointer; KeyLen, ValueLen: PtrInt): PtrInt;
+var
+  tmp: pointer; // transient RawByteString
+begin
+  tmp := PrepareKeyValue(Key, Value, KeyLen, ValueLen);
+  if tmp <> nil then
+  begin
+    result := fHash.FindHashedAndUpdate(tmp, {add=}true);
+    FastAssignNew(tmp);
+  end
+  else
+    result := -1;
+end;
+
+function TBinDictionary.UpdateText(const Key, Value: RawUtf8): PtrInt;
+begin
+  result := Update(pointer(Key), pointer(Value), length(Key), length(Value));
+end;
+
+function TBinDictionary.UpdateText(const Key, Value: array of const): TBinDictionary;
+begin
+  UpdateText(Make(Key), Make(Value));
+  result := self; // for a fluent interface call
+end;
+
+procedure TBinDictionary.UpdateTextNotVoid(const Key, Value: RawUtf8);
+begin
+  if Value <> '' then
+    UpdateText(Key, Value);
+end;
+
+procedure TBinDictionary.UpdateFrom(Another: TBinDictionary);
+var
+  i: PtrInt;
+begin
+  if Another <> nil then
+    for i := 0 to Another.Count - 1 do
+      fHash.FindHashedAndUpdate(Another.Value[i], {add=}true);
+end;
+
+function TBinDictionary.IndexOf(Key: pointer; KeyLen: PtrInt; AndDelete: boolean): PtrInt;
+var
+  pk: pointer;      // fake RawByteString for Hash255/Sort255
+  tmp: TByteToByte; // local copy in B[keysize]+key layout for hashing
+begin
+  result := -1;
+  if (self = nil) or
+     (KeyLen > 255) then // IndexOf(nil, 0) is a valid request
+    exit;
+  tmp[0] := KeyLen;
+  MoveFast(Key^, tmp[1], KeyLen);
+  pk := @tmp;
+  if AndDelete then
+    result := fHash.FindHashedAndDelete(pk)
+  else
+    result := fHash.FindHashed(pk);
+end;
+
+function TBinDictionary.Find(Key: pointer; KeyLen: PtrInt; ValueLen: PPtrInt): pointer;
+begin
+  result := Values(IndexOf(Key, KeyLen), ValueLen);
+end;
+
+function TBinDictionary.Find(const Key: ShortString; ValueLen: PPtrInt): pointer;
+var
+  pk: pointer; // fake RawByteString for Hash255/Sort255
+begin
+  pk := @Key;
+  result := Values(fHash.FindHashed(pk));
+end;
+
+procedure TBinDictionary.Clear;
+begin
+  fHash.Clear;
+  fHash.ForceReHash;
+end;
+
+function TBinDictionary.AsText(const Sep, Feed: RawUtf8): RawUtf8;
+var
+  u: TRawUtf8DynArray;
+  i: PtrInt;
+begin
+  SetLength(u, fCount);
+  for i := 0 to fCount - 1 do
+    Make([PShortString(fValue[i])^, Sep, PUtf8Char(Values(i))], u[i]);
+  QuickSortRawUtf8(u, fCount);
+  PRawUtf8ToCsv(pointer(u), fCount, Feed, false, result);
+end;
+
+var // late resolution e.g. of ldap: macros by GlobalInfoRegister()
+  _GlobalInfoSafe: TLightLock;
+  _GlobalInfoPre: TPUtf8CharDynArray;
+  _GlobalInfoAdd: array of TOnBinDictionaryExecute;
+  _GlobalInfo: TBinDictionary;
+
+procedure GlobalInfoRegister(Prefix: PUtf8Char; OnAdd: TOnBinDictionaryExecute);
+begin
+  _GlobalInfoSafe.Lock;
+  PtrArrayAdd(_GlobalInfoPre, Prefix);
+  PtrArrayAdd(_GlobalInfoAdd, @OnAdd);
+  _GlobalInfoSafe.UnLock;
+end;
+
+function GlobalInfoFind(Key: pointer; KeyLen: PtrInt; var ValueLen: PtrInt): pointer;
+var
+  i: PtrInt;
+begin
+  _GlobalInfoSafe.Lock;
+  if _GlobalInfo = nil then
+    _GlobalInfo := RegisterGlobalShutdownRelease(TBinDictionary.Create);
+  result := _GlobalInfo.Find(Key, KeyLen, @ValueLen);
+  if result = nil then // search for pending GlobalInfoRegister()
+    repeat
+      i := StrStartArray(Key, pointer(_GlobalInfoPre));
+      if i < 0 then
+        break; // allow several GlobalInfoRegister() on the same namespace
+      _GlobalInfoAdd[i](_GlobalInfo); // may take some time
+      PtrArrayDelete(_GlobalInfoPre, i);
+      PtrArrayDelete(_GlobalInfoAdd, i);
+      if result = nil then
+        result := _GlobalInfo.Find(Key, KeyLen, @ValueLen); // may appear now
+    until false;
+  _GlobalInfoSafe.UnLock;
+end;
+
+function GlobalInfoFind(const Key: RawUtf8): RawUtf8;
+var
+  v: pointer;
+  l: PtrInt;
+begin
+  v := GlobalInfoFind(pointer(Key), length(Key), l);
+  FastSetString(result, v, l);
+end;
+
+function GlobalInfoRegisterAll: TBinDictionary;
+var
+  i: PtrInt;
+begin
+  _GlobalInfoSafe.Lock;
+  if _GlobalInfo = nil then
+    _GlobalInfo := RegisterGlobalShutdownRelease(TBinDictionary.Create);
+  result := _GlobalInfo;
+  for i := 0 to length(_GlobalInfoAdd) - 1 do
+    _GlobalInfoAdd[i](result); // may take some time (e.g. ldap:* info)
+  _GlobalInfoPre := nil;
+  _GlobalInfoAdd := nil;
+  _GlobalInfoSafe.UnLock;
+end;
+
+procedure _GlobalInfoOs(Sender: TBinDictionary);
+begin
+  Sender.UpdateText( 'os:name',           OSVersionShort);
+  Sender.UpdateText( 'os:family',         LowerCaseU(OS_TEXT));
+  Sender.UpdateText( 'os:version',        OSVersionText);
+  Sender.UpdateText(['os:ram'],          [SystemMemorySize]);
+  Sender.UpdateText( 'os:hostname',       Executable.Host);
+  Sender.UpdateText(['os:temp'],         [GetSystemPath(spTemp)]);
+  Sender.UpdateText(['os:cwd'],          [GetCurrentDir]);
+  Sender.UpdateText( 'os:pathsep',        PathDelim);
+  Sender.UpdateText(['os:tzoff'],        [TimeZoneLocalBias * SecsPerMin]);
+  if SystemInfo.dwPageSize <> 0 then
+    Sender.UpdateText(['os:pagesize'],   [SystemInfo.dwPageSize]);
+  {$ifdef OSPOSIX}
+  Sender.UpdateText( 'os:product',        LowerCaseU(OS_NAME[OS_KIND]));
+  if OS_DISTRI > ldUndefined then
+    Sender.UpdateText(['os:dist'],       [DISTRI_NAME[OS_DISTRI]]);
+  Sender.UpdateTextNotVoid('os:build',    SystemInfo.uts.release);
+  Sender.UpdateTextNotVoid('os:release',  SystemInfo.release);
+  {$else}
+  Sender.UpdateTextNotVoid('os:product',  WindowsProductName);
+  if WindowsUbr <> 0 then
+    Sender.UpdateText(['os:build'], [WindowsUbr]);
+  Sender.UpdateTextNotVoid('os:winver',   WindowsDisplayVersion);
+  {$endif OSPOSIX}
+end;
+
+procedure _GlobalInfoCpu(Sender: TBinDictionary);
+begin
+  Sender.UpdateText( 'cpu:name',         CpuInfoText);
+  Sender.UpdateText(['cpu:threads'],    [CpuThreads]);
+  Sender.UpdateText(['cpu:cores'],      [CpuCores]);
+  Sender.UpdateText(['cpu:sockets'],    [CpuSockets]);
+  if HasHWAes then
+    Sender.UpdateText('cpu:aes',        'true');
+  {$ifdef ASMINTEL}
+  if cfAVX in CpuFeatures then
+    Sender.UpdateText('cpu:avx',        'true');
+  if cfAVX2 in CpuFeatures then
+    Sender.UpdateText('cpu:avx2',       'true');
+  if IntelAvx10 > 0 then
+    Sender.UpdateText(['cpu:avx10'],     [IntelAvx10]);
+  Sender.UpdateText(  ['cpu:family'],    [CpuFamily]);
+  Sender.UpdateText(  ['cpu:model'],     [CpuModel]);
+  Sender.UpdateText(  ['cpu:cachesize'], [CpuCacheSize]);
+  Sender.UpdateTextNotVoid('cpu:caches',  CpuCacheText);
+  Sender.UpdateTextNotVoid('cpu:id',      IntelManufacturer);
+  Sender.UpdateTextNotVoid('cpu:hyp',     IntelHypervisor);
+  Sender.UpdateTextNotVoid('cpu:manufacturer', GetSmbios(sbiCpuManufacturer));
+  {$endif ASMINTEL}
+  {$ifdef CPUARM3264}
+  Sender.UpdateTextNotVoid('cpu:model',        CpuArmModel);
+  Sender.UpdateTextNotVoid('cpu:manufacturer', CpuArmImplementer);
+  {$endif CPUARM3264}
+end;
+
+procedure _GlobalInfoUser(Sender: TBinDictionary);
+{$ifdef OSWINDOWS}
+var
+  u: RawUtf8;
+  x: TExtendedNameFormat;
+{$endif OSWINDOWS}
+begin
+  Sender.UpdateText( 'user:name',    Executable.User);
+  Sender.UpdateText(['user:home'],  [GetSystemPath(spUserDocuments)]);
+  Sender.UpdateText(['user:data'],  [GetSystemPath(spUserData)]);
+  Sender.UpdateText( 'user:shell',   GetSystemShell);
+  {$ifdef OSPOSIX}
+  Sender.UpdateText(['user:uid'],   [PosixUid]);
+  Sender.UpdateText(['user:gid'],   [PosixGid]);
+  {$endif OSPOSIX}
+  {$ifdef OSWINDOWS}
+  Sender.UpdateTextNotVoid( 'user:uid', CurrentSid(wttProcess, nil, @u));
+  Sender.UpdateTextNotVoid( 'user:domain', u);
+  u := LookupName('', Join([u, '\', Executable.Host])); // try 'domain\host'
+  if u = '' then
+    u := LookupName('', Executable.Host); // fallback to isolated name
+  Sender.UpdateTextNotVoid( 'user:computerid', u);
+  if WinJoinStatus = jsDomain then
+    for x := low(x) to high(x) do
+      Sender.UpdateTextNotVoid(Join(['user:', GetEnumNameTrimed(
+        TypeInfo(TExtendedNameFormat), ord(x), scKebabCase)]), WinUserName(x));
+  {$endif OSWINDOWS}
+end;
+
+{$ifdef OSWINDOWS}
+procedure _GlobalInfoJoin(Sender: TBinDictionary);
+var
+  f: TComputerNameFormat;
+  x: TExtendedNameFormat;
+  u: RawUtf8;
+begin
+  for f := low(f) to high(f) do
+    Sender.UpdateTextNotVoid(Join(['join:', GetEnumNameTrimed(
+      TypeInfo(TComputerNameFormat), ord(f), scKebabCase)]), WinComputerName(f));
+  case WinJoinStatus('', @u) of
+    jsWorkgroup:
+      Sender.UpdateText('join:workgroup', u);
+    jsDomain:
+      begin
+        Sender.UpdateText('join:domain', u);
+        for x := low(x) to enfDnsDomain do
+          Sender.UpdateTextNotVoid(Join(['join:', GetEnumNameTrimed(
+            TypeInfo(TExtendedNameFormat), ord(x), scKebabCase)]), WinComputerName(x));
+      end;
+  end;
+end;
+{$endif OSWINDOWS}
+
+procedure _GlobalInfoBios(Sender: TBinDictionary);
+begin
+  Sender.UpdateTextNotVoid( 'bios:info',         BiosInfoText);
+  GetRawSmbios; // may return false but some _Smbios[] are still populated by OS
+  Sender.UpdateTextNotVoid( 'bios:vendor',       _Smbios[sbiBiosVendor]);
+  Sender.UpdateTextNotVoid( 'bios:product',      _Smbios[sbiProductName]);
+  Sender.UpdateTextNotVoid( 'bios:version',      _Smbios[sbiBiosVersion]);
+  Sender.UpdateTextNotVoid( 'bios:serial',       _Smbios[sbiSerial]);
+  Sender.UpdateTextNotVoid( 'bios:uuid',         _Smbios[sbiUuid]);
+  Sender.UpdateTextNotVoid( 'bios:sku',          _Smbios[sbiSku]);
+  Sender.UpdateTextNotVoid( 'bios:family',       _Smbios[sbiFamily]);
+  Sender.UpdateTextNotVoid( 'bios:manufacturer', _Smbios[sbiManufacturer]);
+  Sender.UpdateTextNotVoid( 'bios:board',        _Smbios[sbiBoardProductName]);
+  Sender.UpdateTextNotVoid( 'bios:boardserial',  _Smbios[sbiBoardSerial]);
+  Sender.UpdateTextNotVoid( 'bios:cpu',          _Smbios[sbiCpuVersion]);
+  if PosExI('virtual ', _Smbios[sbiFamily]) <> 0 then
+    Sender.UpdateText('bios:vm', 'true');
+end;
+
+procedure _GlobalInfoExe(Sender: TBinDictionary);
+begin
+  Sender.UpdateText( 'exe:arch',   CPU_ARCH_TEXT);
+  Sender.UpdateText( 'exe:name',   Executable.ProgramName);
+  Sender.UpdateText(['exe:cmd'],  [Executable.ProgramFileName]);
+  Sender.UpdateText(['exe:path'], [Executable.ProgramFilePath]);
+  Sender.UpdateText( 'exe:agent',  Executable.Version.UserAgent);
+  Sender.UpdateText(['exe:log'],  [GetSystemPath(spLog)]);
+  Sender.UpdateText(['exe:pid'],  [GetCurrentProcessId]);
+  Sender.UpdateText(['exe:ppid'], [GetParentProcess]);
+  if Assigned(Executable.Version) and
+     (Executable.Version.Major <> 0) then
+  begin
+    Sender.UpdateText(['exe:major'],   [Executable.Version.Major]);
+    Sender.UpdateText(['exe:minor'],   [Executable.Version.Minor]);
+    Sender.UpdateText(['exe:version'], [Executable.Version.Detailed]);
+  end;
+  {$ifdef OSWINDOWS}
+  if IsWow64 then
+    Sender.UpdateText('exe:wow64', 'true');
+  if IsWow64Emulation then
+    Sender.UpdateText('exe:prism', 'true');
+  {$endif OSWINDOWS}
+end;
+
+procedure _GlobalInfoEnv(Sender: TBinDictionary);
+var
+  i: PtrInt;
+begin
+  for i := 0 to length(_SystemEnvNames) - 1 do
+    Sender.UpdateText(['env:', _SystemEnvNames[i]], [_SystemEnvValues[i]]);
+end;
 
 { TRawUtf8List }
 
@@ -5088,7 +4336,7 @@ begin
         exit;
       end;
     end;
-    result := fValues.Add(aText);
+    result := fValues.Add(aText); // includes inc(fCount)
     if (fObjects <> nil) or
        (aObject <> nil) then
     begin
@@ -5120,17 +4368,22 @@ end;
 
 procedure TRawUtf8List.AddRawUtf8List(List: TRawUtf8List);
 var
-  i: PtrInt;
+  c, i: PtrInt;
 begin
-  if List <> nil then
-  begin
-    BeginUpdate; // includes Safe.Lock
-    try
-      for i := 0 to List.fCount - 1 do
-        AddObject(List.fValue[i], List.GetObject(i));
-    finally
-      EndUpdate;
-    end;
+  if (List = nil) or
+     (List.fCount = 0) then
+    exit;
+  BeginUpdate; // includes Safe.Lock
+  try
+    c := length(fValue) + List.fCount; // pre-allocate
+    SetLength(fValue, c);
+    if (fObjects <> nil) or
+       (List.fObjects <> nil) then
+      SetLength(fObjects, c);
+    for i := 0 to List.fCount - 1 do
+      AddObject(List.fValue[i], List.GetObject(i));
+  finally
+    EndUpdate;
   end;
 end;
 
@@ -5276,7 +4529,7 @@ function TRawUtf8List.Get(Index: PtrInt): RawUtf8;
 begin
   if (self = nil) or
      (PtrUInt(Index) >= PtrUInt(fCount)) then
-    result := ''
+    FastAssignNew(result)
   else
     result := fValue[Index];
 end;
@@ -5327,7 +4580,7 @@ begin
     exit;
   Index := PosExChar(NameValueSep, result);
   if Index = 0 then
-    result := ''
+    FastAssignNew(result)
   else
     SetLength(result, Index - 1);
 end;
@@ -5365,7 +4618,7 @@ end;
 
 function TRawUtf8List.GetText(const Delimiter: RawUtf8): RawUtf8;
 begin
-  result := '';
+  FastAssignNew(result);
   if (self = nil) or
      (fCount = 0) then
     exit;
@@ -5439,7 +4692,7 @@ begin
     exit;
   Index := PosExChar(NameValueSep, result);
   if Index = 0 then
-    result := ''
+    FastAssignNew(result)
   else
     TrimChars(result, Index, 0);
 end;
@@ -5453,15 +4706,16 @@ end;
 
 function TRawUtf8List.IndexOfName(const Name: RawUtf8): PtrInt;
 var
-  UpperName: TByteToAnsiChar;
+  up: TByteToAnsiChar;
   table: PNormTable;
 begin
-  if self <> nil then
+  if (self <> nil) and
+     (fCount <> 0) then
   begin
-    PWord(UpperCopy255(UpperName{%H-}, Name))^ := ord(NameValueSep);
+    PWord(UpperCopy255(@up, Name))^ := ord(NameValueSep);
     table := @NormToUpperAnsi7;
     for result := 0 to fCount - 1 do
-      if IdemPChar(pointer(fValue[result]), UpperName, table) then
+      if IdemPChar(pointer(fValue[result]), @up, table) then
         exit;
   end;
   result := -1;
@@ -5470,7 +4724,8 @@ end;
 function TRawUtf8List.IndexOfObject(aObject: TObject): PtrInt;
 begin
   if (self <> nil) and
-     (fObjects <> nil) then
+     (fObjects <> nil) and
+     (fCount <> 0) then
   begin
     if fThreadSafe in fFlags then
       fSafe.ReadOnlyLock;
@@ -5485,26 +4740,24 @@ begin
     result := -1;
 end;
 
-function TRawUtf8List.Contains(const aText: RawUtf8; aFirstIndex: integer): PtrInt;
+function TRawUtf8List.Contains(const aText: RawUtf8; aFirstIndex: PtrInt): PtrInt;
 var
-  i: PtrInt; // use a temp variable to make oldest Delphi happy :(
+  i: PtrInt;
 begin
   result := -1;
-  if self = nil then
+  if (self = nil) or
+     (fCount = 0) then
     exit;
   if fThreadSafe in fFlags then
     fSafe.ReadOnlyLock;
-  try
-    for i := aFirstIndex to fCount - 1 do
-      if PosEx(aText, fValue[i]) > 0 then
-      begin
-        result := i;
-        exit;
-      end;
-  finally
-    if fThreadSafe in fFlags then
-      fSafe.ReadOnlyUnLock;
-  end;
+  for i := aFirstIndex to fCount - 1 do
+    if PosEx(aText, fValue[i]) > 0 then
+    begin
+      result := i;
+      break;
+    end;
+  if fThreadSafe in fFlags then
+    fSafe.ReadOnlyUnLock;
 end;
 
 procedure TRawUtf8List.OnChangeHidden(Sender: TObject);
@@ -5622,7 +4875,7 @@ var
   i: PtrInt;
   txt: RawUtf8;
 begin
-  txt := Name + RawUtf8(NameValueSep) + Value;
+  Make([Name, NameValueSep, Value], txt);
   if fThreadSafe in fFlags then
     fSafe.WriteLock;
   try
@@ -5654,7 +4907,7 @@ begin
             (fNoDuplicate in fFlags);
 end;
 
-function TRawUtf8List.UpdateValue(const Name: RawUtf8; var Value: RawUtf8;
+function TRawUtf8List.ExtractValue(const Name: RawUtf8; var Value: RawUtf8;
   ThenDelete: boolean): boolean;
 var
   i: PtrInt;
@@ -5730,10 +4983,48 @@ begin
   end;
 end;
 
+procedure TRawUtf8List.AddToStrings(Dest: TStrings; ClearDest: boolean);
+begin
+  if (self = nil) or
+     (Dest = nil) then
+    exit;
+  if fThreadSafe in fFlags then
+    fSafe.ReadOnlyLock;
+  PRawUtf8AddStrings(pointer(fValue), fCount, Dest, ClearDest);
+  if fThreadSafe in fFlags then
+    fSafe.ReadOnlyUnLock;
+end;
+
+function TRawUtf8List.ToStrings: TVirtualStringList;
+begin
+  result := TVirtualStringList.Create(fValue, fCount, fObjects); // by ref
+end;
+
 procedure CopyRawUtf8List(Dest, Source: TRawUtf8List);
 begin
+  if Dest = nil then
+    exit;
   Dest.Clear;
-  Dest.AddRawUtf8List(Source);
+  if Source = nil then
+    exit;
+  if fThreadSafe in Source.fFlags then
+    Source.fSafe.ReadOnlyLock;
+  if fThreadSafe in Dest.fFlags then
+    Dest.fSafe.WriteLock;
+  try
+    Dest.fCount := Source.fCount;
+    Dest.fValue := copy(Source.fValue); // copy by reference, increase refcnt
+    Dest.fObjects := copy(Source.fObjects);
+    exclude(Dest.fFlags, fObjectsOwned);
+    if fNoDuplicate in Dest.fFlags then
+      Dest.fValues.ForceReHash; // assume Source has no duplicate either
+    Dest.Changed;
+  finally
+    if fThreadSafe in Source.fFlags then
+      Source.fSafe.ReadOnlyUnLock;
+    if fThreadSafe in Dest.fFlags then
+      Dest.fSafe.WriteUnLock;
+  end;
 end;
 
 
@@ -5937,11 +5228,11 @@ function _BC_LString(A, B: PRawByteString; Info: PRttiInfo;
   out Compared: integer): PtrInt;
 begin
   // StrComp() would fail for RawByteString
-  {$ifdef CPUINTEL}
+  {$ifdef ASMINTEL}
   compared := SortDynArrayAnsiString(A^, B^); // optimized asm using length()
   {$else}
   compared := SortDynArrayRawByteString(A^, B^);
-  {$endif CPUINTEL}
+  {$endif ASMINTEL}
   result := SizeOf(pointer);
 end;
 
@@ -5985,9 +5276,6 @@ procedure DynArraySave(Data: PAnsiChar; ExternalCount: PInteger;
   Dest: TBufferWriter; Info: PRttiInfo);
 var
   n, itemsize: PtrInt;
-  sav: TRttiBinarySave;
-label
-  raw;
 begin
   Info := Info^.DynArrayItemType(itemsize); // nil if unmanaged
   Dest.Write1(0); // warning: store itemsize=0 (mORMot 1 ignores it anyway)
@@ -6003,19 +5291,7 @@ begin
       n := PDALen(Data - _DALEN)^ + _DAOFF;
     Dest.WriteVarUInt32(n);
     Dest.Write4(0); // warning: we don't store any Hash32 checksum any more
-    if Info = nil then
-raw:  Dest.Write(Data, itemsize * n)
-    else
-    begin
-      sav := RTTI_BINARYSAVE[Info^.Kind];
-      if Assigned(sav) then // paranoid check
-        repeat
-          inc(Data, sav(Data, Dest, Info));
-          dec(n);
-        until n = 0
-      else
-        goto raw;
-    end;
+    BinarySaveSeveral(Data, Dest, Info, n, itemsize * n);
   end;
 end;
 
@@ -6062,9 +5338,6 @@ function _BL_DynArray(Data: PAnsiChar; var Source: TFastReader; Info: PRttiInfo)
 var
   n, siz: PtrInt;
   nfo: PRttiInfo;
-  load: TRttiBinaryLoad;
-label
-  raw;
 begin
   nfo := Info^.DynArrayItemType(siz); // nil for unmanaged items
   n := DynArrayLoadHeader(Source, Info, nfo);
@@ -6073,20 +5346,7 @@ begin
   if n > 0 then
   begin
     DynArrayNew(pointer(Data), n, siz); // allocate zeroed  memory
-    Data := PPointer(Data)^; // point to first item
-    if nfo = nil then
-raw:  Source.Copy(Data, siz * n)
-    else
-    begin
-      load := RTTI_BINARYLOAD[nfo^.Kind];
-      if Assigned(load) then
-        repeat
-          inc(Data, load(Data, Source, nfo));
-          dec(n);
-        until n = 0
-      else
-        goto raw;
-    end;
+    BinaryLoadSeveral(PPointer(Data)^, Source, nfo, n, siz * n);
   end;
   result := SizeOf(pointer);
 end;
@@ -6339,47 +5599,17 @@ end;
 function _BS_Array(Data: PAnsiChar; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
 var
   n: PtrInt;
-  sav: TRttiBinarySave;
-label
-  raw;
 begin
-  Info := Info^.ArrayItemType(n, result);
-  if Info = nil then // unmanaged
-raw:Dest.Write(Data, result)
-  else
-  begin
-    sav := RTTI_BINARYSAVE[Info^.Kind];
-    if Assigned(sav) then // paranoid check
-      repeat
-        inc(Data, sav(Data, Dest, Info));
-        dec(n);
-      until n = 0
-    else
-      goto raw;
-  end;
+  Info := Info^.ArrayItemType(n, result); // nil if unmanaged
+  BinarySaveSeveral(Data, Dest, Info, n, result);
 end;
 
 function _BL_Array(Data: PAnsiChar; var Source: TFastReader; Info: PRttiInfo): PtrInt;
 var
   n: PtrInt;
-  load: TRttiBinaryLoad;
-label
-  raw;
 begin
-  Info := Info^.ArrayItemType(n, result);
-  if Info = nil then // unmanaged
-raw:Source.Copy(Data, result)
-  else
-  begin
-    load := RTTI_BINARYLOAD[Info^.Kind];
-    if Assigned(load) then // paranoid check
-      repeat
-        inc(Data, load(Data, Source, Info));
-        dec(n);
-      until n = 0
-    else
-      goto raw;
-  end;
+  Info := Info^.ArrayItemType(n, result); // nil if unmanaged
+  BinaryLoadSeveral(Data, Source, Info, n, result);
 end;
 
 function _BC_Array(A, B: pointer; Info: PRttiInfo; out Compared: integer): PtrInt;
@@ -6421,14 +5651,14 @@ end;
 
 const
   // 0 for unserialized VType, 255 for valOleStr
-  VARIANT_SIZE: array[varEmpty .. varWord64] of byte = (
-    0, 0, 2, 4, 4, 8, 8, 8, 255, 0, 0, 2, 0, 0, 0, 0, 1, 1, 2, 4, 8, 8);
+  VARIANT_SIZE: array[varEmpty .. varOleUInt] of byte = (
+    0, 0, 2, 4, 4, 8, 8, 8, 255, 0, 0, 2, 0, 0, 0, 0, 1, 1, 2, 4, 8, 8, 4, 4);
 
 function _BS_Variant(Data: PVarData; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
 var
   vt: cardinal;
 begin
-  Data := VarDataFromVariant(PVariant(Data)^); // handle varByRef
+  Data := VarDataFromVariant(PVariant(Data)^); // handle varVariantByRef
   vt := Data^.VType;
   Dest.Write2(vt);
   if vt <= high(VARIANT_SIZE) then
@@ -6440,9 +5670,8 @@ begin
       else
         Dest.Write(@Data^.VInt64, vt); // simple types are stored as binary
   end
-  else if (vt = varString) and  // expect only RawUtf8
-          (Data^.vAny <> nil) then
-    Dest.WriteVar(Data^.vAny, PStrLen(PAnsiChar(Data^.VAny) - _STRLEN)^)
+  else if vt = varString then  // expect only RawUtf8
+    Dest.WriteVar(Data^.vAny, length(RawUtf8(Data^.vAny)))
   {$ifdef HASVARUSTRING}
   else if vt = varUString then
     Dest.WriteVar(Data^.vAny, length(UnicodeString(Data^.vAny)) * 2)
@@ -6740,7 +5969,7 @@ begin
     end;
   end
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 function BinarySaveBytes(Data: pointer; Info: PRttiInfo;
@@ -6841,7 +6070,7 @@ begin
     end;
   end
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 function BinaryLoad(Data: pointer; Source: PAnsiChar; Info: PRttiInfo;
@@ -6888,8 +6117,8 @@ function BinaryLoadBase64(Source: PAnsiChar; Len: PtrInt; Data: pointer;
   Info: PRttiInfo; UriCompatible: boolean; Kinds: TRttiKinds;
   WithCrc: boolean; TryCustomVariants: PDocVariantOptions): boolean;
 var
-  temp: TSynTempBuffer;
   tempend: pointer;
+  temp: TSynTempBuffer;
 begin
   if (Len > 6) and
      (Info^.Kind in Kinds) then
@@ -6912,6 +6141,44 @@ begin
   end
   else
     result := false;
+end;
+
+procedure BinaryLoadSeveral(Data: PAnsiChar; var Source: TFastReader;
+  Info: PRttiInfo; n, datasize: PtrInt);
+label
+  raw;
+var
+  load: TRttiBinaryLoad;
+begin // caller ensured Data<>nil and n>0
+  if Info = nil then
+    goto raw;
+  load := RTTI_BINARYLOAD[Info^.Kind];
+  if Assigned(load) then
+    repeat
+      inc(Data, load(Data, Source, Info));
+      dec(n);
+    until n = 0
+  else
+raw:Source.Copy(Data, datasize)
+end;
+
+procedure BinarySaveSeveral(Data: PAnsiChar; Dest: TBufferWriter;
+  Info: PRttiInfo; n, datasize: PtrInt);
+var
+  sav: TRttiBinarySave;
+label
+  raw;
+begin
+  if Info = nil then
+    goto raw;
+  sav := RTTI_BINARYSAVE[Info^.Kind];
+  if Assigned(sav) then // paranoid check
+    repeat
+      inc(Data, sav(Data, Dest, Info));
+      dec(n);
+    until n = 0
+  else
+raw:Dest.Write(Data, datasize);
 end;
 
 
@@ -7010,7 +6277,7 @@ const
      SortDynArrayInt64,         //  ptInt64
      SortDynArrayInteger,       //  ptInteger
      SortDynArrayQWord,         //  ptQWord
-     {$ifdef CPUINTEL}SortDynArrayAnsiString
+     {$ifdef ASMINTEL}SortDynArrayAnsiString
      {$else}SortDynArrayRawByteString{$endif}, //  ptRawByteString
      SortDynArrayAnsiString,    //  ptRawJson
      SortDynArrayAnsiString,    //  ptRawUtf8
@@ -7053,7 +6320,7 @@ const
      SortDynArrayInt64,          //  ptInt64
      SortDynArrayInteger,        //  ptInteger
      SortDynArrayQWord,          //  ptQWord
-     {$ifdef CPUINTEL}SortDynArrayAnsiString
+     {$ifdef ASMINTEL}SortDynArrayAnsiString
      {$else}SortDynArrayRawByteString{$endif}, //  ptRawByteString
      SortDynArrayAnsiStringI,    //  ptRawJson
      SortDynArrayAnsiStringI,    //  ptRawUtf8
@@ -7099,8 +6366,7 @@ end;
 
 { TDynArray }
 
-procedure TDynArray.InitRtti(aInfo: TRttiCustom; var aValue;
-  aCountPointer: PInteger);
+procedure TDynArray.InitRtti(aInfo: TRttiCustom; var aValue; aCountPointer: PInteger);
 begin
   fInfo := aInfo;
   fValue := @aValue;
@@ -7122,8 +6388,7 @@ begin
   fNoFinalize := false;
 end;
 
-procedure TDynArray.Init(aTypeInfo: PRttiInfo; var aValue;
-  aCountPointer: PInteger);
+procedure TDynArray.Init(aTypeInfo: PRttiInfo; var aValue; aCountPointer: PInteger);
 begin
   if aTypeInfo^.Kind <> rkDynArray then
     EDynArray.RaiseUtf8('TDynArray.Init: % is %, expected rkDynArray',
@@ -7240,24 +6505,21 @@ end;
 function TDynArray.ItemCompare(A, B: pointer; CaseInSensitive: boolean): integer;
 var
   comp: TRttiCompare;
-  rtti: PRttiInfo;
 label
   raw;
 begin
   if Assigned(fCompare) then
-    result := fCompare(A^, B^)
-  else if not(rcfArrayItemManaged in fInfo.Flags) then
-     // fast binary comparison with length
-raw: result := MemCmp(A, B, fInfo.Cache.ItemSize)
-  else
   begin
-    rtti := fInfo.Cache.ItemInfoRaw;
-    comp := RTTI_COMPARE[CaseInsensitive, rtti.Kind];
-    if Assigned(comp) then
-      comp(A, B, rtti, result)
-    else
-      goto raw;
+    result := fCompare(A^, B^);
+    exit;
   end;
+  if not(rcfArrayItemManaged in fInfo.Flags) then
+    goto raw; // fast binary comparison with length
+  comp := RTTI_COMPARE[CaseInsensitive, fInfo.Cache.ItemInfoRaw.Kind];
+  if Assigned(comp) then
+    comp(A, B, fInfo.Cache.ItemInfoRaw, result)
+  else
+raw:result := MemCmp(A, B, fInfo.Cache.ItemSize)
 end;
 
 function TDynArray.Add(const Item): PtrInt;
@@ -8996,11 +8258,10 @@ end;
 
 procedure TDynArray.SetCompare(const aCompare: TDynArraySortCompare);
 begin
-  if @aCompare <> @fCompare then
-  begin
-    @fCompare := @aCompare;
-    fSorted := false;
-  end;
+  if @aCompare = @fCompare then
+    exit;
+  @fCompare := @aCompare;
+  fSorted := false;
 end;
 
 procedure TDynArray.SetNoFinalize(aValue: boolean);
@@ -9144,14 +8405,14 @@ end;
 
 function TDynArray.ItemLoadFind(Source, SourceMax: PAnsiChar): integer;
 var
-  tmp: array[0..2047] of byte;
+  tmp: TBuffer2K; // to store unserialized managed item
   data: pointer;
 begin
   result := -1;
   if (Source = nil) or
-     (fInfo.Cache.ItemSize > SizeOf(tmp)) then
+     (fInfo.Cache.ItemSize > SizeOf(tmp)) then // no record should be > 2KB
     exit;
-  if fInfo.Cache.ItemInfoManaged = nil then // nil for unmanaged items
+  if fInfo.Cache.ItemInfoManaged = nil then    // nil for unmanaged items
     data := Source
   else
   begin
@@ -9196,12 +8457,12 @@ end;
 
 function HashAnsiStringI(Item: PUtf8Char; Hasher: THasher): cardinal;
 var
-  tmp: TByteToAnsiChar; // avoid any slow heap allocation
+  up: TByteToAnsiChar; // avoid any slow heap allocation
 begin
   Item := PPointer(Item)^; // passed as non-nil PAnsiString reference
   if Item <> nil then
-    result := Hasher(HashSeed, tmp{%H-},
-      UpperCopy255Buf(tmp{%H-}, Item, PStrLen(Item - _STRLEN)^) - {%H-}tmp)
+    result := Hasher(HashSeed, @up,
+      UpperCopy255Buf(@up, Item, PStrLen(Item - _STRLEN)^) - PAnsiChar(@up))
   else
     result := 0;
 end;
@@ -9227,10 +8488,10 @@ end;
 
 function HashSynUnicodeI(Item: PSynUnicode; Hasher: THasher): cardinal;
 var
-  tmp: TByteToAnsiChar; // avoid slow heap allocation
+  up: TByteToAnsiChar; // avoid slow heap allocation
 begin
   if PtrUInt(Item^) <> 0 then
-    result := Hasher(HashSeed, tmp{%H-}, UpperCopy255W(tmp{%H-}, Item^) - {%H-}tmp)
+    result := Hasher(HashSeed, @up, UpperCopy255W(@up, Item^) - PAnsiChar(@up))
   else
     result := 0;
 end;
@@ -9246,11 +8507,11 @@ end;
 
 function HashWideStringI(Item: PWideString; Hasher: THasher): cardinal;
 var
-  tmp: TByteToAnsiChar; // avoid slow heap allocation
+  up: TByteToAnsiChar; // avoid slow heap allocation
 begin
   if PtrUInt(Item^) <> 0 then
-    result := Hasher(HashSeed, tmp{%H-},
-      UpperCopy255W(tmp{%H-}, pointer(Item^), Length(Item^)) - {%H-}tmp)
+    result := Hasher(HashSeed, @up,
+      UpperCopy255W(@up, pointer(Item^), Length(Item^)) - PAnsiChar(@up))
   else
     result := 0;
 end;
@@ -9266,12 +8527,12 @@ end;
 
 function HashPUtf8CharI(Item: PUtf8Char; Hasher: THasher): cardinal;
 var
-  tmp: TByteToAnsiChar; // avoid slow heap allocation
+  up: TByteToAnsiChar; // avoid slow heap allocation
 begin
   Item := PPointer(Item)^; // passed as non-nil PPUtf8Char reference
   if Item <> nil then
-    result := Hasher(HashSeed, tmp{%H-},
-      UpperCopy255Buf(tmp{%H-}, Item, StrLen(Item)) - {%H-}tmp)
+    result := Hasher(HashSeed, @up,
+      UpperCopy255Buf(@up, Item, StrLen(Item)) - PAnsiChar(@up))
   else
     result := 0;
 end;
@@ -9338,7 +8599,7 @@ begin
     len := Max;  // don't hash more than needed
   dec(Max, len);
   if CaseInsensitive then
-    len := UpperCopy255Buf(tmp, @tmp, len) - tmp; // in-place uppercase
+    len := UpperCopy255Buf(@tmp, @tmp, len) - PAnsiChar(@tmp); // in-place upper
   result := Hasher(Seed, @tmp, len);
 end; // note: TDocVariantData have its own dedicated Hash() method
 
@@ -9411,7 +8672,7 @@ begin
   end;
   if utf8 then
   begin
-    len := UpperCopy255Buf(tmp, P, len) - tmp; // (maybe in-place) uppercase
+    len := UpperCopy255Buf(@tmp, P, len) - PAnsiChar(@tmp); // (in-place) upper
     P := @tmp; // P=vd^.VAny for varString
   end;
   if (len > Max) and
@@ -9899,7 +9160,7 @@ procedure TDynArrayHasher.HashDelete(aArrayIndex, aHashTableIndex: PtrInt;
 var
   first, next, last, n, s, ndx, i: PtrInt;
   P: PAnsiChar;
-  indexes: array[0..511] of integer; // to be rehashed  (seen always < 32)
+  indexes: array[0..511] of integer; // to be rehashed (seen always < 32)
 begin
   // retrieve hash table entries to be recomputed
   first := aHashTableIndex;
@@ -9949,12 +9210,13 @@ begin
     end;
   end;
   // adjust all stored indexes (using SSE2/AVX2 on x86_64)
-  {$ifdef DYNARRAYHASH_16BIT}
-  if hash16bit in fState then
-    DynArrayHashTableAdjust16(pointer(fHashTableStore), aArrayIndex, fHashTableSize)
-  else
-  {$endif DYNARRAYHASH_16BIT}
-    DynArrayHashTableAdjust(pointer(fHashTableStore), aArrayIndex, fHashTableSize);
+  if fDynArray^.GetCount > 1 then // Count not yet decremented
+    {$ifdef DYNARRAYHASH_16BIT}
+    if hash16bit in fState then
+      DynArrayHashTableAdjust16(pointer(fHashTableStore), aArrayIndex, fHashTableSize)
+    else
+    {$endif DYNARRAYHASH_16BIT}
+      DynArrayHashTableAdjust(pointer(fHashTableStore), aArrayIndex, fHashTableSize);
 end;
 
 function TDynArrayHasher.FindBeforeAdd(Item: pointer; out wasAdded: boolean;
@@ -10041,16 +9303,16 @@ begin
     exit;
 end;
 
-function TDynArrayHasher.Find(Item: pointer): PtrInt;
-begin
-  result := Find(Item, HashOne(Item));
-end;
-
 function TDynArrayHasher.Find(Item: pointer; aHashCode: cardinal): PtrInt;
 begin
   result := FindOrNew(aHashCode, Item, nil); // fallback to Scan() if needed
   if result < 0 then
     result := -1; // for coherency with most search methods
+end;
+
+function TDynArrayHasher.Find(Item: pointer): PtrInt;
+begin
+  result := Find(Item, HashOne(Item));
 end;
 
 type // dedicated TFastReHash engine for better register allocation
@@ -10210,8 +9472,11 @@ end;
 
 {$ifndef PUREMORMOT2}
 function TDynArrayHasher.ReHash(forced: boolean): integer;
+var
+  n: integer; // safer with an explicit local variable
 begin
-  ForceRehash(@result); // always forced for true thread-safety
+  ForceRehash(@n); // always forced for true thread-safety
+  result := n;
 end;
 {$endif PUREMORMOT2}
 
@@ -10525,8 +9790,11 @@ end;
 
 {$ifndef PUREMORMOT2}
 function TDynArrayHashed.ReHash(forced: boolean): integer;
+var
+  n: integer; // safer with an explicit local variable
 begin
-  fHash.ForceReHash(@result); // always forced
+  fHash.ForceReHash(@n); // always forced
+  result := n;
 end;
 {$endif PUREMORMOT2}
 
@@ -11104,13 +10372,13 @@ end;
 function AnyScanIndex(P, V: pointer; Count, VSize: PtrInt): PtrInt;
 begin
   case VSize of
-    // optimized versions for arrays of most simple types
+    // optimized versions for arrays of most simple types - may use SSE2 asm
     1:
-      result := ByteScanIndex(P, Count, PByte(V)^); // SSE2 asm on Intel/AMD
+      result := ByteScanIndex(P, Count, PByte(V)^);
     2:
-      result := WordScanIndex(P, Count, PWord(V)^); // may use SSE2 asm
+      result := WordScanIndex(P, Count, PWord(V)^);
     4:
-      result := IntegerScanIndex(P, Count, PInteger(V)^); // may use SSE2 asm
+      result := IntegerScanIndex(P, Count, PInteger(V)^);
     8:
       result := Int64ScanIndex(P, Count, PInt64(V)^);
     SizeOf(THash128):
@@ -11204,7 +10472,7 @@ begin
   FullText := '';
   Child := nil;
   Flags := [];
-  ObjArrayAdd(Child, result);
+  PtrArrayAdd(Child, result);
 end;
 
 destructor TRadixTreeNode.Destroy;
@@ -11356,7 +10624,7 @@ begin
   result := NodeClass.Create(self);
   result.Chars := chars;
   result.FullText := Text;
-  ObjArrayAdd(Node.Child, result);
+  PtrArrayAdd(Node.Child, result);
 end;
 
 procedure TRadixTree.AfterInsert;
@@ -11394,7 +10662,7 @@ end;
 
 function TRadixTree.ToText: RawUtf8;
 begin
-  result := '';
+  FastAssignNew(result);
   if self <> nil then
     fRoot.ToText(result, 0);
 end;
@@ -11557,6 +10825,7 @@ end;
 procedure InitializeUnit;
 var
   k: TRttiKind;
+  p: PPUtf8CharArray;
 begin
   // initialize RTTI low-level comparison functions
   RTTI_ORD_COMPARE[roSByte]       := @_BC_SByte;
@@ -11636,11 +10905,29 @@ begin
         // unsupported types will contain nil
     end;
   // setup internal function wrappers
-  GetDataFromJson := _GetDataFromJson;
+  GetDataFromJson :=  _GetDataFromJson;
+  SetLength(_GlobalInfoPre, 6);
+  SetLength(_GlobalInfoAdd, 6);
+  p := pointer(_GlobalInfoPre);
+  p[0] := 'os:';
+  p[1] := 'cpu:';
+  p[2] := 'exe:';
+  p[3] := 'env:';
+  p[4] := 'user:';
+  p[5] := 'bios:';
+  p := pointer(_GlobalInfoAdd);
+  p[0] := @_GlobalInfoOs;
+  p[1] := @_GlobalInfoCpu;
+  p[2] := @_GlobalInfoExe;
+  p[3] := @_GlobalInfoEnv;
+  p[4] := @_GlobalInfoUser;
+  p[5] := @_GlobalInfoBios;
+  {$ifdef OSWINDOWS}
+  GlobalInfoRegister('join:', _GlobalInfoJoin);
+  {$endif OSWINDOWS}
   // in-memory hashing are seeded from random to avoid hash flooding
   HashSeed := SystemEntropy.Startup.c0;
 end;
-
 
 initialization
   InitializeUnit;

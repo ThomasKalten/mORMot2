@@ -695,22 +695,22 @@ begin
     Content := Call.InBody;
     ContentType := JSON_CONTENT_TYPE_VAR; // consider JSON by default
     P := pointer(Head);
-    while P <> nil do
-    begin
-      PBeg := P;
-      if IdemPChar(PBeg, 'CONTENT-TYPE:') then
-      begin
-        ContentType := GetNextLine(PBeg + 14, P); // retrieve customized type
-        if P = nil then
-          // last entry in header
-          SetLength(Head, PBeg - pointer(Head))
-        else
-          system.delete(Head, PBeg - pointer(Head) + 1, P - PBeg);
-        TrimSelf(Head);
-        break;
-      end;
-      P := GotoNextLine(P);
-    end;
+    if P <> nil then
+      repeat
+        PBeg := P;
+        if IdemPChar(PBeg, 'CONTENT-TYPE:') then
+        begin
+          ContentType := GetNextLine(PBeg + 14, P); // retrieve customized type
+          if P = nil then
+            // last entry in header
+            SetLength(Head, PBeg - pointer(Head))
+          else
+            system.delete(Head, PBeg - pointer(Head) + 1, P - PBeg);
+          TrimSelf(Head);
+          break;
+        end;
+        P := GotoNextLineSmall(P);
+      until P^ = #0;
     if Content <> '' then // always favor content type from binary
       GetMimeContentTypeFromBuffer(Content, ContentType);
     if fUriPrefix <> '' then
@@ -732,7 +732,7 @@ begin
     Call.OutStatus := HTTP_CLIENTERROR; // indicates no socket
   if log <> nil  then
   begin
-    bak := PosCharU(call.Url, '?');
+    bak := PosCharU(call.Url, '?'); // use fast SSE2 asm on x86_64
     if bak <> nil then
       bak^ := #0;  // truncate URI before query parameters
     log.Log(sllClient, '% % status=% len=% state=%', [call.Method, call.Url,
@@ -758,11 +758,11 @@ function TRestHttpClientGeneric.HostName: RawUtf8;
 begin
   if fServer <> '' then
     if fPort <> '' then
-      result := fServer + ':' + fPort
+      Join([fServer, ':', fPort], result)
     else
       result := fServer
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 function TRestHttpClientGeneric.TLS: PNetTlsContext;
@@ -1094,7 +1094,7 @@ begin
         // call TServiceContainerServer.ClientFakeCallbackReplaceConnectionID
         if CallBack(mPOST, 'CacheFlush/_replaceconn_',
             Int64ToUtf8(prevconn), result) = HTTP_SUCCESS then
-          result := ''; // on error, log result = server response
+          FastAssignNew(result); // on error, log result = server response
       inc(fUpgradeCount);
     end;
   end;

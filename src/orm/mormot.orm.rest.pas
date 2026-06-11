@@ -607,9 +607,8 @@ implementation
 constructor TRestOrm.Create(aRest: TRest);
 begin
   inherited Create;
-  fTempJsonWriter := // generous 128KB buffer with no resize
-    TJsonWriter.CreateOwnedStream(128 shl 10, {nosharedstream=}true);
-  fTempJsonWriter.FlushToStreamNoAutoResize := true; // stick to BufferSize
+  fTempJsonWriter := TJsonWriter.CreateOwnedStream(128 shl 10);
+  fTempJsonWriter.FlushToStreamNoAutoResize := true; // stick to 128KB buffer
   if aRest = nil then
     exit;
   fRest := aRest;
@@ -637,7 +636,7 @@ end;
 function TRestOrm.SqlComputeForSelect(TableModelIndex: integer; Table: TOrmClass;
   const FieldNames, WhereClause: RawUtf8): RawUtf8;
 begin
-  result := '';
+  FastAssignNew(result);
   if (self = nil) or
      (Table = nil) then
     exit;
@@ -653,7 +652,7 @@ begin
               (PosExChar('(', FieldNames) = 0) and
               not IsFieldName(pointer(FieldNames)) then
         // prevent SQL error
-        result := ''
+        FastAssignNew(result)
       else
         result := SqlFromSelect(SqlTableName, FieldNames, WhereClause, '');
 end;
@@ -742,7 +741,7 @@ begin
     fields := props.SimpleFieldsBits[ooInsert];
   if not ForceID and
      IsZero(fields) then
-    result := ''
+    FastAssignNew(result)
   else
     GetJsonValue(Value, ForceID, fields, result);
 end;
@@ -931,7 +930,7 @@ begin
   if MultiFieldValue(Table, [FieldName], res, WhereClause) then
     result := res[0]
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 function TRestOrm.OneFieldValueInt64(Table: TOrmClass; const FieldName,
@@ -987,7 +986,7 @@ begin
        'RowID=:(' + Int64ToUtf8(WhereID) + '):') then
     result := res[0]
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 function TRestOrm.MultiFieldValue(Table: TOrmClass;
@@ -1153,7 +1152,7 @@ var
   T: TOrmTable;
   P: PUtf8Char;
 begin
-  result := '';
+  FastAssignNew(result);
   T := MultiFieldValues(Table, FieldName, WhereClause);
   if T <> nil then
   try
@@ -1309,7 +1308,7 @@ begin
   if (self = nil) or
      (Table = nil) or
      (ID <= 0) then
-    result := ''
+    FastAssignNew(result)
   else
   begin
     result := Table.OrmProps.MainFieldName(ReturnFirstIfNoUnique);
@@ -1375,7 +1374,7 @@ begin
   if (self = nil) or
      (Value = nil) then
     exit;
-  sql := TrimU(SqlWhere);
+  TrimU(SqlWhere, sql);
   if not EndWith(sql, ' LIMIT 1') then
     Append(sql, ' LIMIT 1'); // we keep a single record below
   T := MultiFieldValues(POrmClass(Value)^, FieldsCsv, sql);
@@ -1508,7 +1507,7 @@ begin
   t := Model.GetTableIndexExisting(Table);
   sql := SqlComputeForSelect(t, Table, FieldsCsv, SqlWhere);
   if sql = '' then
-    result := ''
+    FastAssignNew(result)
   else
     result := EngineList(t, sql, aForceAjax);
 end;

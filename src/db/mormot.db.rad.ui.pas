@@ -30,6 +30,7 @@ uses
   mormot.core.rtti,
   mormot.core.data,
   mormot.core.variants,
+  mormot.core.json,
   mormot.db.core,
   mormot.db.rad,
   {$ifdef ISDELPHIXE2}
@@ -160,7 +161,7 @@ type
 
 /// export all rows of a TDataSet into JSON
 // - will work for any kind of TDataSet
-function DataSetToJson(Data: TDataSet): RawJson;
+function DataSetToJson(Data: TDataSet; jsonFormat: TTextWriterJsonFormat=jsonCompact; onlyCurrentRecord:boolean=false): RawJson;
 
 type
   TDocVariantArrayDataSetColumn = record
@@ -307,7 +308,7 @@ function TVirtualDataSet.GetFieldData(Field: TField; Buffer: pointer): boolean;
 {$endif ISDELPHIXE3}
 var
   data, dest: pointer;
-  ndx, len, maxlen: integer;
+  ndx, len, maxlen: integer; // len: not a PtrInt
   tmp: RawByteString;
   onlytestfornull: boolean;
   ts: TTimeStamp;
@@ -387,7 +388,7 @@ function TVirtualDataSet.GetBlobStream(Field: TField;
   RowIndex: integer): TStream;
 var
   data: pointer;
-  len: integer;
+  len: integer; // not a PtrInt
 begin
   data := GetRowFieldData(Field, RowIndex, len, false);
   if (data = nil) or
@@ -565,7 +566,7 @@ function TVirtualDataSet.GetFieldVarData(Field: TField; RowIndex: integer;
   out Value: TVarData): boolean;
 var
   p: pointer;
-  plen: integer;
+  plen: integer; // not a PtrInt
   v: TSynVarData absolute Value;
 begin
   result := false; // returns true if caller needs to call VarClearProc(Value)
@@ -704,7 +705,7 @@ end;
 
 { ************ JSON and Variants TDataSet Support }
 
-function DataSetToJson(Data: TDataSet): RawJson;
+function DataSetToJson(Data: TDataSet; jsonFormat: TTextWriterJsonFormat=jsonCompact; onlyCurrentRecord:boolean=false): RawJson;
 var
   W: TResultsWriter;
   c: PtrInt;
@@ -714,7 +715,8 @@ begin
   result := 'null';
   if Data = nil then
     exit;
-  Data.First;
+  if not onlyCurrentRecord then
+    Data.First;
   if Data.Eof then
     exit;
   W := TResultsWriter.Create(nil, true, false, nil, 16384);
@@ -722,9 +724,11 @@ begin
     // get col names and types
     SetLength(W.ColNames, Data.FieldCount);
     for c := 0 to high(W.ColNames) do
-      StringToUtf8(Data.FieldDefs[c].Name, W.ColNames[c]);
+       StringToUtf8(Data.Fields[c].FieldName, W.ColNames[c]);
+//      StringToUtf8(Data.FieldDefs[c].Name, W.ColNames[c]);
     W.AddColumns;
-    W.AddDirect('[');
+    if not onlyCurrentRecord then
+       W.AddDirect('[');
     repeat
       W.AddDirect('{');
       for c := 0 to Data.FieldCount - 1 do
@@ -836,9 +840,15 @@ begin
       end;
       W.CancelLastComma;
       W.AddDirect('}', ',');
-      Data.Next;
+      if not onlyCurrentRecord then
+        Data.Next
+      else
+        break;
     until Data.Eof;
-    W.CancelLastComma(']');
+    if not onlyCurrentRecord then
+       W.CancelLastComma(']')
+    else
+       W.CancelLastComma;
     W.SetText(RawUtf8(result));
   finally
     W.Free;

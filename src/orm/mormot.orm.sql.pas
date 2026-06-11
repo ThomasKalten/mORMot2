@@ -1391,7 +1391,7 @@ function TRestStorageExternal.EngineList(TableModelIndex: integer;
 var
   stmt: ISqlDBStatement;
 begin
-  result := '';
+  FastAssignNew(result);
   if ReturnedRowCount <> nil then
     ERestStorage.RaiseUtf8('%.EngineList(ReturnedRowCount<>nil) for %',
       [self, StoredClass]);
@@ -1416,7 +1416,7 @@ var
   tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   // TableModelIndex is not useful here
-  result := '';
+  FastAssignNew(result);
   if (self <> nil) and
      (ID > 0) then
     try
@@ -2249,7 +2249,7 @@ begin
     result := fSelectAllDirectSQL; // if Prepared is not supported -> full scan
     exit;
   end;
-  result := '';
+  FastAssignNew(result);
   WR := TTextWriter.CreateOwnedStream(temp);
   try
     WR.AddString(fSelectAllDirectSQL);
@@ -2644,6 +2644,7 @@ function TRestExternalDBCreate(aModel: TOrmModel;
 var
   propsClass: TSqlDBConnectionPropertiesClass;
   props: TSqlDBConnectionProperties;
+  pwd: SpiUtf8;
 begin
   result := nil;
   if aDefinition = nil then
@@ -2654,8 +2655,9 @@ begin
     props := nil;
     try
       // aDefinition.Kind was a TSqlDBConnectionProperties -> all external DB
+      aDefinition.GetPasswordSafe(pwd);
       props := propsClass.Create(aDefinition.ServerName,
-        aDefinition.DatabaseName, aDefinition.User, aDefinition.PassWordPlain);
+        aDefinition.DatabaseName, aDefinition.User, pwd);
       OrmMapExternalAll(aModel, props, aExternalOptions);
       // instantiate either a SQLite3 :memory: DB or a TRestServerFullMemory
       result := CreateInMemoryServer(
@@ -2664,6 +2666,7 @@ begin
       FreeAndNilSafe(result);
       props.Free;  // avoid memory leak
     end;
+    FillZero(pwd);
   end
   else
     // not external DB -> try if aDefinition.Kind is a TRest class

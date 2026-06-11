@@ -37,6 +37,7 @@ uses
   mormot.core.variants,
   mormot.core.json,
   mormot.core.rtti,
+  mormot.core.search,
   mormot.crypt.secure,
   mormot.db.core,
   mormot.db.sql,
@@ -1622,7 +1623,7 @@ var
 begin
   case InternalColumnType(Col, data) of
     ftNull:
-      result := '';
+      FastAssignNew(result);
     ftDouble,
     ftCurrency,
     ftDate:
@@ -1642,7 +1643,7 @@ var
 begin
   case InternalColumnType(Col, data) of
     ftNull:
-      result := '';
+      FastAssignNew(result);
     ftInt64:
       result := Int64ToUtf8(FromVarInt64Value(data{%H-}));
     ftDouble:

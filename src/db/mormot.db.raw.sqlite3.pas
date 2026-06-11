@@ -31,7 +31,7 @@ uses
   mormot.core.perf,
   mormot.core.buffers,
   mormot.core.variants,
-  mormot.core.search, // for soundex functions
+  mormot.core.search, // for soundex JSON-SAX and functions
   mormot.core.log,
   mormot.db.core,
   mormot.lib.static;
@@ -5287,7 +5287,7 @@ type
     // - if a result set exceeds this limit, an ESQLDBException is raised
     // - default is 512 shl 20, i.e. 512MB which is very high
     // - avoid unexpected OutOfMemory errors when incorrect statement is run
-    property StatementMaxMemory: PtrUint
+    property StatementMaxMemory: PtrUInt
       read fStatementMaxMemory write fStatementMaxMemory;
     /// access to the log class associated with this SQLite3 database engine
     // - can be customized, e.g. by overriden TRestServerDB.SetLogClass()
@@ -6387,7 +6387,7 @@ begin
        (V2 = 0) then
       // any invalid date -> compare as UTF-8 strings
       result := Utf8ILComp(s1, s2, s1Len, s2Len)
-    else if SameValue(V1, V2, 1 / MilliSecsPerDay) then
+    else if SameValue(V1, V2, MilliSecsPerDate) then
       result := 0
     else if V1 < V2 then
       result := -1
@@ -6690,9 +6690,9 @@ var
   doc: TDocVariantData;
   json: PUtf8Char;
   info: TGetJsonField;
-  tmp: TSynTempBuffer;
   u: RawUtf8;
   v: PVariant;
+  tmp: TSynTempBuffer;
 begin
   // JsonSet(VariantField,'PropName','abc') to set a value
   // JsonSet(VariantField,'Obj1.Obj2.PropName','def') to set by path
@@ -7019,12 +7019,12 @@ function TSqlDataBase.ExecuteNoExceptionUtf8(const aSql: RawUtf8): RawUtf8;
 begin
   if (self = nil) or
      (DB = 0) then
-    result := ''
+    FastAssignNew(result)
   else
   try
     Execute(aSql, result, true);
   except
-    result := '';
+    FastAssignNew(result);
   end;
 end;
 
@@ -7037,7 +7037,7 @@ var
 begin
   if self = nil then
   begin
-    result := '';
+    FastAssignNew(result);
     exit; // avoid GPF in case of call from a static-only server
   end;
   QueryPerformanceMicroSeconds(start);
@@ -7071,7 +7071,7 @@ begin
   result := R.ExecuteJson(DB, 'explain query plan ' + aSql, true, @cnt, 4096,
     [twoForceJsonExtended, twoIgnoreDefaultInRecord]);
   if cnt = 0 then
-    result := ''; // no query plan
+    FastAssignNew(result); // no query plan
 end;
 
 function TSqlDataBase.ExplainQueryPlan(const aSql: RawUtf8): RawUtf8;
@@ -7255,7 +7255,7 @@ function TSqlDataBase.LockJson(const aSql: RawUtf8;
 begin
   if self = nil then
   begin
-    result := '';
+    FastAssignNew(result);
     exit; // avoid GPF in case of call from a static-only server
   end;
   fSafe.Lock; // cache access is also protected by fSafe
@@ -7277,7 +7277,7 @@ begin
     begin
       // UPDATE, INSERT or any non SELECT statement
       CacheFlush;
-      result := '';
+      FastAssignNew(result);
     end;
   except
     on Exception do
@@ -8328,7 +8328,7 @@ begin
       result := Stream.DataString;
     except
       on ESqlite3Exception do
-        result := '';
+        FastAssignNew(result);
     end;
     // Close has been called in Execute() above since aSql<>''
   finally
@@ -8352,7 +8352,7 @@ begin
     FieldToJson(W, sqlite3.column_value(Request, f), {noblob=}false);
     W.AddComma;
   end;
-  W.CancelLastComma('}');
+  W.ReplaceLastComma('}');
 end;
 
 procedure TSqlRequest.ExecuteDocVariant(aDB: TSqlite3DB; const aSql: RawUtf8;
@@ -8417,7 +8417,7 @@ var
   P: PUtf8Char;
   L, L2: integer;
 begin
-  result := '';
+  FastAssignNew(result);
   if cardinal(Col) >= cardinal(FieldCount) then
     sqlite3_failed(RequestDB, SQLITE_RANGE, 'FieldA');
   P := sqlite3.column_text(Request, Col);
@@ -8476,7 +8476,7 @@ begin
   if Request = 0 then
     sqlite3_failed(RequestDB, SQLITE_MISUSE, 'FieldIndex');
   for result := 0 to FieldCount - 1 do
-    if StrIComp(pointer(aColumnName), sqlite3.column_name(Request, result)) = 0 then
+    if StrIEqual(pointer(aColumnName), sqlite3.column_name(Request, result)) then
       exit;
   result := -1; // not found
 end;

@@ -10,7 +10,6 @@
 
 uses
   Windows,
-  mormot.core.os.security,
   mormot.lib.sspi; // for Low-Level SSPI/SChannel Functions
 
 
@@ -81,42 +80,29 @@ const
   }
 
 type
-  PInAddr = ^in_addr;
-  in_addr = packed record
-    case integer of
-      0: (S_bytes: packed array [0..3] of byte);
-      1: (S_addr: cardinal);
-  end;
-
-  PSockAddrIn = ^sockaddr_in;
-  sockaddr_in = packed record
+  TSockAddrIn = packed record
     case integer of
       0: (sin_family: word;
-          sin_port: word;
-          sin_addr: in_addr;
-          sin_zero: array[0..7] of AnsiChar);
-      1: (sa_family: word;
-          sa_data: array[0..13] of AnsiChar)
+          sin_port:   word;
+          sin_addr:   TNetIP4;
+          sin_zero:   array[0..7] of AnsiChar);
+      1: (sa_family:  word;
+          sa_data:    array[0..13] of AnsiChar)
   end;
+  PSockAddrIn = ^TSockAddrIn;
 
-  PInAddr6 = ^in6_addr;
-  in6_addr = packed record
-    case integer of
-      0: (S6_addr:   THash128);
-      1: (u6_addr8:  packed array [0..15] of byte);
-      2: (u6_addr16: packed array [0..7]  of word);
-      3: (u6_addr32: packed array [0..3]  of integer);
-  end;
-
-  PSockAddrIn6 = ^sockaddr_in6;
-  sockaddr_in6 = packed record
+  TSockAddrIn6 = packed record
     sin6_family:   word;     // AF_INET6
     sin6_port:     word;     // Transport level port number
     sin6_flowinfo: cardinal; // IPv6 flow information
-    sin6_addr:     in6_addr; // IPv6 address
-    sin6_scope_id: cardinal; // Scope Id: IF number for link-local
-                             //           SITE id for site-local
+    sin6_addr:     TNetIP6; // IPv6 address
+    sin6_scope_id: cardinal; // IF number for link-local, SITE id for site-local
   end;
+  PSockAddrIn6 = ^TSockAddrIn6;
+
+  // structure used by kernel to store most addresses
+  TSockAddr = TSockAddrIn;
+  PSockAddr = ^TSockAddr;
 
 const
   INADDR_ANY       = $00000000;
@@ -222,12 +208,6 @@ const
   PF_INET         = AF_INET;
   PF_INET6        = AF_INET6;
   PF_MAX          = AF_MAX;
-
-type
-  // Structure used by kernel to store most addresses
-  PSockAddr = ^TSockAddr;
-  TSockAddr = sockaddr_in;
-  sockaddr = sockaddr_in; // as in POSIX
 
 type
   PAddrInfo = ^TAddrInfo;
@@ -567,10 +547,15 @@ begin
   FillCharFast(Addr, SizeOf(Addr), 0);
 end; // some obscure Windows docs seem to state that zeroing is expected
 
+procedure TNetAddr.SetFamily(fam: cardinal);
+begin
+  PSockAddr(@Addr)^.sin_family := fam;
+end;
+
 function TNetAddr.SetFrom(const address, addrport: RawUtf8;
   layer: TNetLayer): TNetResult;
 var
-  p: cardinal;
+  p: TNetPort;
 begin
   Clear;
   result := nrNotImplemented;
@@ -637,6 +622,45 @@ begin
   // do nothing on Windows
 end;
 
+type
+  TTCPKeepAlive = record
+    onoff: cardinal;
+    keepalivetime: cardinal;
+    keepaliveinterval: cardinal;
+  end;
+const
+  IOC_IN             = DWORD($80000000);
+  IOC_VENDOR         = DWORD($18000000);
+  SIO_KEEPALIVE_VALS = IOC_IN or IOC_VENDOR or 4;
+
+  TCP_KEEPIDLE  = 3;
+  TCP_KEEPINTVL = 17;
+  TCP_KEEPCNT   = 16;
+
+procedure TNetSocketWrap.SetKeepAliveTcp(idle, intvl, cnt: cardinal);
+var
+  ka: TTCPKeepAlive;
+  ret: DWORD;
+  s: TSocket;
+begin
+  s := TSocket(@self);
+  // first try the newest API available
+  if (OSVersion32.win >= wEleven) or // Windows 11 or Windows Server 2019
+     ((OSVersion32.win in [wTen, wTen_64]) and // Windows 10 1709 (16299)
+      (OSVersion32.winbuild >= 16299)) then
+    if setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, @idle, SizeOf(idle)) = NO_ERROR then
+    begin
+      setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, @intvl, SizeOf(intvl));
+      setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT,   @cnt, SizeOf(cnt));
+      exit;
+    end;
+  // fallback to SIO_KEEPALIVE_VALS for Windows 7/8/2016 - cnt not handled
+  ka.onoff := 1;
+  ka.keepalivetime := idle * 1000;
+  ka.keepaliveinterval := intvl * 1000;
+  WSAIoctl(s, SIO_KEEPALIVE_VALS, @ka, SizeOf(ka), nil, 0, @ret, nil, nil);
+end;
+
 const
   // https://techcommunity.microsoft.com/t5/networking-blog/ledbat-background-data-transfer-for-windows/ba-p/3639278
   SIO_PRIORITY_HINT = integer($98000018); // _WSAIOW(IOC_VENDOR,$18)
@@ -681,7 +705,7 @@ begin
 end;
 
 function TNetSocketWrap.WaitFor(ms: integer; scope: TNetEvents;
-  loerr: system.PInteger): TNetEvents;
+  loerr: PNetErrorInt): TNetEvents;
 var
   sock: TSocket;
   rd, wr, er: record
@@ -778,9 +802,10 @@ type
     end;
   end;
 
+const
+  iphlpapi = 'iphlpapi.dll';
 var
-  iphlpapiDll: THandle;
-
+  iphlp: THandle;
   // some iphlpapi.dll late-binded API via DelayedProc()
   GetIpAddrTable: function (pIpAddrTable: PMIB_IPADDRTABLE;
     var pdwSize: DWord; bOrder: BOOL): DWord; stdcall;
@@ -796,13 +821,12 @@ begin
   if Kind = tiaIPv6 then
     exit; // GetIpAddrTable() is an IPv4 only API
   Size := SizeOf(Table);
-  if not DelayedProc(GetIpAddrTable, iphlpapiDll, 'iphlpapi.dll',
-           'GetIpAddrTable') or
+  if not DelayedProc(GetIpAddrTable, iphlp, iphlpapi, 'GetIpAddrTable') or
      (GetIpAddrTable(@Table, Size, false) <> NO_ERROR) then
     exit;
   SetLength(result, Table.dwNumEntries);
   n := 0;
-  for i := 0 to Table.dwNumEntries-1 do
+  for i := 0 to Table.dwNumEntries - 1 do
     with Table.ip[i] do
       if IP4Filter(dwAddr, Kind) then
       begin
@@ -813,6 +837,19 @@ begin
     SetLength(result, n);
 end;
 
+// documented since Windows Vista, but actually available on Windows XP SP3 :)
+function RtlIpv6StringToAddress(s: PUtf8Char; var term: PUtf8Char; in6: PByte): integer;
+  stdcall; external 'NTDLL.DLL' name 'RtlIpv6StringToAddressA';
+
+function InetPton(text: PUtf8Char; value: PByte): boolean;
+var
+  term: PUtf8Char;
+begin
+  term := nil;
+  result := (RtlIpv6StringToAddress(text, term, value) = NO_ERROR) and
+            (term <> nil) and
+            (term^ = #0); // requires full string match just like inet_pton()
+end;
 
 
 { ******************** MAC and DNS Addresses Support }
@@ -906,7 +943,7 @@ type
     DnsSuffix: PWCHAR;
     Description: PWCHAR;
     FriendlyName: PWCHAR;
-    PhysicalAddress: array [0 .. MAX_ADAPTER_ADDRESS_LEN - 1] of byte;
+    PhysicalAddress: array[0 .. MAX_ADAPTER_ADDRESS_LEN - 1] of byte;
     PhysicalAddressLength: DWord;
     Flags: DWord;
     Mtu: DWord;
@@ -914,7 +951,7 @@ type
     OperStatus: DWord;
     // below fields are only available on Windows XP with SP1 and later
     Ipv6IfIndex: DWord;
-    ZoneIndices: array [0..15] of DWord;
+    ZoneIndices: array[0..15] of DWord;
     FirstPrefix: PIP_ADAPTER_PREFIX;
     // below fields are only available on Windows Vista and later
     TransmitLinkSpeed: Int64;
@@ -932,8 +969,8 @@ type
     // DHCP v6 Info following (not used by our code)
   end;
 
-  IP_ADDRESS_STRING = array [0..15] of AnsiChar;
-  IP_ADDR_IP4 = cardinal;
+  IP_ADDRESS_STRING = array[0..15] of AnsiChar;
+  IP_ADDR_IP4 = TNetIP4;
 
   IP_ADDR_STRING = packed record
     IpAddress: IP_ADDRESS_STRING;
@@ -962,7 +999,7 @@ type
   PFIXED_INFO = ^FIXED_INFO;
 
 var
-  // some iphlpapi.dll late-binded API via DelayedProc()
+  // some other iphlpapi.dll late-binded API via DelayedProc()
   GetAdaptersAddresses: function(Family: ULONG; Flags: DWord; Reserved: pointer;
       pAdapterAddresses: PIP_ADAPTER_ADDRESSES; pOutBufLen: PULONG): DWord; stdcall;
   SendARP: function(DestIp: DWord; srcIP: DWord; pMacAddr: pointer;
@@ -972,7 +1009,7 @@ var
   GetBestInterface: function(dwDestAddrIPv4: cardinal;
     var pdwBestIfIndex: DWord): DWord; stdcall;
 
-function _GetDnsAddresses(usePosixEnv, getAD: boolean): TRawUtf8DynArray;
+procedure _GetDnsAddresses(usePosixEnv, getAD: boolean; var result: TRawUtf8DynArray);
 var
   n, l: PtrInt;
   siz: ULONG;
@@ -981,8 +1018,7 @@ var
 begin
   result := nil;
   siz := 0;
-  if not DelayedProc(GetNetworkParams, iphlpapiDll, 'iphlpapi.dll',
-           'GetNetworkParams') or
+  if not DelayedProc(GetNetworkParams, iphlp, iphlpapi, 'GetNetworkParams') or
      (GetNetworkParams(nil, @siz) <> ERROR_BUFFER_OVERFLOW) then
     exit;
   SetLength(tmp, siz);
@@ -1031,8 +1067,7 @@ begin
            GAA_FLAG_INCLUDE_PREFIX;
   if OsVersion >= wVista then
     flags := flags or GAA_FLAG_INCLUDE_GATEWAYS;
-  if not DelayedProc(GetAdaptersAddresses, iphlpapiDll, 'iphlpapi.dll',
-           'GetAdaptersAddresses') or
+  if not DelayedProc(GetAdaptersAddresses, iphlp, iphlpapi, 'GetAdaptersAddresses') or
      (GetAdaptersAddresses(AF_INET, flags, nil, nil, @siz) <> ERROR_BUFFER_OVERFLOW) or
      (siz = 0) then
     exit;
@@ -1087,9 +1122,9 @@ begin
               if b <= 32 then
                 b := IP4Netmask(b)
               else
-                b := IP4Mask(a^.Address.lpSockaddr^.sin_addr.S_addr);
+                b := IP4Mask(a^.Address.lpSockaddr^.sin_addr);
               IP4Text(@b, m^.NetMask);
-              b := a^.Address.lpSockaddr^.sin_addr.S_addr or (not b);
+              b := a^.Address.lpSockaddr^.sin_addr or (not b);
               IP4Text(@b, m^.Broadcast);
               break; // we found the first IPv4 network information
             end;
@@ -1150,8 +1185,7 @@ begin
     exit;
   dwRemoteIP := addr.IP4;
   if (dwRemoteIP <> 0) and
-     DelayedProc(GetBestInterface, iphlpapiDll,
-       'iphlpapi.dll', 'GetBestInterface') and
+     DelayedProc(GetBestInterface, iphlp, iphlpapi, 'GetBestInterface') and
      (GetBestInterface(dwRemoteIP, ifIndex) = NO_ERROR) then
   begin
     all := GetMacAddresses;
@@ -1170,11 +1204,11 @@ function GetRemoteMacAddress(const IP: RawUtf8): RawUtf8;
 var
   dwRemoteIP: DWord;
   PhyAddrLen: Longword;
-  pMacAddr: array [0..7] of byte;
+  pMacAddr: array[0..7] of byte;
 begin
-  result := '';
+  FastAssignNew(result);
   if NetIsIP4(pointer(IP), @dwRemoteIP) and
-     DelayedProc(SendARP, iphlpapiDll, 'iphlpapi.dll', 'SendARP') then
+     DelayedProc(SendARP, iphlp, iphlpapi, 'SendARP') then
   begin
     PhyAddrLen := 8;
     if SendARP(dwremoteIP, 0, @pMacAddr, @PhyAddrLen) = NO_ERROR then
@@ -1501,7 +1535,7 @@ end;
 constructor TWinIocp.Create(processing: integer; options: TWinIocpOptions);
 begin
   if processing = 0 then
-    processing := SystemInfo.dwNumberOfProcessors;
+    processing := CpuThreads;
   fIocp := IocpCreate(INVALID_HANDLE_VALUE, 0, nil, processing);
   if fIocp <= 0 then
     RaiseLastError('TWinIocp: CreateIoCompletionPort', EWinIocp);
@@ -2090,13 +2124,14 @@ begin
   buf.buf[4].BufferType := SECBUFFER_EMPTY;
 end;
 
-procedure CredInit(var cred: TSChannelCred; AllowDeprecatedTLS: boolean;
+procedure CredInit(var cred: TSChannelCred; AllowDeprecatedTLS, DisableTls13: boolean;
   dwFlags: cardinal; paServCred: PPCCERT_CONTEXT);
 begin
   FillCharFast(cred, SizeOf(cred), 0);
   if SChannelEnableTls13 and // should be explicitly enabled
      ((OSVersion in [wEleven, wEleven_64]) or
-      (OSVersion >= wServer2022_64)) then
+      (OSVersion >= wServer2022_64)) and
+     not DisableTls13 then
   // TLS 1.3 is officially supported starting in Windows 11 and Server 2022.
   // Enabling TLS 1.3 on earlier versions of Windows is possible through the
   // registry, but is explictly documented as unsafe by Microsoft.
@@ -2160,7 +2195,7 @@ begin
       else
         f := SCH_CRED_REVOCATION_CHECK_CHAIN or
              SCH_CRED_IGNORE_REVOCATION_OFFLINE;
-      CredInit(cred, Context.AllowDeprecatedTLS, f, nil);
+      CredInit(cred, Context.AllowDeprecatedTLS, Context.DisableTls13, f, nil);
       CheckSEC_E_OK('AcquireCredentialsHandleW', AcquireCredentialsHandleW(
         nil, UNISP_NAME, SECPKG_CRED_OUTBOUND, nil, @cred, nil, nil, @fCred, nil));
       fDataPos := 0;
@@ -2283,7 +2318,8 @@ begin
   // prepare TLS connection properties from AfterBind() global certificate
   if BoundContext.AcceptCert = nil then
     raise ESChannel.Create('AfterAccept: missing AfterBind');
-  CredInit(cred, BoundContext.AllowDeprecatedTls, 0, @BoundContext.AcceptCert);
+  CredInit(cred, BoundContext.AllowDeprecatedTls, BoundContext.DisableTls13,
+    0, @BoundContext.AcceptCert);
   CheckSEC_E_OK('AcquireCredentialsHandleW',
     AcquireCredentialsHandleW(nil, UNISP_NAME, SECPKG_CRED_INBOUND,
       nil, @cred, nil, nil, @fCred, nil));
@@ -2628,10 +2664,12 @@ end;
 function GetExtensionFunc(sock: TSocket; const id: TGuid): pointer;
 var
   ret: cardinal;
+  res: pointer; // safer with an explicit local variable
 begin
-  result := nil;
   if WSAIoctl(sock, SIO_GET_EXTENSION_FUNCTION_POINTER, @id, sizeof(id),
-      @result, SizeOf(result), @ret, nil, nil) <> 0 then
+      @res, SizeOf(res), @ret, nil, nil) = 0 then
+    result := res
+  else
     result := nil;
 end;
 
@@ -2649,8 +2687,7 @@ var
 begin
   // the Windows Sockets API (WSA) needs explicit initialization
   WSAStartup($0202, WsaDataOnce);
-  SocketAPIVersion := RawUtf8(Format('%s.%d',
-    [WsaDataOnce.szDescription, WsaDataOnce.wVersion]));
+  _fmt('%s.%d', [WsaDataOnce.szDescription, WsaDataOnce.wVersion], SocketAPIVersion);
   // get some low-level extended functions for IOCP
   sock := socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
   acceptex := GetExtensionFunc(sock, WSAID_ACCEPTEX);

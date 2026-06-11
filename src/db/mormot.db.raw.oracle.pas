@@ -736,7 +736,7 @@ const
 type
   /// Oracle native number low-level representation
   OCINumber = packed record
-    OCINumberPart: array [0..OCI_NUMBER_SIZE-1] of ub1;
+    OCINumberPart: array[0..OCI_NUMBER_SIZE - 1] of ub1;
   end;
 
 
@@ -919,9 +919,14 @@ type
       Status: integer; ErrorHandle: POCIError;
       InfoRaiseException: boolean = false; LogLevelNoRaise: TSynLogLevel = sllNone);
       {$ifdef HASINLINE}inline;{$endif}
+    /// error handling for SessionBegin() API call
     procedure CheckSession(Conn: TSqlDBConnection; Stmt: TSqlDBStatement;
       Status: integer; ErrorHandle: POCIError;
       InfoRaiseException: boolean = false; LogLevelNoRaise: TSynLogLevel = sllNone);
+    /// log a warning for Status = OCI_SUCCESS_WITH_INFO
+    function CheckSuccessInfo(Stmt: TSqlDBStatement; Status: integer;
+      ErrorHandle: POCIError): boolean;
+      {$ifdef HASINLINE}inline;{$endif}
     /// retrieve some BLOB content
     procedure BlobFromDescriptor(Stmt: TSqlDBStatement; svchp: POCISvcCtx;
       errhp: POCIError; locp: POCIDescriptor; out result: RawByteString); overload;
@@ -1604,21 +1609,28 @@ begin
   end;
 end;
 
+function TSqlDBOracleLib.CheckSuccessInfo(Stmt: TSqlDBStatement; Status: integer;
+  ErrorHandle: POCIError): boolean;
+begin
+  if Status = OCI_SUCCESS_WITH_INFO then
+    HandleError(nil, Stmt, Status, ErrorHandle, {raise=}false, sllWarning);
+end;
+
 function TSqlDBOracleLib.ClientRevision: RawUtf8;
 begin
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else
-    result := FormatUtf8('% rev. %.%.%.%',
-      [fLibraryPath, major_version, minor_version, update_num, patch_num]);
+    FormatUtf8('% rev. %.%.%.%',
+      [fLibraryPath, major_version, minor_version, update_num, patch_num], result);
 end;
 
 var
-  _NLSLANG: AnsiString = '';
+  _NLSLANG: RawUtf8 = '';
 
 procedure SetNlsLang;
 begin
-  _NLSLANG := AnsiString(GetEnvironmentVariable('NLS_LANG'));
+  _NLSLANG := GetSystemEnv('NLS_LANG');
   if _NLSLANG = '' then
     _NLSLANG := '-';
 end;
@@ -1673,7 +1685,7 @@ begin
     LibraryFileName := LIBNAME;
   if (SynDBOracleOCIpath <> '') and
      DirectoryExists(SynDBOracleOCIpath) then
-    l1 := MakePath([SynDBOracleOCIpath, LibraryFileName]);
+    MakePath([SynDBOracleOCIpath, LibraryFileName], l1);
   l2 := Executable.ProgramFilePath + LibraryFileName;
   if not FileExists(l2) then
   begin
@@ -1682,7 +1694,7 @@ begin
         l2 := Executable.ProgramFilePath + 'OracleInstantClient';
     l2 := l2 + PathDelim + LibraryFileName;
   end;
-  l3 := GetEnvironmentVariable('ORACLE_HOME');
+  l3 := GetSystemEnvString('ORACLE_HOME');
   if l3 <> '' then
     l3 := MakePath([l3, 'bin', LibraryFileName]);
   try

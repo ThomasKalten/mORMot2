@@ -355,11 +355,11 @@ end;
 
 const
   // RawUtf8 is defined as weak system.UTF8String type in mormot.core.base
-  UTF8_NAME: string[7] = 'RawUtf8';
+  UTF8_NAME: TShort7 = 'RawUtf8';
   // FPC RTTI names integer type as "longint"
-  INTEGER_NAME: string[7] = 'Integer';
+  INTEGER_NAME: TShort7 = 'Integer';
   // FPC RTTI names cardinal type as "longword"
-  CARDINAL_NAME: string[8] = 'Cardinal';
+  CARDINAL_NAME: TShort8 = 'Cardinal';
 
 function TRttiInfo.Name: PShortString;
 begin
@@ -368,16 +368,16 @@ begin
   if result <> nil then
     if result <> TypeInfo(integer) then
       if result <> TypeInfo(cardinal) then
-        if result <> TypeInfo(RawUtf8) then
-          result := @RawName     // as stored in RTTI
+        if result <> TypeInfo(RawUtf8) then // = TypeInfo(Utf8String)
+          result := @RawName                // as stored in RTTI
         else
-          result := @UTF8_NAME   // instead of 'UTF8String'
+          result := @UTF8_NAME              // instead of 'UTF8String'
       else
-        result := @CARDINAL_NAME // instead of 'longword'
+        result := @CARDINAL_NAME            // instead of 'longword'
     else
-      result := @INTEGER_NAME    // instead of 'longint'
+      result := @INTEGER_NAME               // instead of 'longint'
   else
-    result := @NULCHAR;          // instead of a GPF
+    result := @NULCHAR;                     // instead of a GPF
 end;
 
 function TRttiInfo.RecordSize: PtrInt;
@@ -656,42 +656,38 @@ end;
 
 const
   // gather rk* to reduce number of TRttiCustomListPairs hash slots in memory
-  RK_TOSLOT_MAX = {$ifdef NOPATCHVMT} 11 {$else} 10 {$endif NOPATCHVMT};
+  RK_TOSLOT_MAX = 9;
   RK_TOSLOT: array[TRttiKind] of byte = (
-    0,   // rkUnknown
-    1,   // rkInteger
-    2,   // rkChar
-    3,   // rkEnumeration
-    4,   // rkFloat
-    5,   // rkSet
-    0,   // rkMethod
-    0,   // rkSString
-    6,   // rkLStringOld
-    6,   // rkLString
-    7,   // rkWString
-    7,   // rkVariant
-    2,   // rkArray
-    8,   // rkRecord
-    7,   // rkInterface
-    {$ifdef NOPATCHVMT}
-    11,  // rkClass
-    {$else}
-    4,   // vmtAutoTable is used instead of rkClass slot
-    {$endif NOPATCHVMT}
-    8,  // rkObject
-    2,   // rkWChar
-    3,   // rkBool
-    9,   // rkInt64
-    9,   // rkQWord
-    10,  // rkDynArray
-    0,   // rkInterfaceRaw
-    0,   // rkProcVar
-    7,   // rkUString
-    2,   // rkUChar
-    0,   // rkHelper
-    0,   // rkFile
-    0,   // rkClassRef
-    0);  // rkPointer
+    0,  // rkUnknown
+    1,  // rkInteger
+    2,  // rkChar
+    3,  // rkEnumeration
+    2,  // rkFloat
+    4,  // rkSet
+    0,  // rkMethod
+    0,  // rkSString
+    5,  // rkLStringOld
+    5,  // rkLString
+    6,  // rkWString
+    6,  // rkVariant
+    1,  // rkArray
+    7,  // rkRecord
+    6,  // rkInterface
+    0,  // rkClass - vmtAutoTable may be used instead of rkClass slot
+    7,  // rkObject
+    2,  // rkWChar
+    3,  // rkBool
+    8,  // rkInt64
+    8,  // rkQWord
+    9,  // rkDynArray
+    1,  // rkInterfaceRaw
+    1,  // rkProcVar
+    2,  // rkUString
+    2,  // rkUChar
+    0,  // rkHelper
+    0,  // rkFile
+    0,  // rkClassRef
+    1); // rkPointer
 
 
 { ********* Redirect Most Used FPC RTL Functions to Optimized x86_64 Assembly }
@@ -969,9 +965,9 @@ end;
 procedure _ansistr_concat_convert(var dest: RawByteString;
   const s1, s2: RawByteString; cp, cp1, cp2: cardinal);
 var
-  t1, t2, t: TSynTempBuffer; // avoid most memory allocations
   p1, p2, p: PAnsiChar;
   eng: TSynAnsiConvert;
+  t1, t2, t: TSynTempBuffer; // avoid most memory allocations
 begin
   p1 := AnsiBufferToTempUtf8(t1, pointer(s1), length(s1), cp1);
   p2 := AnsiBufferToTempUtf8(t2, pointer(s2), length(s2), cp2);
@@ -1193,6 +1189,13 @@ begin
 end;
 
 {$endif FPC_HAS_CPSTRING}
+
+// Win64 seems not to like our patched RTL for the DEBUG stack trace
+{$ifdef OSWINDOWS}
+  {$ifdef DEBUG}
+    {$define NOPATCHRTL}
+  {$endif DEBUG}
+{$endif OSWINDOWS}
 
 procedure RedirectRtl;
 {$ifndef NOPATCHRTL}

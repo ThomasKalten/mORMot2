@@ -335,7 +335,7 @@ procedure BlowFishEncryptCtr(src, dest: PQWord; len: PtrUInt;
   const state: TBlowFishState; iv: PQWord);
 
 // published for testing purposes
-procedure BlowFishCtrInc(iv: PQWord); {$ifndef CPUINTEL} inline; {$endif}
+procedure BlowFishCtrInc(iv: PQWord); {$ifndef ASMINTEL} inline; {$endif}
 
 /// regular BlowFish key setup with a given salt and UTF-8 password
 // - Salt is expected to be 16 bytes = 128-bit, e.g. from Random128()
@@ -345,12 +345,17 @@ procedure BlowFishKeySetup(var State: TBlowFishState;
   Salt: PHash128Rec; const Password: RawUtf8); overload;
 
 /// prepare a password into a binary key usable for BlowFishKeySetup()
-// - Salt and Key will also be converted to big-endian
-// - caller should call FillZero(key) once done with this sensitive buffer
+// - Key is filled with the repeated Password and converted to big-endian
+// - SaltBE returns a big-endian copy of Salt^; the caller's Salt^ buffer is
+// not modified (previous versions byte-swapped Salt^ in place, which
+// segfaulted on POSIX targets when the caller passed a pointer into
+// rodata - e.g. @BLOWFISHCTR_DEFAULTSALT - and silently corrupted any
+// writable typed-const salt on Delphi/Windows)
+// - caller should FillZero(Key) once done
 // - return the number of 64-bit blocks of the padded key
 // - by design, Password will be truncated to 72 bytes (BLOWFISH_MAXKEYLEN)
 function BlowFishPrepareKey(const Password: RawUtf8; Salt: PHash128Rec;
-  out Key: RawByteString): PtrInt;
+  out SaltBE: THash128Rec; out Key: RawByteString): PtrInt;
 
 /// raw BlowFish key setup with binary input parameters
 // - salt is expected to be 16 bytes = 128-bit
@@ -1078,9 +1083,9 @@ begin
       begin
         // encrypt data
         if (pi = po) and
-           (pi <> nil) then
+           (pi <> nil) then // Head in po^ will overflow data in pi^
         begin
-          assert(false); // Head in po^ will overflow data in pi^
+          ESynCrypto.RaiseU('Unexpected EncodeDecode overflow');
           result := 0;
           exit;
         end;
@@ -1179,19 +1184,19 @@ begin
   fBufCount := 0;
 end;
 
-function TAesWriteStream.{%H-}Read(var Buffer; Count: integer): Longint;
+function TAesWriteStream.{%H-}Read(var Buffer; Count: Longint): Longint;
 begin
   ESynCrypto.RaiseUtf8('Unexpected %.Read', [self]);
   result := 0; // make compiler happy
 end;
 
-function TAesWriteStream.{%H-}Seek(Offset: integer; Origin: Word): Longint;
+function TAesWriteStream.{%H-}Seek(Offset: Longint; Origin: Word): Longint;
 begin
   ESynCrypto.RaiseUtf8('Unexpected %.Seek', [self]);
   result := 0; // make compiler happy
 end;
 
-function TAesWriteStream.Write(const Buffer; Count: integer): Longint;
+function TAesWriteStream.Write(const Buffer; Count: Longint): Longint;
 // most of the time, a 64KB-buffered compressor have BufCount=0
 // will crypt 'const Buffer' memory in place -> use AFTER T*Compressor
 var
@@ -1477,7 +1482,7 @@ const
       $d6ebe1f9, $90d4f869, $a65cdea0, $3f09252d, $c208e69f, $b74e6132, $ce77e25b,
       $578fdfe3, $3ac372e6));
 
-{$ifdef OSLINUXX64} // this asm is only marginally faster than pure pascal code
+{$ifdef ASMX64LINUX} // this asm is only marginally faster than pure pascal code
 
 // result := (((s[(x shr 24)] + s[$100 + ToByte(x shr 16)]) xor
 //           s[$200 + ToByte(x shr 8)]) + s[$300 + ToByte(x)]);
@@ -1563,7 +1568,7 @@ begin
   block.H := L;
 end;
 
-{$endif OSLINUXX64}
+{$endif ASMX64LINUX}
 
 // XOR all PBox[] with the encryption key - supplied as multiple of 64-bit
 procedure ExpandKey(pbox: PQwordArray; key: PQwordArray; keyblocks: PtrUInt);
@@ -1604,7 +1609,7 @@ begin
 end;
 
 function BlowFishPrepareKey(const Password: RawUtf8; Salt: PHash128Rec;
-  out Key: RawByteString): PtrInt;
+  out SaltBE: THash128Rec; out Key: RawByteString): PtrInt;
 var
   p: PUtf8Char;
   plen, n: PtrInt;
@@ -1628,9 +1633,10 @@ begin
   until n = 0;
   if result > BLOWFISH_MAXKEYLEN then
     result := BLOWFISH_MAXKEYLEN; // in-place truncation to 72 bytes
-  // prepare Salt and Key to be in Big-Endian format
+  // produce big-endian Key (mutated locally) and big-endian Salt (out-param)
   bswap32array(pointer(Key), result shr 2);
-  bswap32array(pointer(Salt), BLOWFISH_SALTLEN shr 2);
+  SaltBE := Salt^; // copy then swap, so the caller's Salt^ stays untouched
+  bswap32array(@SaltBE, BLOWFISH_SALTLEN shr 2);
   result := result shr 3; // return the number of 64-bit blocks
 end;
 
@@ -1639,10 +1645,12 @@ procedure BlowFishKeySetup(var State: TBlowFishState;
 var
   key: RawByteString;
   blocks: PtrInt;
+  saltBE: THash128Rec; // big-endian copy produced by BlowFishPrepareKey
 begin
-  blocks := BlowFishPrepareKey(Password, Salt, key);
-  BlowFishKeySetup(State, pointer(Salt), pointer(key), blocks);
+  blocks := BlowFishPrepareKey(Password, Salt, saltBE, key);
+  BlowFishKeySetup(State, @saltBE, pointer(key), blocks);
   FillZero(key); // anti-forensic
+  FillZero(saltBE.b); // paranoid
 end;
 
 procedure BlowFishKeyClear(var State: TBlowFishState);
@@ -1650,9 +1658,17 @@ begin
   FillCharFast(State.PBox, SizeOf(State.PBox), 0); // it is enough to fill PBox
 end;
 
-{$ifdef CPUINTEL}
-{$ifdef CPUX86}
 procedure BlowFishCtrInc(iv: PQWord);
+{$ifdef ASMINTEL}
+{$ifdef ASMX64}
+{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+        mov     rax, qword ptr [iv]
+        bswap   rax
+        add     rax, 1
+        bswap   rax
+        mov     qword ptr [iv], rax
+end;
+{$else}
 {$ifdef FPC}nostackframe; assembler;{$endif}
 asm
 @1:     mov     ecx, dword ptr [eax]
@@ -1666,22 +1682,12 @@ asm
         mov     dword ptr [eax], ecx
         mov     dword ptr [eax + 4], edx
 end;
+{$endif ASMX64}
 {$else}
-procedure BlowFishCtrInc(iv: PQWord);
-{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
-        mov     rax, qword ptr [iv]
-        bswap   rax
-        add     rax, 1
-        bswap   rax
-        mov     qword ptr [iv], rax
-end;
-{$endif CPUX86}
-{$else}
-procedure BlowFishCtrInc(iv: PQWord);
 begin
   iv^ := bswap64(bswap64(iv^) + 1);
 end;
-{$endif CPUINTEL}
+{$endif ASMINTEL}
 
 procedure BlowFishEncryptCtr(src, dest: PQWord; len: PtrUInt;
   const state: TBlowFishState; iv: PQWord);
@@ -1757,7 +1763,7 @@ var
   d, piv: PQWord;
   tmpiv: QWord;
 begin
-  result := '';
+  FastAssignNew(result);
   len := length(Input);
   if len = 0 then
     exit;
@@ -1782,7 +1788,7 @@ var
   s, piv: PQWord;
   tmpiv: QWord;
 begin
-  result := '';
+  FastAssignNew(result);
   len := length(Input);
   if len = 0 then
     exit;
@@ -1826,6 +1832,7 @@ procedure BCryptExpensiveKeySetup(var State: TBlowFishState;
 var
   i, blocks: PtrUInt;
   key: RawByteString;
+  saltBE: THash128Rec; // big-endian copy produced by BlowFishPrepareKey
 begin
   if (Cost < 4) or
      (Cost > 31) then
@@ -1833,17 +1840,18 @@ begin
   if Salt = nil then
     ESynCrypto.RaiseU('BCrypt: missing Salt');
   // prepare the 64-bit padded binary key from the supplied Password
-  blocks := BlowFishPrepareKey(Password, Salt, key);
+  blocks := BlowFishPrepareKey(Password, Salt, saltBE, key);
   // permute PBox and SBox based on the password and salt - the BlowFish setup
-  BlowFishKeySetup(State, pointer(Salt), pointer(key), blocks);
+  BlowFishKeySetup(State, @saltBE, pointer(key), blocks);
   // this is the "Expensive" part of the "Expensive Key Setup"
   for i := 1 to (1 shl Cost) do
   begin
     BCryptExpensiveRound(State, pointer(key), blocks);
-    BCryptExpensiveRound(State, pointer(Salt), BCRYPT_SALTLEN shr 3);
+    BCryptExpensiveRound(State, @saltBE, BCRYPT_SALTLEN shr 3);
   end;
   // anti-forensic measure
   FillZero(key);
+  FillZero(saltBE.b); // paranoid
 end;
 
 const
@@ -1869,7 +1877,7 @@ begin
   FastAssignNew(result);
   // decode the supplied salt or generate a new one
   if HASH64_DEC[#255] = 0 then // check the last byte for thread-safe init
-    FillBaseDecoder(@HASH64_ENC, @HASH64_DEC, high(HASH64_ENC));
+    FillBaseDecoder(@HASH64_ENC, @HASH64_DEC);
   if not TAesPrng.Main.RandomSalt(
            saltbin, saltb64, BCRYPT_SALTLEN, Salt, @HASH64_ENC, @HASH64_DEC) or
          (length(saltbin) <> BCRYPT_SALTLEN) then // always 16 bytes
@@ -1918,8 +1926,8 @@ end;
 
 { **************** SCrypt Password-Hashing Function }
 
-{$ifdef CPUINTEL}
-{$ifdef CPUX64}
+{$ifdef ASMINTEL}
+{$ifdef ASMX64}
 
 {$ifdef FPC}
   {$WARN 7105 off : Use of -offset(%esp) }
@@ -2159,7 +2167,7 @@ asm
         mov     [esp + 60], eax
         mov     eax, ebp
         mov     ebp, [esp + 28]
-{$ifdef FPC} align 8 {$else} {$ifdef HASALIGN} .align 8 {$endif}{$endif}
+{$ifdef FPC} align 8 {$else} {$ifdef ASMALIGN} .align 8 {$endif}{$endif}
 @s:     mov     ebx, [esp + 16]
         mov     esi, [esp + 24]
         add     ebx, edx
@@ -2338,7 +2346,7 @@ asm
         add     esp, 156
         pop     ebx
         xor     esi, esi
-        {$ifdef FPC} align 8 {$else} {$ifdef HASALIGN} .align 8 {$endif}{$endif}
+        {$ifdef FPC} align 8 {$else} {$ifdef ASMALIGN} .align 8 {$endif}{$endif}
 @1:     mov     eax, [edx + esi]
         add     [ebx + esi], eax
         add     esi, 4
@@ -2349,7 +2357,7 @@ asm
         pop     edi
         pop     ebp
 end;
-{$endif CPUX64}
+{$endif ASMX64}
 {$else}
 procedure Salsa20x8(B: PCardinalArray);
 var
@@ -2395,9 +2403,9 @@ begin // single B parameter keep the stack small and all offsets in [rsp+0..$7f]
   for i := 0 to 15 do
     inc(B[i], x[i]);
 end;
-{$endif CPUINTEL}
+{$endif ASMINTEL}
 
-{$ifdef CPUSSE2}
+{$ifdef ASMSSE2}
 
 // our SSE2 optimized version for i386 and x86_64 - faster than OpenSSL
 {
@@ -2423,18 +2431,18 @@ begin
   until count = 0;
 end;
 
-{$ifdef CPUX64}
+{$ifdef ASMX64}
 procedure SBlockMix(dst, src, bxor: pointer; R: PtrUInt);
 {$ifdef FPC} assembler; nostackframe; asm {$else} asm .noframe {$endif}
         // rcx/rdi=dst rdx/rsi=src r8/rdx=BXor r9/rcx=R
-        {$ifdef WIN64ABI}
+        {$ifdef ABIWINX64}
         push    rsi   // Win64 expects those registers to be preserved
         push    rdi
         mov     rdi, rcx
         mov     rsi, rdx
         mov     rdx, r8
         mov     rcx, r9
-        {$endif WIN64ABI}
+        {$endif ABIWINX64}
         shl     rcx, 7
         lea     rax, [rsi + rcx - 40H]
         lea     r9,  [rdx + rcx - 40H]
@@ -2547,10 +2555,10 @@ procedure SBlockMix(dst, src, bxor: pointer; R: PtrUInt);
         movaps  [rax + 20H], xmm2
         movaps  [rax + 30H], xmm3
         jne     @loop
-        {$ifdef WIN64ABI}
+        {$ifdef ABIWINX64}
         pop     rdi
         pop     rsi
-        {$endif WIN64ABI}
+        {$endif ABIWINX64}
 end;
 
 {$else}
@@ -2686,7 +2694,7 @@ asm
         pop     esi
         pop     ebx
 end;
-{$endif CPUX64}
+{$endif ASMX64}
 
 procedure SMix(R, N: PtrUInt; X, Y, V: PCardinalArray);
 var
@@ -2761,7 +2769,7 @@ begin
   until i >= N;
 end;
 
-{$endif CPUSSE2}
+{$endif ASMSSE2}
 
 function SCryptMemoryUse(N, R, P: QWord): QWord;
 begin
@@ -2776,7 +2784,7 @@ var
   XY, V: PByteArray; // allocate X[R*128] Y[R*128] and V[N*R*128]
   d: pointer;
 begin
-  result := '';
+  FastAssignNew(result);
   // validate parameters
   R128 := R * 128;
   if (DestLen < 16) or
@@ -2819,9 +2827,9 @@ begin
   assert(SizeOf(TAesFullHeader) = SizeOf(TAesBlock));
   {$endif PUREMORMOT2}
   BCrypt := @BCryptHash; // to implement mcfBCrypt in mormot.crypt.secure
-  {$ifndef CPUSSE2} // our SSE2 code above is faster than OpenSSL :)
+  {$ifndef ASMSSE2}      // our SSE2 asm code above is faster than OpenSSL :)
   if not Assigned(SCrypt) then // if OpenSSL is not already set
-  {$endif CPUSSE2}
+  {$endif ASMSSE2}
     SCrypt := @RawSCrypt;
 end;
 

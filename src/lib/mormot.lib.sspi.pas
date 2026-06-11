@@ -753,8 +753,7 @@ var
 /// client-side authentication procedure
 // - aSecContext holds information between function calls
 // - aInData contains data received from server
-// - aSecKerberosSpn is the optional SPN domain name, e.g.
-// 'mymormotservice/myserver.mydomain.tld'
+// - aSecKerberosSpn is the plain Service Principal Name, e.g. 'HTTP/webserver@REALM'
 // - aOutData contains data that must be sent to server
 // - if function returns True, client must send aOutData to server
 // and call function again with the data returned from servsr
@@ -777,6 +776,10 @@ function ClientSspiAuthWithPassword(var aSecContext: TSecContext;
   const aInData: RawByteString; const aUserName: RawUtf8;
   const aPassword: SpiUtf8;  const aSecKerberosSpn: RawUtf8;
   out aOutData: RawByteString): boolean;
+
+/// check if the password is a local keytab/ccache file with a FILE: prefix
+// - always return false with SSPI which does not support those keytabs
+function ClientSspiPasswordIsFile(const aPassword: SpiUtf8): boolean;
 
 /// check if a binary request packet from a client is using NTLM
 function ServerSspiDataNtlm(const aInData: RawByteString): boolean;
@@ -817,8 +820,11 @@ function SecPackageName(var aSecContext: TSecContext): RawUtf8;
 
 /// force using a Kerberos SPN for server identification
 // - aSecKerberosSpn is the Service Principal Name, as registered in domain,
-// e.g. 'mymormotservice/myserver.mydomain.tld@MYDOMAIN.TLD'
+// e.g. 'HTTP/webserver@REALM'
 procedure ClientForceSpn(const aSecKerberosSpn: RawUtf8);
+
+/// return the value set by ClientForceSpn()
+function ClientForcedSpn: RawUtf8;
 
 /// high-level cross-platform initialization function
 // - e.g. by mormot.rest.client/server.pas or mormot.net.client/ldap/server
@@ -853,15 +859,10 @@ const
 // netapi32.dll API calls
 
 const
-  netapi32 = 'netapi32.dll';
-
   MAX_PREFERRED_LENGTH = cardinal(-1);
   LG_INCLUDE_INDIRECT = 1;
-  NERR_Success = 0;
 
 type
-  TNetApiStatus = cardinal;
-
   // _USER_INFO_0, _LOCALGROUP_MEMBERS_INFO_3 and _LOCALGROUP_INFO_0 do match
   TGroupInfo0 = record
     name: PWideChar;
@@ -886,8 +887,6 @@ type
 
 function NetApiBufferAllocate(ByteCount: cardinal;
   var Buffer: pointer): TNetApiStatus; stdcall;
-
-function NetApiBufferFree(Buffer: pointer): TNetApiStatus; stdcall;
 
 function NetApiBufferReallocate(OldBuffer: pointer; NewByteCount: cardinal;
   var NewBuffer: pointer): TNetApiStatus; stdcall;
@@ -1184,7 +1183,7 @@ end;
 function TSecPkgConnectionInfo.ToText: RawUtf8;  // fallback on XP
 var
   h: byte;
-  alg, hsh, xch: string[5];
+  alg, hsh, xch: TShort23;
 begin
   // see https://learn.microsoft.com/en-us/windows/win32/seccrypto/alg-id                       
   FixProtocol(dwProtocol);
@@ -1195,7 +1194,7 @@ begin
   else if aiCipher = $6603 then
     alg := '3DES-'
   else
-    str(aiCipher and $1f, alg);
+    ToShortU(aiCipher and $1f, @alg);
   h := aiHash and $1f;
   case h of
     1..2:
@@ -1220,7 +1219,7 @@ begin
     9:
       hsh := 'HMAC';
   else
-    str(h, hsh);
+    ToShortU(h, @hsh);
   end;
   if (aiExch = $a400) or
      (aiExch = $2400) then
@@ -1234,9 +1233,9 @@ begin
   else if aiExch = $2203 then
     xch := 'ECDSA'
   else
-    str(aiExch, xch);
-  result := RawUtf8(format('%s%d-%s%d-%s%d TLSv1.%d ',
-    [xch, dwExchStrength, alg, dwCipherStrength, hsh, dwHashStrength, dwProtocol]));
+    ToShortU(aiExch, @xch);
+  _fmt('%s%d-%s%d-%s%d TLSv1.%d ', [xch, dwExchStrength, alg,
+    dwCipherStrength, hsh, dwHashStrength, dwProtocol], result);
 end;
 
 
@@ -1294,14 +1293,14 @@ function SecEncrypt(var aSecContext: TSecContext;
 var
   sizes: TSecPkgContext_Sizes;
   len: cardinal;
-  token:   array [0..127] of byte; // Usually 60 bytes
-  padding: array [0..63]  of byte; // Usually 1 byte
+  token:   array[0..127] of byte; // Usually 60 bytes
+  padding: array[0..63]  of byte; // Usually 1 byte
   inDesc: TSecBufferDesc;
   buffer: RawByteString;
   status: integer;
   res: PByte;
 begin
-  result := '';
+  FastAssignNew(result);
   // sizes.cbSecurityTrailer is size of the trailer (signature + padding) block
   if QueryContextAttributesW(
        @aSecContext.CtxHandle, SECPKG_ATTR_SIZES, @sizes) <> 0 then
@@ -1386,7 +1385,7 @@ var
   nfo: TSecPkgConnectionInfo;
   cip: TSecPkgCipherInfo; // Vista+ attribute
 begin
-  result := '';
+  FastAssignNew(result);
   FillCharFast(nfo, SizeOf(nfo), 0);
   if QueryContextAttributesW(
       @Ctxt, SECPKG_ATTR_CONNECTION_INFO, @nfo) <> SEC_E_OK then
@@ -1399,8 +1398,8 @@ begin
      (cip.szCipherSuite[0] <> #0) then
   begin
     FixProtocol(nfo.dwProtocol); // cip.dwProtocol seems incorrect :(
-    result := RawUtf8(format('%s TLSv1.%d ',
-      [PWideChar(@cip.szCipherSuite), nfo.dwProtocol]));
+    _fmt('%s TLSv1.%d ',
+      [PWideChar(@cip.szCipherSuite), nfo.dwProtocol], result);
   end
   else
     result := nfo.ToText; // fallback on XP
@@ -1425,7 +1424,7 @@ function TlsCertRaw(var Ctxt: TCtxtHandle; SignOid: PRawUtf8): RawByteString;
 var
   nfo: PCCERT_CONTEXT;
 begin
-  result := '';
+  FastAssignNew(result);
   if SignOid <> nil then
     SignOid^ := '';
   nfo := nil;
@@ -1486,7 +1485,7 @@ var
   i, j, o: PtrInt;
   t: RawUtf8;
 begin
-  result := '';
+  FastAssignNew(result);
   o := 1;
   repeat
     i := PosEx(Pattern, Text, o);
@@ -1519,7 +1518,7 @@ end;
 
 function ParseAltNames(P: PByteArray; L: PtrInt): RawUtf8;
 begin // rough parsing, but works with most simple content
-  result := '';
+  FastAssignNew(result);
   { 2.5.29.17 = 30:20:
                   82:0c: 73:79:6e:6f:70:73:65:2e:69:6e:66:6f:
                   82:10: 77:77:77:2e:73:79:6e:6f:70:73:65:2e:69:6e:66:6f
@@ -1684,29 +1683,29 @@ end;
 function _WinCertInfoToText(const c: TWinCertInfo): RawUtf8;
 begin
   // roughly follow X509_print() OpenSSL formatting with basic fields only
-  result :=
+  Join([
     'Certificate:'#13#10 +
     '  Serial Number:'#13#10 +
-    '    ' + c.Serial + #13#10 +
-    '  Signature Algorithm: ' + c.AlgorithmName + #13#10 +
-    '  Issuer: ' + c.IssuerName + #13#10 +
+    '    ', c.Serial, #13#10 +
+    '  Signature Algorithm: ', c.AlgorithmName, #13#10 +
+    '  Issuer: ', c.IssuerName, #13#10 +
     '  Validity:'#13#10 +
-    '    Not Before: ' + RawUtf8(DateTimeToIsoString(c.NotBefore)) + #13#10 +
-    '    Not After : ' + RawUtf8(DateTimeToIsoString(c.NotAfter)) + #13#10 +
-    '  Subject: ' + c.SubjectName + #13#10 +
+    '    Not Before: ', DoDateTimeToText(c.NotBefore), #13#10 +
+    '    Not After : ', DoDateTimeToText(c.NotAfter), #13#10 +
+    '  Subject: ', c.SubjectName, #13#10 +
     '  Subject Public Key Info:'#13#10 +
-    '    Public Key Algorithm: ' + c.PublicKeyAlgorithmName + #13#10 +
-    '    OID: ' + c.PublicKeyAlgorithm + #13#10 +
-    '  X509v3 extensions:'#13#10;
+    '    Public Key Algorithm: ', c.PublicKeyAlgorithmName, #13#10 +
+    '    OID: ', c.PublicKeyAlgorithm, #13#10 +
+    '  X509v3 extensions:'#13#10], result);
   if c.SubjectID <> '' then
-    result := result + '    X509v3 Subject Key Identifier:'#13#10 +
-                       '      ' + c.SubjectID + #13#10;
+    result := Join([result, '    X509v3 Subject Key Identifier:'#13#10 +
+                            '      ', c.SubjectID, #13#10]);
   if c.IssuerID <> '' then
-    result := result + '    X509v3 Authority Key Identifier:'#13#10 +
-                       '      ' + c.IssuerID + #13#10;
+    result := Join([result, '    X509v3 Authority Key Identifier:'#13#10 +
+                            '      ', c.IssuerID, #13#10]);
   if c.SubjectAltNames <> '' then
-    result := result + '    X509v3 Subject Alternative Name:'#13#10 +
-                       '      ' + c.SubjectAltNames + #13#10;
+    result := Join([result, '    X509v3 Subject Alternative Name:'#13#10 +
+                            '      ', c.SubjectAltNames, #13#10]);
   // other extensions will be properly written by mormot.crypt.secure code
 end;
 
@@ -1826,7 +1825,7 @@ begin
   begin
     if spn <> nil then
     begin
-      // extract from 'mymormotservice/myserver.mydomain.tld@MYDOMAIN.TLD'
+      // extract from 'HTTP/webserver@REALM'
       u := RawUtf8(spn);
       j := PosExChar('@', u);
       if j <> 0 then
@@ -1854,11 +1853,15 @@ begin
   //FillCharFast(pointer(password)^, length(password) * 2, 0); // anti-forensic
 end;
 
+function ClientSspiPasswordIsFile(const aPassword: SpiUtf8): boolean;
+begin
+  result := false;
+end;
+
 function ServerSspiDataNtlm(const aInData: RawByteString): boolean;
 begin
   result := (aInData <> '') and
-            (PCardinal(aInData)^ or $20202020 =
-               ord('n') + ord('t') shl 8 + ord('l') shl 16 + ord('m') shl 24);
+            (PCardinal(aInData)^ or $20202020 = NTLM_LOW);
 end;
 
 function ServerSspiAuth(var aSecContext: TSecContext;
@@ -1951,6 +1954,11 @@ begin
   ForceSecKerberosSpn := SynUnicode(aSecKerberosSpn);
 end;
 
+function ClientForcedSpn: RawUtf8;
+begin
+  result := RawUtf8(ForceSecKerberosSpn); // from SynUnicode
+end;
+
 procedure GetPackageNames;
 var
   SecPkgInfo: PSecPkgInfoW;
@@ -1985,7 +1993,6 @@ end;
 { ****************** Lan Manager Access Functions }
 
 function NetApiBufferAllocate;    external netapi32;
-function NetApiBufferFree;        external netapi32;
 function NetApiBufferReallocate;  external netapi32;
 function NetApiBufferSize;        external netapi32;
 
@@ -2103,7 +2110,7 @@ begin
       for i := 0 to integer(dwEntriesRead) - 1 do
       begin
         Win32PWideCharToUtf8(g^.name, result[i]);
-        sid^[i] := SidToText(g^.group_sid);
+        SidToText(g^.group_sid, sid^[i]);
         inc(g);
       end;
       NetAPIBufferFree(v);
@@ -2122,7 +2129,7 @@ var
   name: RawUtf8;
   srv: TSynTempBuffer;
 begin
-  result := '';
+  FastAssignNew(result);
   if GroupName = '' then
     exit;
   s := Utf8ToWin32PWideChar(Server, srv);
@@ -2140,7 +2147,7 @@ begin
       Win32PWideCharToUtf8(g^.name, Name);
       if PropNameEquals(Name, GroupName) then
       begin
-        result := SidToText(g^.group_sid);
+        SidToText(g^.group_sid, result);
         break;
       end;
       inc(g);
@@ -2204,8 +2211,8 @@ function MsiGetFileSignatureInformationW; external msidll;
 
 function MsiGetString(hRecord: TMsiHandle; index: integer; var str: RawUtf8): boolean;
 var
-  tmp: TSynTempBuffer;
   sz, res: cardinal;
+  tmp: TSynTempBuffer;
 begin
   result := false;
   sz := tmp.Init shr 1; // size in WideChar

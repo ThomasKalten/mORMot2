@@ -35,7 +35,6 @@ uses
   mormot.core.threads,
   mormot.crypt.core,
   mormot.crypt.jwt,
-  mormot.core.perf,
   mormot.crypt.secure,
   mormot.core.log,
   mormot.orm.base,
@@ -943,7 +942,7 @@ begin
      (doc.Kind <> dvObject) or
      (doc.Count = 0) then
   begin
-    result := '';
+    FastAssignNew(result);
     exit;
   end;
   W := TJsonWriter.CreateOwnedStream(temp);
@@ -959,7 +958,7 @@ begin
       W.AddVariant(doc.Values[i], twJsonEscape);
       W.AddComma;
     end;
-    W.CancelLastComma('}');
+    W.ReplaceLastComma('}');
     W.SetText(result);
   finally
     W.Free;
@@ -971,7 +970,7 @@ function TRestStorageMongoDB.EngineRetrieve(TableModelIndex: integer;
 var
   doc: variant;
 begin
-  result := '';
+  FastAssignNew(result);
   if (fCollection = nil) or
      (ID <= 0) then
     exit;
@@ -1473,7 +1472,7 @@ var
   Projection: variant;
 begin
   // same logic as in TRestStorageInMemory.EngineList()
-  result := ''; // indicates error occurred
+  FastAssignNew(result); // indicates error occurred
   ResCount := 0;
   if self = nil then
     exit;
@@ -1733,7 +1732,8 @@ function TRestMongoDBCreate(aModel: TOrmModel;
 var
   client: TMongoClient;
   database: TMongoDatabase;
-  server, port, pwd: RawUtf8;
+  server, port: RawUtf8;
+  pwd: SpiUtf8;
   o: TMongoClientOptions;
   p: integer;
 begin
@@ -1759,7 +1759,7 @@ begin
       if (aDefinition.User <> '') and
          (aDefinition.Password <> '') then
       begin
-        pwd := aDefinition.PasswordPlain;
+        aDefinition.GetPasswordSafe(pwd);
         database := client.OpenAuth(
           aDefinition.DatabaseName, aDefinition.User, pwd);
       end
@@ -1774,6 +1774,7 @@ begin
       FreeAndNilSafe(result);
       client.Free; // avoid memory leak
     end;
+    FillZero(pwd); // anti-forensic
   end
   else
     // Kind is not 'MongoDB' -> try other known TRest class

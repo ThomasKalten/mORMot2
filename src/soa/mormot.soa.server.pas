@@ -674,7 +674,7 @@ begin
       end;
   end;
   SetLength(fStats, fInterface.MethodsCount);
-  fMethods := [mGET, mPOST];
+  fMethods := [mGET, mPOST]; // use SetMethods() to customize
   // prepare some reusable execution context (avoid most memory allocations)
   TInterfaceMethodExecuteCached.Prepare(fInterface, fExecuteCached);
 end;
@@ -953,7 +953,7 @@ end;
 function TServiceFactoryServer.RetrieveSignature: RawUtf8;
 begin
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else
     result := fContract; // just return the current value
 end;
@@ -1534,7 +1534,7 @@ begin
       else
         // regular execution
         execres := exec.ExecuteJson([instancePtr], Ctxt.ServiceParameters,
-          exec.WR, @err, Ctxt.ForceServiceResultAsJsonObject);
+          exec.WR, @err, rcfForceServiceResultAsJsonObject in Ctxt.Flags);
       if not execres then
       begin
         // wrong request returns HTTP error 406
@@ -2155,20 +2155,6 @@ begin
   FakeCallbackAdd(instance);
 end;
 
-procedure AppendWithSpace(var dest: ShortString; const source: ShortString);
-var
-  d, s: PtrInt;
-begin
-  d := ord(dest[0]);
-  s := ord(source[0]);
-  if d + s < 254 then
-  begin
-    dest[d + 1] := ' ';
-    MoveFast(source[1], dest[d + 2], s);
-    inc(dest[0], s + 1);
-  end;
-end;
-
 class function TServiceContainerServer.CallbackReleasedOnClientSide(
   const callback: IInterface; callbacktext: PShortString): boolean;
 var
@@ -2180,7 +2166,10 @@ begin
   else
   begin
     if callbacktext <> nil then
-      AppendWithSpace(callbacktext^, ClassNameShort(instance)^);
+    begin
+      AppendShortCharSafe(' ', callbacktext^);
+      AppendShort(ClassNameShort(PClass(instance)^)^, callbacktext^);
+    end;
     result := (PClass(instance)^ = TInterfacedObjectFakeServer) and
               TInterfacedObjectFakeServer(instance).fReleasedOnClientSide;
   end;

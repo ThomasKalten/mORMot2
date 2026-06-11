@@ -33,7 +33,6 @@ uses
   mormot.core.rtti,
   mormot.core.json,
   mormot.core.threads,
-  mormot.core.perf,
   mormot.crypt.secure,
   mormot.core.log,
   mormot.core.interfaces,
@@ -511,7 +510,7 @@ var
   state: cardinal;
 begin
   if not ClientRetrieve(TableModelIndex, ID, false, state, result) then
-    result := '';
+    FastAssignNew(result);
 end;
 
 function TRestOrmClient.Retrieve(aID: TID; Value: TOrm; ForUpdate: boolean): boolean;
@@ -722,7 +721,7 @@ begin
      (SQL = '') or
      // GET on 'root' URI with SQL as body (not standard HTTP)
      (Uri(fModel.Root, 'GET', @result, nil, @SQL) <> HTTP_SUCCESS) then
-    result := '';
+    FastAssignNew(result);
 end;
 
 function TRestOrmClientUri.EngineExecute(const SQL: RawUtf8): boolean;
@@ -1002,11 +1001,15 @@ begin
 end;
 
 function TRestOrmClientUri.ServerInternalState: cardinal;
+var
+  status: cardinal;
 begin
   if (self = nil) or
      (fModel = nil) or // avoid GPF
-     (Uri(fModel.Root, 'STATE', nil, nil, nil, @result) <> HTTP_SUCCESS) then
-    result := cardinal(-1);
+     (Uri(fModel.Root, 'STATE', nil, nil, nil, @status) <> HTTP_SUCCESS) then
+    result := cardinal(-1)
+  else
+    result := status;
 end;
 
 function TRestOrmClientUri.UpdateFromServer(const Data: array of TObject;
