@@ -29,9 +29,9 @@ uses
   sysutils,
   classes,
   variants,
-  contnrs,
   mormot.core.base,
   mormot.core.os,
+  mormot.core.os.security, // for SymmetricEncrypt()
   mormot.core.buffers,
   mormot.core.unicode,
   mormot.core.text,
@@ -3555,8 +3555,8 @@ begin
   end;
   if TServiceFactoryServer(Service).ResultAsXMLObjectIfAcceptOnlyXML and
      FindNameValue(Call^.InHead, 'ACCEPT:', fTemp) and
-     (PropNameEquals(fTemp, 'application/xml') or
-      PropNameEquals(fTemp, 'text/xml')) then
+     (IdemPChar(pointer(fTemp), 'APPLICATION/XML') or
+      IdemPChar(pointer(fTemp), 'TEXT/XML')) then
     ForceServiceResultAsXMLObject := true;
   try
     InternalExecuteSoaByInterfaceComputeResult;
@@ -3860,9 +3860,10 @@ begin
             // if ORDER BY already in the where clause
             SetLength(wherecount, i - 1);
         end;
+        Server.fModel.TableProps[TableIndex].SqlFromSelectWhere(
+          'Count(*)', wherecount, sql);
         resultlist := TRestOrmServer(Server.fOrmInstance).
-          ExecuteList([Table], Server.fModel.TableProps[TableIndex].
-            SqlFromSelectWhere('Count(*)', wherecount));
+          ExecuteList([Table], sql);
         if resultlist <> nil then
         try
           totalrowcount := resultlist.GetAsInteger(1, 0);
@@ -3876,8 +3877,8 @@ begin
   else
     select := ROWID_TXT; // /root/tablename returns all IDs of this table
   // execute the select/where request on this table
-  sql := Server.fModel.TableProps[TableIndex].SqlFromSelectWhere(
-    select, TrimU(where));
+  Server.fModel.TableProps[TableIndex].SqlFromSelectWhere(
+    select, TrimU(where), sql);
   fCall^.OutBody := TRestOrmServer(Server.fOrmInstance).
     InternalListRawUtf8(TableIndex, sql);
   if fCall^.OutBody = '' then
@@ -5282,9 +5283,9 @@ begin
   if Executable.Version.Major <> 0 then
   begin
     if saoFullServerVersion in fOptions then
-      vers := Executable.Version.DetailedOrVoid
+      vers := Executable.Version.Detailed // '3.1.2.3'
     else
-      vers := Executable.Version.Main;
+      vers := Executable.Version.Main;    // '3.1'
     body.AddValue('version', StringToVariant(vers));
   end;
   if Assigned(fServer.Services) and
@@ -6878,7 +6879,7 @@ begin
     'nowutc',    now.Text(true, ' '),
     'timestamp', now.Value,
     'exe',       Executable.ProgramName,
-    'version',   Executable.Version.DetailedOrVoid,
+    'version',   Executable.Version.DetailedOrVoid, // '3.1.2.3'
     'host',      Executable.Host,
     {$ifdef OSWINDOWS}
     'cpuhist',   TSystemUse.CurrentHistoryText(0, 15, @mem),

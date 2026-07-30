@@ -216,6 +216,8 @@ published
     {$ifdef OSWINDOWS}
     Tot7z: Int64;
     function Callback7z(const sender: I7zArchive; current, total: Int64): HRESULT;
+    procedure Run7zExtract(const Params: array of const);
+    procedure Run7zUpdate(const Params: array of const);
     {$endif OSWINDOWS}
   public
     procedure Setup; override;
@@ -472,7 +474,7 @@ begin
   if FileExists(WorkDir + discogsFileName) then
     exit;
   refzip := DownloadFile('https://synopse.info/files/process-ref.zip');
-  if not CheckFailed(refzip <> '', 'process-ref') then
+  if Check(refzip <> '', 'process-ref') then
     Check(UnZipMemAll(refzip, WorkDir), 'process-unzip');
 end;
 
@@ -1678,7 +1680,7 @@ var
       Check(Valid);
       Check(CA.One.Color = 2);
       Check(CA.One.Name = 'test2');
-      if not CheckFailed(CA.Coll.Count = 1) then
+      if Check(CA.Coll.Count = 1) then
         Check(CA.Coll[0].Name = 'test');
       Check(CA.One.Length = 10);
       Check(CA.Str.Count = 10000);
@@ -1765,8 +1767,8 @@ var
     i: integer;
     Valid: boolean;
   begin
-    V := TFileVersion.Create('', 0, 0, 0, 0);
-    F := TFileVersion.Create('', 0, 0, 0, 0);
+    V := TFileVersion.Create('');
+    F := TFileVersion.Create('');
     try
       for i := 1 to 1000 do
       begin
@@ -1903,7 +1905,7 @@ var
     CheckEqual(JsonReformat(U, jsonCompact), YamlToJson(y), 'YamlToJson zend');
     Check(DynArrayLoadJsonInPlace(
       git2, pointer(U), TypeInfo(TTestCustomJsonGitHubs)) <> nil);
-    if not CheckFailed(length(git) = Length(git2)) then
+    if Check(length(git) = Length(git2)) then
       for i := 0 to high(git) do
       begin
         Check(git[i].name = git2[i].name);
@@ -2295,7 +2297,7 @@ var
     RecordLoadJsonInPlace(JAV, UniqueRawUtf8(U), TypeInfo(TTestCustomJsonArrayVariant));
     Check(JAV.A = 1);
     Check(JAV.B = 2);
-    if not CheckFailed(length(JAV.C) = 4) then
+    if Check(length(JAV.C) = 4) then
     begin
       Check(JAV.C[0] = 'one');
       Check(JAV.C[1] = 2);
@@ -3728,7 +3730,7 @@ begin
     J := '{"ClassName":"TComplexNumber", "Real": 10.3, "Imaginary": 7.92 }';
     P := UniqueRawUtf8(J); // make local copy of source constant
     Comp := TComplexNumber(JsonToNewObject(P, Valid));
-    if not CheckFailed(Comp <> nil) then
+    if Check(Comp <> nil) then
     begin
       Check(Valid);
       Check(Comp.ClassType = TComplexNumber);
@@ -4200,7 +4202,7 @@ begin
   RecordLoadJsonInPlace(Disco, UniqueRawUtf8(U), TypeInfo(TTestCustomDiscogs));
   Check(Disco.pagination.per_page = 1);
   Check(Disco.pagination.page = 0);
-  if not CheckFailed(length(Disco.releases) = 1) then
+  if Check(length(Disco.releases) = 1) then
   begin
     Check(Disco.releases[0].title = 'TEST');
     Check(Disco.releases[0].id = 10);
@@ -4212,7 +4214,7 @@ begin
   RecordLoadJsonInPlace(Disco, UniqueRawUtf8(U), TypeInfo(TTestCustomDiscogs));
   Check(Disco.pagination.per_page = 0);
   Check(Disco.pagination.page = 0);
-  if not CheckFailed(length(Disco.releases) = 2) then
+  if Check(length(Disco.releases) = 2) then
   begin
     Check(Disco.releases[0].title = '');
     Check(Disco.releases[0].id = 10);
@@ -4224,7 +4226,7 @@ begin
   RecordLoadJsonInPlace(Disco, UniqueRawUtf8(U), TypeInfo(TTestCustomDiscogs));
   Check(Disco.pagination.per_page = 0);
   Check(Disco.pagination.page = 1);
-  if not CheckFailed(length(Disco.releases) = 1) then
+  if Check(length(Disco.releases) = 1) then
   begin
     Check(Disco.releases[0].title = 'abc');
     Check(Disco.releases[0].id = 2);
@@ -4618,9 +4620,9 @@ begin
   for i := 1 to ITER div 10 do // div 10 since fpjson is slower
   begin
     fpjson := GetJSON(people, {utf8=}true);
-    if not CheckFailed(fpjson <> nil) then
+    if Check(fpjson <> nil) then
       try
-        if not CheckFailed(fpjson.JSONType = jtArray) then
+        if Check(fpjson.JSONType = jtArray) then
           Check((fpjson as TJSONArray).Count = count);
       finally
         fpjson.Free;
@@ -4635,7 +4637,7 @@ begin
   begin
     jt := TJsonNode.Create;
     try // note: on i386, jsontools raises a parsing EJsonException :(
-      //if not CheckFailed(jt.TryParse('["XS\"\"\"."]')) then
+      //if Check(jt.TryParse('["XS\"\"\"."]')) then
       begin
         Check(jt.TryParse(peoples), 'jtparse');
         Check(jt.Kind = nkArray, 'jtarray');
@@ -4652,9 +4654,9 @@ begin
   for i := 1 to ITER div 10 do // div 10 since Delphi json is dead slow
   begin
     djson := system.json.TJSONObject.ParseJSONValue(people);
-    if not CheckFailed(djson <> nil) then
+    if Check(djson <> nil) then
       try
-        if not CheckFailed(djson is system.json.TJSONArray) then
+        if Check(djson is system.json.TJSONArray) then
           Check((djson as system.json.TJSONArray).Count = count);
       finally
         djson.Free;
@@ -4667,9 +4669,9 @@ begin
   for i := 1 to ITER do // JsonDataObjects speed is 40 MB/s ;)
   begin
     jdo := TJsonBaseObject.ParseUtf8(people);
-    if not CheckFailed(jdo <> nil) then
+    if Check(jdo <> nil) then
       try
-        if not CheckFailed(jdo is JsonDataObjects.TJsonArray) then
+        if Check(jdo is JsonDataObjects.TJsonArray) then
           Check((jdo as JsonDataObjects.TJsonArray).Count = count);
       finally
         jdo.Free;
@@ -4683,8 +4685,8 @@ begin
   for i := 1 to ITER div 10 do
   begin
     so := superobject.SO(s);
-    if not CheckFailed(so <> nil) then
-      if not CheckFailed(so.IsType(stArray)) then
+    if Check(so <> nil) then
+      if Check(so.IsType(stArray)) then
         Check(so.AsArray.Length = count);
     so := nil;
   end;
@@ -4695,7 +4697,7 @@ begin
   for i := 1 to 1 do // X-SuperObject is 1.5 MB/s 8(
   begin
     xso := xsuperobject.SA(peoples);
-    if not CheckFailed(xso <> nil) then
+    if Check(xso <> nil) then
       Check(xso.Length = count);
     xso := nil;
   end;
@@ -4732,7 +4734,7 @@ begin
       try
         ws := Parse(peoples);
         try
-          if not CheckFailed(ws.IsArray) then
+          if Check(ws.IsArray) then
             Check((ws as WinJson.TJsonArray).ElementCount = Count);
         finally
           ws.Free;
@@ -4809,9 +4811,9 @@ begin
     for i := 1 to ITER div 10 do // div 10 since fpjson is slower
     begin
       fpjson := GetJSON(sample, {utf8=}true);
-      if not CheckFailed(fpjson <> nil) then
+      if Check(fpjson <> nil) then
         try
-          if not CheckFailed(fpjson.JSONType = jtObject) then
+          if Check(fpjson.JSONType = jtObject) then
             Check((fpjson as TJSONObject).Count = 3);
         finally
           fpjson.Free;
@@ -4881,7 +4883,7 @@ begin
   CheckEqual(HtmlUnescape('te&st'), 'te&st');
   for i := 1 to high(HTML_UNESCAPE) do
   begin
-    if i <= 6 then
+    if i <= high(HTML_UNESCAPED) then
       exp := HTML_UNESCAPED[i]
     else if i = 8 then
       exp := '...'
@@ -6549,6 +6551,20 @@ procedure TTestCoreProcess._TDocVariant;
     Check(Doc.I['birthyear'] = ExpectedYear);
   end;
 
+  procedure CheckOle(const json: RawUtf8; expected: cardinal);
+  var
+    d: TDocVariantData;
+    v: variant;
+  begin
+    Check(d.InitJson(json, JSON_FAST_FLOAT));
+    CheckEqual(d.ToJson, json);
+    v := d.ToOleVariant;
+    CheckEqual(PVarData(@v)^.VType, expected);
+    d.Clear;
+    d.InitFromVariant(v, JSON_FAST_FLOAT);
+    CheckEqual(d.ToJson, json);
+  end;
+
 var
   discogs: RawUtf8;
 
@@ -6865,6 +6881,9 @@ begin
   end;
   s := _Safe(a.ReduceAsArray('source'))^.ToCsv;
   CheckEqual(s, 'source0,source1,source2', 'ReduceAsArray');
+  CheckEqual(a.ReduceAsCsv('source'), s, 'ReduceAsCsv');
+  CheckEqual(RawUtf8ArrayToCsv(a.ReduceAsRawUtf8Array('source')), s,
+    'ReduceAsRawUtf8Array');
   s := _Safe(a.Reduce(['source', 'target'], False))^.ToCsv;
   CheckEqual(s, '{"source":"source0","target":"target0"},' +
                 '{"source":"source1","target":"target1"},' +
@@ -6972,7 +6991,7 @@ begin
   Check(variant(Doc)._count = 3);
   Check(Doc.GetModel(model));
   Check(model = mVoid);
-  if not CheckFailed(Doc.Count = 3) then
+  if Check(Doc.Count = 3) then
   begin
     Check(Doc.Values[0] = 'one');
     Check(Doc.Values[1] = 2);
@@ -7022,6 +7041,16 @@ begin
   Check(V._(3) = 4);
   Check(V._(4) = 'a5');
   Check(V._Json = '["one",2,3,4,"a5"]');
+  uu := nil;
+  CheckEqual(length(uu), 0);
+  _Safe(V)^.ToRawUtf8DynArray(uu);
+  CheckEqual(length(uu), 5, 'ToRawUtf8DynArray');
+  CheckEqual(RawUtf8ArrayToCsv(uu), 'one,2,3,4,a5');
+  uu := nil;
+  CheckEqual(length(uu), 0);
+  Check(_Safe(V)^.ToRtti(uu, TypeInfo(TRawUtf8DynArray)), 'ToRtti');
+  CheckEqual(length(uu), 5);
+  CheckEqual(RawUtf8ArrayToCsv(uu), 'one,2,3,4,a5');
   discogs := StringFromFile(WorkDir + discogsFileName);
   CheckNestedDoc([]);
   CheckNestedDoc([dvoValueCopiedByReference]);
@@ -7289,7 +7318,7 @@ begin
   Doc.Clear;
   CheckEqual(Doc.Count, 0);
   p := PosCharU(s, '?');
-  if not CheckFailed(p <> nil) then
+  if Check(p <> nil) then
     Doc.InitFromUrl(p + 1, JSON_FAST);
   CheckEqual(Doc.Count, 3);
   CheckEqual(Doc.ToJson, '{"ab":1,"ab2":10,"d":3}');
@@ -7477,6 +7506,33 @@ begin
     Doc.SaveToJsonFile(WorkDir + 'm1-saved2.json');
     Doc.Clear;
   end;
+  CheckOle('[]', varArray or varVariant);
+  CheckOle('[1]', varArray or varInt64);
+  CheckOle('[1,2,3]', varArray or varInt64);
+  CheckOle('[-1,0,2147483647]', varArray or varInt64);
+  CheckOle('[-1,0,9223372036854775807]', varArray or varInt64);
+  CheckOle('[1.5]', varArray or varDouble);
+  CheckOle('[1.5,-2.75,3.1415926535]', varArray or varDouble);
+  CheckOle('[1,2.5,3]', varArray or varDouble);
+  CheckOle('[1.5,2,3]', varArray or varDouble);
+  CheckOle('[true]', varArray or varBoolean);
+  CheckOle('[true,false,true]', varArray or varBoolean);
+  CheckOle('[""]', varArray or varOleStr);
+  CheckOle('["one","two","th\"ee"]', varArray or varOleStr);
+  CheckOle('[null]', varArray or varVariant);
+  CheckOle('[null,null]', varArray or varVariant);
+  CheckOle('[1,null,2]', varArray or varVariant);
+  CheckOle('[1,"2",3.14]', varArray or varVariant);
+  CheckOle('[1,true,"abc",null]', varArray or varVariant);
+  CheckOle('["abc",null]', varArray or varVariant);
+  CheckOle('[true,null,false]', varArray or varVariant);
+  CheckOle('{}', varOleStr);
+  CheckOle('{"a":1}', varOleStr);
+  CheckOle('{"a":1,"b":"text","c":true}', varOleStr);
+  CheckOle('[[1,2],[3,4]]', varOleStr);
+  CheckOle('[1,[2,3],4]', varOleStr);
+  CheckOle('{"a":[1,2,3]}', varOleStr);
+  CheckOle('{"a":{"b":1}}', varOleStr);
 end;
 
 // wrapper used to test GetPublishedMethods()
@@ -8034,11 +8090,12 @@ var
   s, t, d: RawUtf8;
   hf: TTextWriterHtmlFormat;
   w: TTextWriter;
-  tmp: TTextWriterStackBuffer;
   name, value, utf: RawUtf8;
   str: string;
   P: PUtf8Char;
   Guid2: TGuid;
+  rec: TSubAB;
+  tmp: TTextWriterStackBuffer;
 const
   guid: TGuid = '{c9a646d3-9c61-4cb7-bfcd-ee2522c8f633}';
 
@@ -8195,6 +8252,30 @@ begin
     [ueStarNameIsCsv]), '?select=&where=1&where=2&where=and+three');
   CheckEqual(UrlEncodeFull('', [], ['select', '', '*where', ''],
     [ueStarNameIsCsv, ueSkipVoidString]), '');
+  value := '123';
+  CheckEqual(UrlEncodeFull('', [], ['one', value, 'another', 'toto'],
+    OPENAPI_URLENCODER), '?one=123&another=toto');
+  Rtti.RegisterFromText(TypeInfo(TSubAB), __TSubAB);
+  rec.a := 'A';
+  rec.b := 1;
+  value := DeepObjectEncode(@rec, TypeInfo(TSubAB), 'fields[');
+  CheckEqual(value, 'fields[a]=A&fields[b]=1');
+  CheckEqual(UrlEncodeFull('', [], ['num', 10, '=fields', value],
+    OPENAPI_URLENCODER), '?num=10&fields[a]=A&fields[b]=1');
+  rec.a := 'Hello world & test';
+  value := DeepObjectEncode(@rec, TypeInfo(TSubAB), 'fields[');
+  CheckEqual(value, 'fields[a]=Hello+world+%26+test&fields[b]=1');
+  rec.a := '';
+  value := DeepObjectEncode(@rec, TypeInfo(TSubAB), 'fields[');
+  CheckEqual(value, 'fields[b]=1');
+  CheckEqual(UrlEncodeFull('', [], ['=fields', value],
+    OPENAPI_URLENCODER), '?fields[b]=1');
+  CheckEqual(UrlEncodeFull('', [], ['=fields', value, 'another', 'toto',
+    'three', 3], OPENAPI_URLENCODER), '?fields[b]=1&another=toto&three=3');
+  rec.b := 0;
+  value := DeepObjectEncode(@rec, TypeInfo(TSubAB), 'fields[');
+  CheckEqual(value, '');
+  CheckEqual(UrlEncodeFull('', [], ['=fields', value], OPENAPI_URLENCODER), '');
   for i := 1 to 100 do
   begin
     s := RandomIdentifier(i);
@@ -9290,7 +9371,7 @@ var
       if CheckFailed(Count = aCount, 'count') then
         exit;
       for i := 0 to Count - 1 do
-        if not CheckFailed(RetrieveLocalFileHeader(i, local)) then
+        if Check(RetrieveLocalFileHeader(i, local)) then
           Check(CompareMem(@Entry[i].dir^.fileInfo, @local.fileInfo,
             SizeOf(TFileInfo) - SizeOf(Entry[i].dir^.fileInfo.extraLen)));
       i := NameToIndex('REP1\ONE.exe');
@@ -9670,7 +9751,40 @@ end;
 
 const
   ZIP_EXTS = '*.zip;*.jar;*.docx;*.pptx;*.xlsx;*.xpi;*.odt;*.ods';
-  
+
+procedure TTestCoreCompression.Run7zExtract(const Params: array of const);
+var
+  fn, pw: RawUtf8;
+  f: TFileName;
+  ms: TMemoryStream;
+begin
+  // open archive Params[0] with password Params[1] and extract its first entry
+  Check(VarRecToUtf8IsString(Params[0], fn));
+  Check(VarRecToUtf8IsString(Params[1], pw));
+  Utf8ToFileName(fn, f);
+  ms := TMemoryStream.Create;
+  try
+    New7zReader(f, fhUndefined,
+      Executable.ProgramFilePath + '7z.dll', pw).Extract(0, ms);
+  finally
+    ms.Free;
+  end;
+end;
+
+procedure TTestCoreCompression.Run7zUpdate(const Params: array of const);
+var
+  fn, pw: RawUtf8;
+  f: TFileName;
+  lib: I7zLib;
+begin
+  // open archive Params[0] for update with password Params[1]
+  Check(VarRecToUtf8IsString(Params[0], fn));
+  Check(VarRecToUtf8IsString(Params[1], pw));
+  Utf8ToFileName(fn, f);
+  lib := T7zLib.Create(Executable.ProgramFilePath + '7z.dll');
+  lib.NewWriter(f, fhUndefined, pw);
+end;
+
 procedure TTestCoreCompression._7Zip;
 var
   s: RawByteString;
@@ -9682,9 +9796,9 @@ var
   zout: I7zWriter;
   files: TFindFilesDynArray;
 begin
-  ZipFile := WorkDir + 'test1.zip';
+  // T7zLib formats detection
   CheckEqual(ToUtf8(T7zLib.FormatGuid(fhGZip)),
-    '23170F69-40C1-278A-1000-000110EF0000');
+             '23170F69-40C1-278A-1000-000110EF0000');
   Check(T7zLib.FormatDetect(Zipfile, {onlyext=}true) = fhZip);
   Check(T7zLib.FormatDetect(Zipfile, false) = fhZip);
   Check(T7zLib.FormatDetect(Executable.ProgramFileName, true) = fhPe);
@@ -9693,105 +9807,151 @@ begin
   Check(T7zLib.FormatFileExtensions(fhZip) = ZIP_EXTS);
   lib := Executable.ProgramFilePath + '7z.dll';
   if FileExists(lib) then
-    begin
-      // validate I7zReader
-      zin := New7zReader(ZipFile, fhUndefined, lib);
-      Check(zin.Format = fhZip);
-      Check(zin.FormatExt = 'zip');
-      Check(zin.FormatExts = ZIP_EXTS);
-      CheckEqual(zin.Count, 5, 'count');
-      tot1 := 0;
-      for i := 0 to zin.Count - 1 do
-        inc(tot1, zin.Size[i]);
-      {with zin do
-        for i := 0 to Count - 1 do
-           writeln('fullname=',FullName[i], ' zipname=',ZipName[i],
-          ' size=',Size[i], ' packsize=',packsize[i], ' method=',Method[i],
-          ' date=', DateTimeToIso8601text(ModDate[i]));}
-      zin.SetProgressCallback(Callback7z);
-      Tot7z := 0;
-      s := zin.Extract('REP1\ONE.exe');
-      Check(s = Data, 'one');
-      CheckEqual(length(s), Tot7z, 'callbacksizeone');
-      Tot7z := 0;
-      s := zin.Extract('exe.1mb');
-      Check(s = Data, 'exe');
-      CheckEqual(length(s), Tot7z, 'callbacksizeexe');
-      Tot7z := 0;
-      zin.ExtractAll;
-      CheckEqual(tot1, Tot7z, 'callbacksize1');
-      folder := WorkDir + '7zipout';
-      DirectoryDelete(folder);
-      Check(FindFiles(folder) = nil);
-      Tot7z := 0;
-      zin.ExtractAll(folder, {nosubfolder=}true);
-      CheckEqual(tot1, Tot7z, 'callbacksize2');
-      files := FindFiles(folder);
-      CheckEqual(length(files), zin.Count, 'extractto');
-      tot2 := 0;
-      for i := 0 to high(files) do
-        inc(tot2, files[i].Size);
-      CheckEqual(tot1, tot2, 'extractsize');
-      DirectoryDelete(folder);
-      Check(FindFiles(folder) = nil);
-      Tot7z := 0;
-      zin.Extract('exe.1mb', folder);
-      CheckEqual(length(Data), Tot7z, 'extractfileto');
-      Check(length(FindFiles(folder)) = 1);
-      // validate I7zWriter
-      newfile1 := WorkDir + 'from7zadd.zip';
-      newfile2 := WorkDir + 'from7zupd.zip';
-      zout := New7ZWriter(fhZip, lib);
-      zout.AddFile(folder + '\exe.1mb', 'A.1mb');
-      zout.AddBuffer('B.1mb', data);
-      zout.SaveToFile(newfile1);
-      zin := New7zReader(newfile1, fhUndefined, lib);
-      CheckEqual(zin.Count, 2);
-      zin.SetProgressCallback(Callback7z);
-      Tot7z := 0;
-      s := zin.Extract('A.1mb');
-      Check(s = Data, 'a');
-      CheckEqual(length(s), Tot7z, 'callbacksizeexe');
-      s := zin.Extract('B.1mb');
-      Check(s = Data, 'b');
-      s := zin.Extract('C.1mb');
-      CheckEqual(s, '', 'c');
-      zin := nil; // so that we could change the file
-      zout := nil;
-      zout := New7zWriter(newfile1, fhUndefined, lib);
-      zout.SetProgressCallback(Callback7z);
-      Tot7z := 0;
-      zout.AddFile(folder + '\exe.1mb', 'C.1mb');
-      zout.AddBuffer('A.1mb', copy(Data, 1, 200));
-      zout.AddBuffer('void.txt', '');
-      {with zout do
-        for i := 0 to Count - 1 do
-           writeln('fullname=',FullName[i], ' zipname=',ZipName[i],
-          ' size=',Size[i], ' packsize=',packsize[i], ' method=',Method[i],
-          ' date=', DateTimeToIso8601text(ModDate[i]));}
-      CheckEqual(Tot7z, 0);
-      Tot7z := 0;
-      zout.SaveToFile(newfile2);
-      Check(Tot7z <> 0);
-      zout := nil; // so that we could read the file
-      zlib := T7zLib.Create(lib);
-      zin := zlib.NewReader(newfile2);
-      CheckEqual(zin.Count, 4);
-      s := zin.Extract('A.1mb');
-      Check(length(s) = 200, 'ua1');
-      Check(CompareMem(pointer(Data), pointer(s), 200), 'ua2');
-      s := zin.Extract('B.1mb');
-      Check(s = Data, 'ub');
-      s := zin.Extract('C.1mb');
-      Check(s = Data, 'uc');
-      s := zin.Extract('void.txt');
-      CheckEqual(s, '', 'uv');
-      zin := nil; // so that we could delete the file
-      Check(DeleteFile(newfile1));
-      Check(DeleteFile(newfile2));
-      DirectoryDelete(folder);
-      Check(FindFiles(folder) = nil);
-    end;
+  begin
+    // validate I7zReader
+    zin := New7zReader(ZipFile, fhUndefined, lib);
+    Check(zin.Format = fhZip);
+    Check(zin.FormatExt = 'zip');
+    Check(zin.FormatExts = ZIP_EXTS);
+    CheckEqual(zin.Count, 5, 'count');
+    tot1 := 0;
+    for i := 0 to zin.Count - 1 do
+      inc(tot1, zin.Size[i]);
+    {allocconsole; with zin do
+      for i := 0 to Count - 1 do
+         writeln('fullname=',FullName[i], ' zipname=',ZipName[i],
+        ' size=',Size[i], ' packsize=',packsize[i], ' method=',Method[i],
+        ' date=', DateTimeToIso8601text(ModDate[i]));}
+    zin.SetProgressCallback(Callback7z);
+    Tot7z := 0;
+    s := zin.Extract('REP1\ONE.exe');
+    Check(s = Data, 'one');
+    CheckEqual(length(s), Tot7z, 'callbacksizeone');
+    Tot7z := 0;
+    s := zin.Extract('exe.1mb');
+    Check(s = Data, 'exe');
+    CheckEqual(length(s), Tot7z, 'callbacksizeexe');
+    Tot7z := 0;
+    zin.ExtractAll;
+    CheckEqual(tot1, Tot7z, 'callbacksize1');
+    folder := WorkDir + '7zipout';
+    DirectoryDelete(folder);
+    Check(FindFiles(folder) = nil);
+    Tot7z := 0;
+    zin.ExtractAll(folder, {nosubfolder=}true);
+    CheckEqual(tot1, Tot7z, 'callbacksize2');
+    files := FindFiles(folder);
+    CheckEqual(length(files), zin.Count, 'extractto');
+    tot2 := 0;
+    for i := 0 to high(files) do
+      inc(tot2, files[i].Size);
+    CheckEqual(tot1, tot2, 'extractsize');
+    DirectoryDelete(folder);
+    Check(FindFiles(folder) = nil);
+    Tot7z := 0;
+    zin.Extract('exe.1mb', folder);
+    CheckEqual(length(Data), Tot7z, 'extractfileto');
+    Check(length(FindFiles(folder)) = 1);
+    // validate I7zWriter
+    newfile1 := WorkDir + 'from7zadd.zip';
+    newfile2 := WorkDir + 'from7zupd.zip';
+    zout := New7ZWriter(fhZip, lib);
+    zout.AddFile(folder + '\exe.1mb', 'A.1mb');
+    zout.AddBuffer('B.1mb', data);
+    zout.SaveToFile(newfile1);
+    zin := New7zReader(newfile1, fhUndefined, lib);
+    CheckEqual(zin.Count, 2);
+    zin.SetProgressCallback(Callback7z);
+    Tot7z := 0;
+    s := zin.Extract('A.1mb');
+    Check(s = Data, 'a');
+    CheckEqual(length(s), Tot7z, 'callbacksizeexe');
+    s := zin.Extract('B.1mb');
+    Check(s = Data, 'b');
+    s := zin.Extract('C.1mb');
+    CheckEqual(s, '', 'c');
+    zin := nil; // so that we could change the file
+    zout := nil;
+    zout := New7zWriter(newfile1, fhUndefined, lib);
+    zout.SetProgressCallback(Callback7z);
+    Tot7z := 0;
+    zout.AddFile(folder + '\exe.1mb', 'C.1mb');
+    zout.AddBuffer('A.1mb', copy(Data, 1, 200));
+    zout.AddBuffer('void.txt', '');
+    {with zout do
+      for i := 0 to Count - 1 do
+         writeln('fullname=',FullName[i], ' zipname=',ZipName[i],
+        ' size=',Size[i], ' packsize=',packsize[i], ' method=',Method[i],
+        ' date=', DateTimeToIso8601text(ModDate[i]));}
+    CheckEqual(Tot7z, 0);
+    Tot7z := 0;
+    zout.SaveToFile(newfile2);
+    Check(Tot7z <> 0);
+    zout := nil; // so that we could read the file
+    zlib := T7zLib.Create(lib);
+    zin := zlib.NewReader(newfile2);
+    CheckEqual(zin.Count, 4);
+    s := zin.Extract('A.1mb');
+    Check(length(s) = 200, 'ua1');
+    Check(CompareMem(pointer(Data), pointer(s), 200), 'ua2');
+    s := zin.Extract('B.1mb');
+    Check(s = Data, 'ub');
+    s := zin.Extract('C.1mb');
+    Check(s = Data, 'uc');
+    s := zin.Extract('void.txt');
+    CheckEqual(s, '', 'uv');
+    zin := nil; // so that we could delete the file
+    Check(DeleteFile(newfile1));
+    Check(DeleteFile(newfile2));
+    DirectoryDelete(folder);
+    Check(FindFiles(folder) = nil);
+    // validate ZipCrypto password and extraction failure detection
+    newfile1 := WorkDir + 'pass.zip';
+    zout := zlib.NewWriter(fhZip);
+    zout.SetPassword('password');
+    zout.SetEncryptionMethod(emZipCrypto);
+    zout.AddBuffer('A.1mb', Data);
+    zout.SaveToFile(newfile1);
+    zout := nil;
+    // the correct password round-trips the content
+    zin := zlib.NewReader(newfile1, fhZip, 'password');
+    CheckEqual(zin.Count, 1, 'pw1');
+    Check(zin.Extract('A.1mb') = Data, 'pw2');
+    zin := nil;
+    // a wrong password is reported as failure, not silently swallowed
+    zin := zlib.NewReader(newfile1, fhZip, 'wrongpassword');
+    Check(not zin.Extract('A.1mb', folder, {nosubfolder=}true), 'pw3');
+    CheckEqual(zin.Extract('A.1mb'), '', 'pw4');
+    zin := nil;
+    // a wrong password raises E7Zip on direct item extraction
+    CheckRaised(Run7zExtract, [newfile1, 'wrongpassword'], E7Zip, 'pw5');
+    DirectoryDelete(folder);
+    Check(DeleteFile(newfile1));
+    // validate a .7z with encrypted headers (7z -mhe=on)
+    newfile2 := WorkDir + 'mhe.7z';
+    zout := zlib.NewWriter(fh7z);
+    zout.SetPassword('password');
+    zout.EncryptHeaders7z(true);
+    zout.AddBuffer('A.1mb', Data);
+    zout.SaveToFile(newfile2);
+    zout := nil;
+    // without the password, it can neither be opened nor updated
+    CheckRaised(Run7zExtract, [newfile2, ''], E7Zip, 'mhe1');
+    CheckRaised(Run7zUpdate, [newfile2, ''], E7Zip, 'mhe2');
+    // NewWriter() with the password can update the existing archive
+    zout := zlib.NewWriter(newfile2, fh7z, 'password');
+    zout.SetPassword('password');
+    zout.EncryptHeaders7z(true);
+    zout.AddBuffer('B.1mb', Data);
+    zout.SaveToFile(newfile2);
+    zout := nil;
+    zin := zlib.NewReader(newfile2, fh7z, 'password');
+    CheckEqual(zin.Count, 2, 'mhe3');
+    Check(zin.Extract('A.1mb') = Data, 'mhe4');
+    Check(zin.Extract('B.1mb') = Data, 'mhe5');
+    zin := nil;
+    Check(DeleteFile(newfile2));
+  end;
   Check(DeleteFile(ZipFile));
 end;
 

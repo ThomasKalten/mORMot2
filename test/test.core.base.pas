@@ -41,11 +41,7 @@ uses
   mormot.rest.client;
 
 const
-  {$ifdef OSWINDOWS}
-  HTTP_DEFAULTPORT = '888';
-  {$else}
-  HTTP_DEFAULTPORT = '8888'; // under Linux, port<1024 needs root user
-  {$endif OSWINDOWS}
+  HTTP_DEFAULTPORT = '8888'; // under Linux/Wine port<1024 needs root user
 
 
 {$ifdef FPC_EXTRECORDRTTI}
@@ -261,7 +257,7 @@ type
     /// test TSynBloomFilter class
     procedure BloomFilters;
     /// test DeltaCompress/DeltaExtract functions
-    procedure _DeltaCompress;
+    procedure DeltaCompression;
     /// the new fast Currency to/from string conversion
     procedure Curr64;
     /// the camel-case / camel-uncase features, used for i18n from Delphi RTII
@@ -277,8 +273,10 @@ type
     // - this method use some ISO-8601 encoded dates and times for the testing
   protected // Disabled Tests - successfull
     procedure UrlDecoding;
-    /// test mime types recognition and multipart encoding
+    /// test mime types recognition
     procedure MimeTypes;
+    /// test multipart/formdata encoding and incremental decoding
+    procedure MultiPartDecoder;
     /// test ASCII Baudot encoding
     procedure BaudotCode;
     /// the ISO-8601 date and time encoding
@@ -289,6 +287,8 @@ type
     procedure DmiSmbios;
     /// test Security IDentifier (SID) process
     procedure _SID;
+    /// test OS errors support
+    procedure OsErrors;
     /// test the SecurityDescriptor / SDDL process
     procedure _SDDL;
     /// validates the median computation using the "Quick Select" algorithm
@@ -1116,6 +1116,32 @@ var
   sl: TStrings;
   timer: TPrecisionTimer;
 
+  procedure TestSort;
+  begin
+    L.Clear;
+    Check(L.Count = 0);
+    Check(L.IndexOf('5') < 0);
+    Check(L.Add('toto') = 0);
+    Check(L.Count = 1);
+    Check(L.IndexOf('titi') < 0);
+    Check(L.IndexOf('toto') = 0);
+    CheckEqual(L.Text, 'toto');
+    L.Sort;
+    CheckEqual(L.Text, 'toto');
+    Check(L.AddObject('titi', TObject.Create) = 1);
+    CheckEqual(L.IndexOf('toto'), 0);
+    CheckEqual(L.IndexOf('titi'), 1);
+    Check(L.Objects[0] = nil);
+    Check(L.Objects[1] <> nil);
+    CheckEqual(L.GetText(','), 'toto,titi');
+    L.Sort;
+    CheckEqual(L.GetText(','), 'titi,toto');
+    Check(L.Objects[0] <> nil);
+    Check(L.Objects[1] = nil);
+    CheckEqual(L.IndexOf('toto'), 1);
+    CheckEqual(L.IndexOf('titi'), 0);
+  end;
+
   procedure TestBinDictionary;
   var
     i, len: PtrInt; // @len = PPtrInt
@@ -1180,13 +1206,7 @@ begin
     Check(L.IndexOf('6') < 0);
     Check(L.Exists('5'));
     Check(not L.Exists('6'));
-    L.Clear;
-    Check(L.Count = 0);
-    Check(L.IndexOf('5') < 0);
-    Check(L.Add('toto') = 0);
-    Check(L.Count = 1);
-    Check(L.IndexOf('titi') < 0);
-    Check(L.IndexOf('toto') = 0);
+    TestSort;
   finally
     L.Free;
   end;
@@ -1228,17 +1248,7 @@ begin
     for i := 1 to MAX do
       Check((L.IndexOf(v[i]) >= 0) = (i and 127 <> 0));
     DeleteFile(WorkDir + 'utf8list.txt');
-    L.Clear;
-    Check(L.Count = 0);
-    Check(L.Add('toto') = 0);
-    Check(L.Count = 1);
-    Check(L.IndexOf('titi') < 0);
-    Check(L.IndexOf('toto') = 0);
-    Check(L.IndexOf('') < 0);
-    Check(L.Add('') = 1);
-    Check(L.Count = 2);
-    Check(L.IndexOf('') = 1);
-    Check(L.IndexOf('toto') = 0);
+    TestSort;
   finally
     L.Free;
   end;
@@ -1476,7 +1486,7 @@ begin
     j := ACities.FindHashed(N);
     if i and 127 = 0 then
       Check(j < 0, 'deteled')
-    else if not CheckFailed(j >= 0, N) then
+    else if Check(j >= 0, N) then
     begin
       Check(Cities[j].Name = N);
       CheckSame(Cities[j].Latitude, i * 3.14);
@@ -1540,15 +1550,44 @@ procedure TTestCoreBase.TStreamSlow(Context: TObject);
 var
   P: TPipeStream;
   R, W: TPipeThread;
-  S: RawByteString;
+  s1, s2: TStream;
+  S, D: RawUtf8;
   ps: PAnsiChar;
   Tix: Int64;
-  i, n, c: integer;
+  i, n, c, buflen, chunk: integer;
   crc: cardinal;
   timer: TPrecisionTimer;
   tmp: TBuffer1K; // small 1K buffer to stress (should be e.g. 64KB in practice)
 begin
   S := RandomAnsi7(100000);
+  // validate TBufferedStreamReader
+  D := S;
+  s1 := TRawByteStringStream.Create(S);
+  try
+    for buflen := 8 to 32 do
+      for chunk := 1 to buflen * 3 do
+      begin
+        s2 := TBufferedStreamReader.Create(s1, buflen);
+        try
+          ps := UniqueRawUtf8(D);
+          checkEqual(D, S);
+          FillCharFast(ps^, length(D), 48);
+          CheckNotEqual(D, S);
+          repeat
+            i := s2.Read(ps^, chunk);
+            Check(i >= 0, 's2.ReadA');
+            Check(i <= chunk, 's2.ReadB');
+            inc(ps, i);
+          until i = 0;
+          CheckEqual(s2.Position, length(D));
+          CheckEqual(s, D);
+        finally
+          s2.Free;
+        end;
+      end;
+  finally
+    s1.Free;
+  end;
   // basic integrity from two threads
   P := TPipeStream.Create(512);
   R := TPipeThread.Create({suspended=}true, nil, nil, TSynLog, 'rd');
@@ -2122,7 +2161,7 @@ begin
   W.SetText(U);
   CheckHash(U, $1D682EF8, 'hash32f');
   P := pointer(U);
-  if not CheckFailed(P^ = '[') then
+  if Check(P^ = '[') then
     inc(P);
   for i := 0 to 1000 do
   begin
@@ -2262,7 +2301,7 @@ begin
   {$endif HASEXTRECORDRTTI}
   ARP.Clear;
   Check(ARP.LoadFromJson(pointer(U)) <> nil);
-  if not CheckFailed(ARP.Count = 1001) then
+  if Check(ARP.Count = 1001) then
     for i := 0 to 1000 do
       with AR[i] do
       begin
@@ -3507,7 +3546,7 @@ procedure TTestCoreBase._ParseCommandArgs;
       Check(StrComp(pointer(a[i]), pointer(expected[i])) = 0);
     Check(a[n] = nil, 'last param should be nil');
     Check(ExtractCommandArgs(cmd, p, posix) = flags);
-    if not CheckFailed(n = length(p)) then
+    if Check(n = length(p)) then
       for i := 0 to n - 1 do
         CheckEqual(p[i], expected[i]);
   end;
@@ -4387,7 +4426,6 @@ var
     Timer: TPrecisionTimer;
     a: string[10];
   begin
-    Timer.Start;
     a := '123456789';
     Check(hash(0, @a, 0) = 0);
     Check(hash(0, @a, 1) = $2ACF889D);
@@ -4400,6 +4438,7 @@ var
     Check(hash(0, @a, 6) = $85BF5A8C);
     Check(hash(0, @a, 7) = $8B0FB6FA);
     Check(hash(0, @a, 8) = $2E5336F0);
+    Timer.Start;
     for i := 0 to High(crc) do
       with crc[i] do
         Check(hash(0, pointer(S), length(S)) = crc);
@@ -4420,6 +4459,7 @@ var
   digest: THash256;
   tmp: RawByteString;
   hmac32: THmacCrc32c;
+  timer: TPrecisionTimer;
 begin
   test16('', $ffff);
   test16('a', $9d77);
@@ -4540,14 +4580,23 @@ begin
   {$ifndef OSDARWIN}
   // Not [yet] implemented on Darwin
   if cfSSE42 in CpuFeatures then
+  begin
     Test(crc32csse42, 'sse42');
+    AddConsole('%', [msg]);
+    Check(hashsse42(0, p, 5) = $39B69E64, 'hashsse42a');
+    Check(hashsse42(0, p, 1020) = $C43D29E6, 'hashsse42b');
+    timer.Start; // only the profiling part of Test()
+    for i := 0 to High(crc) do
+      with crc[i] do
+        CheckNotEqual(hashsse42(0, pointer(S), length(S)), crc);
+    msg := FormatUtf8(' hashsse42:%/s', [KBNoSpace(Timer.PerSec(totallen))]);
+    {$ifdef ASMX64}
+    if (cfAesNi in CpuFeatures) and
+       (cfCLMUL in CpuFeatures) then
+      Test(crc32c, 'clmul'); // use SSE4.2+pclmulqdq instructions on x64
+    {$endif ASMX64}
+  end;
   {$endif OSDARWIN}
-  {$ifdef ASMX64}
-  if (cfSSE42 in CpuFeatures) and
-     (cfAesNi in CpuFeatures) and
-     (cfCLMUL in CpuFeatures) then
-    Test(crc32c, 'aesni'); // use SSE4.2+pclmulqdq instructions on x64
-  {$endif ASMX64}
   {$else}
   if @crc32c <> @crc32cfast then
     Test(crc32c, 'armv8');
@@ -5025,6 +5074,38 @@ begin
   CheckEqualShort(TwoDigits(0.0551), '0.06');
   CheckEqualShort(TwoDigits(0.0015), '0');
   CheckEqualShort(TwoDigits(0.0055), '0.01');
+  UInt32DigitsToUtf8(94287082, 10, s);
+  CheckEqual(s, '0094287082');
+  UInt32DigitsToUtf8(94287082, 8, s);
+  CheckEqual(s, '94287082');
+  UInt32DigitsToUtf8(94287082, 6, s);
+  CheckEqual(s, '287082');
+  UInt32DigitsToUtf8(94287082, 4, s);
+  CheckEqual(s, '7082');
+  for i := 0 to 8 do
+  begin
+    UInt32DigitsToUtf8(i, 0, s);
+    CheckEqual(s, '');
+    UInt32DigitsToUtf8(111111111, i, s);
+    CheckEqual(length(s), i);
+    for j := 1 to i do
+      Check(s[i] = '1');
+    UInt32DigitsToUtf8(7, i, s);
+    CheckEqual(length(s), i);
+    if i = 0 then
+      continue;
+    for j := 1 to i - 1 do
+      Check(s[j] = '0');
+    Check(s[i] = '7');
+  end;
+  UInt32DigitsToUtf8(7, 20, s);
+  CheckEqual(s, '00000000000000000007');
+  UInt32DigitsToUtf8(7, 23, s);
+  CheckEqual(s, '00000000000000000000007');
+  UInt32DigitsToUtf8(7, 24, s);
+  CheckEqual(s, '00000000000000000000007');
+  UInt32DigitsToUtf8(7, 25, s);
+  CheckEqual(s, '00000000000000000000007');
   n := 100000;
   Timer.Start;
   crc := 0;
@@ -6081,6 +6162,8 @@ begin
   Check(SafeFileName('..path\toto.jpg'));
   Check(not SafeFileName('../toto'));
   Check(not SafeFileName('..\toto.jpg'));
+  Check(not SafeFileName('/toto.jpg'));
+  Check(not SafeFileName('\toto.jpg'));
   Check(SafePathName('one/two'));
   Check(SafePathName('one\two'));
   Check(SafePathName('one../two'));
@@ -6099,6 +6182,8 @@ begin
   Check(not SafePathName('..\two'));
   Check(not SafePathName('/../two'));
   Check(not SafePathName('\..\two'));
+  Check(not SafePathName('/toto'));
+  Check(not SafePathName('\toto'));
   Check(SafeFileNameU(''));
   Check(SafePathNameU(''));
   Check(SafeFileNameU('toto'));
@@ -6111,6 +6196,8 @@ begin
   Check(SafeFileNameU('..path\toto.jpg'));
   Check(not SafeFileNameU('../toto'));
   Check(not SafeFileNameU('..\toto.jpg'));
+  Check(not SafeFileNameU('/toto.jpg'));
+  Check(not SafeFileNameU('\toto.jpg'));
   Check(SafePathNameU('one/two'));
   Check(SafePathNameU('one\two'));
   Check(SafePathNameU('one../two'));
@@ -6129,6 +6216,8 @@ begin
   Check(not SafePathNameU('..\two'));
   Check(not SafePathNameU('/../two'));
   Check(not SafePathNameU('\..\two'));
+  Check(not SafePathNameU('/toto'));
+  Check(not SafePathNameU('\toto'));
   Check(ExtractPath('/var/toto.ext') = '/var/');
   Check(ExtractPath('c:\var\toto.ext') = 'c:\var\');
   Check(ExtractPath('toto.ext') = '');
@@ -6667,6 +6756,18 @@ begin
   until len < 0;
   for i := 1 to length(su) do
     Check(SU[i] = #0);
+  fn := 'test.htdigest';
+  Check(PosExtString(pointer(fn))^ = 'h');
+  fn := PathDelim + 'test.htdigest';
+  Check(PosExtString(pointer(fn))^ = 'h');
+  fn := '.htdigest';
+  Check(PosExtString(pointer(fn)) = nil);
+  fn := PathDelim + '.htdigest';
+  Check(PosExtString(pointer(fn)) = nil);
+  fn := 'htdigest';
+  Check(PosExtString(pointer(fn)) = nil);
+  fn := PathDelim + 'htdigest';
+  Check(PosExtString(pointer(fn)) = nil);
   for i := 0 to 1000 do
   begin
     len := i * 5;
@@ -6981,7 +7082,7 @@ begin
   U[3] := #$B3;
   U[4] := #$92;
   Utf8ToSynUnicode(U, SU);
-  if not CheckFailed(length(SU) = 2) then
+  if Check(length(SU) = 2) then
     Check(PCardinal(SU)^ = $DCD2D863);
   CheckEqual(StrLenW(pointer(SU)), length(SU));
   Check(Utf8ToUnicodeLength(Pointer(U)) = 2);
@@ -6990,13 +7091,13 @@ begin
   if CheckEqual(Utf8ToWideChar(WU, pointer(U), SizeOf(WU), length(U), false), 4) then
     Check(PCardinal(@WU)^ = $DCD2D863);
   U := SynUnicodeToUtf8(SU);
-  if not CheckFailed(length(U) = 4) then
+  if Check(length(U) = 4) then
     Check(PCardinal(U)^ = $92b3a8f0);
   CheckEqual(StrLenW(pointer(SU)), length(SU));
   TSynAnsiConvert.Engine(CP_UTF8).UnicodeBufferToAnsiVar(
     pointer(SU), length(SU), RawByteString(U));
   Check(length(U) = 4);
-  if not CheckFailed(length(U) = 4) then
+  if Check(length(U) = 4) then
     Check(PCardinal(U)^ = $92b3a8f0);
   SetLength(res, 10);
   PB := pointer(res);
@@ -7008,6 +7109,17 @@ begin
   PB := pointer(res);
   FromVarString(PB, U2);
   check(U2 = U);
+  U := HexTobin('2800541D251D541D2900'); // a nice Unicode mORMot glyph
+  {$ifdef HASCODEPAGE}
+  CheckEqual(GetCodePage(U), CP_RAWBYTESTRING);
+  {$endif HASCODEPAGE}
+  FastSynUnicode(SU, pointer(U), length(U) shr 1);
+  U := HexToUtf8('28E1B594E1B4A5E1B59429');
+  {$ifdef HASCODEPAGE}
+  CheckEqual(GetCodePage(U), CP_UTF8);
+  {$endif HASCODEPAGE}
+  CheckEqual(SynUnicodeToUtf8(SU), U);
+  Check(Utf8ToSynUnicode(U) = SU);
   for i := 0 to high(UTF8_UCS4) do
   begin
     RawUcs4ToUtf8(@UTF8_UCS4[i], 1, U);
@@ -7369,7 +7481,8 @@ procedure TTestCoreBase.Charsets;
     {$endif HASCODEPAGE}
     {$ifdef OSWINDOWS}
     // skip old Windows (XP/Vista/Seven) which may miss some/most encodings
-    if OSVersion < wTen then
+    if (OSVersion < wTen) or
+       (wsWine in WindowsSpecs) then // Wine/ICU also behind
       exit; // seems not available without a specific language pack
     {$endif OSWINDOWS}
     // validate mORMot conversion
@@ -7386,8 +7499,8 @@ procedure TTestCoreBase.Charsets;
       {$ifdef OSDARWIN}
       exit;  // MacOS ICU seems to be not as expected with escape chars
       {$else}
-      if not CheckFailed(a <> '', 'kr1') then
-        if not CheckFailed(PCardinal(a)^ = 1126769691, 'kr2') then
+      if Check(a <> '', 'kr1') then
+        if Check(PCardinal(a)^ = 1126769691, 'kr2') then
           delete(a, 1, 4); // delete IEC 2022 escape char
       {$endif OSDARWIN}
     {$endif OSPOSIX}
@@ -8146,29 +8259,21 @@ begin
     '1492-10-12T16:00:00');
 end;
 
-function LocalTimeToUniversal(LT: TDateTime; TZOffset: Integer): TDateTime;
-begin
-  result := EncodeTime(Abs(TZOffset) div 60, Abs(TZOffset) mod 60, 0, 0);
-  if TZOffset > 0 then
-    result := LT - result
-  else if TZOffset < 0 then
-    result := LT + result
-  else
-    result := LT;
-end;
-
-{$R ..\src\mormot.tz.res} // validate our Win10-generated resource file
+{$R ..\src\mormot.tz.res} // validate our Win11-generated resource file
 
 procedure TTestCoreBase.TimeZonesSlow(Context: TObject);
 var
   tz: TSynTimeZone;
+  st, stl: TSystemTime;
+  t: TSynSystemTime;
   d: TTimeZoneData;
   i, bias: integer;
   m: word;
   hdl, reload: boolean;
+  endtix: Int64;
   buf: RawByteString;
-  dt: TDateTime;
-  local: TDateTime;
+  dt, dtl: TDateTime;
+  ut: TUnixTime;
   s31: TShort31;
 
   procedure testBias(year, expected: integer);
@@ -8327,22 +8432,40 @@ begin
   finally
     tz.Free;
   end;
-  // validate NowUtc / TimeZoneLocalBias
+  // validate mormot.core.os time conversions
   dt := NowUtc;
-  CheckSame(LocalTimeToUniversal(Now(), TimeZoneLocalBias), dt, 0.01,
-    'NowUtc should not shift nor truncate time in respect to RTL Now');
-  sleep(200);
-  Check(not SameValue(dt, NowUtc),
-    'NowUtc should not truncate time (e.g. to 5 sec resolution)');
+  dtl := UtcToLocal(dt);
+  CheckSameTime(dtl, Now(), 'RTL Now should match mormot.core.os');
+  ut := UnixTimeUtc;
+  t.FromNow({localtime=}true);
+  GetLocalTime(stl);
+  //writeln(#10'utc=',DateTimeToSql(dt),#10'loc=',DateTimeToSql(dtl));
+  CheckSameTime(UtcToLocal(dt), dtl, 'UtcToLocal');
+  CheckSameTime(LocalToUtc(dtl), dt, 'LocalToUtc');
+  CheckSameTime(UnixTimeToLocal(ut), dtl, 'UnixTimeToLocal');
+  Check(abs(LocalToUnixTime(dtl) - ut) < 2, 'LocalToUnixTime');
+  UnixTimeToLocal(ut, st);
+  {$ifndef POSIXDELPHI} // SystemTimeToDateTime() not available on Delphi POSIX
+  CheckSameTime(SystemTimeToDateTime(st), SystemTimeToDateTime(stl), 'UnixTimeToLocal');
+  {$endif POSIXDELPHI}
+  {$ifdef VER3_2_4}
+  CheckSameTime(LocalTimeToUniversal(dtl), dt, 'LocalTimeToUniversal');
+  CheckSameTime(UniversalTimeToLocal(dt), dtl, 'UniversalTimeToLocal');
+  {$endif VER3_2_4}
+  endtix := GetTickCount64 + 100; // 16ms resolution at worst on Windows
+  repeat
+    sleep(10); // likely to be executed in a background thread
+  until CheckFailed(GetTickCount64 < endtix,
+          'NowUtc should not truncate time within 100ms period') or
+        (NowUtc > dt);
   // validate zones taken from Windows registry or mormot.tz.res on POSIX
   tz := TSynTimeZone.Default;
-  local := tz.UtcToLocal(dt, 'UTC');
-  check(SameValue(local, dt));
+  CheckSameTime(tz.UtcToLocal(dt, 'UTC'), dt);
   check(tz.GetBiasForDateTime(dt, 'UTC', bias, hdl));
   check(bias = 0);
   check(not hdl);
-  local := tz.UtcToLocal(dt, 'Romance Standard Time');
-  check(not SameValue(local, dt), 'Perfide Albion never matches the continent');
+  dtl := tz.UtcToLocal(dt, 'Romance Standard Time');
+  check(not SameValue(dtl, dt,SecsPerDate), 'Perfide Albion');
   check(tz.GetBiasForDateTime(dt, 'Romance Standard Time', bias, hdl));
   check(hdl);
   check(bias < 0, 'Paris is always ahead of London');
@@ -8350,11 +8473,11 @@ begin
   tz := TSynTimeZone.Create;
   try
     tz.LoadFromBuffer(buf);
-    CheckSame(local, tz.UtcToLocal(dt, 'Romance Standard Time'));
+    CheckSameTime(dtl, tz.UtcToLocal(dt, 'Romance Standard Time'));
   finally
     tz.Free;
   end;
-  CheckSame(local, UtcToLocal(dt, 'Romance Standard Time'));
+  CheckSameTime(dtl, UtcToLocal(dt, 'Romance Standard Time'));
 end;
 
 const
@@ -8517,12 +8640,95 @@ function ConvertSidToStringSidA(Sid: PSID; var StringSid: PAnsiChar): BOOL; stdc
 
 {$endif OSWINDOWS}
 
+procedure TTestCoreBase.OsErrors;
+var
+  se: TSystemError;
+  err: integer;
+  txt: RawUtf8;
+  ss: TShort63;
+  s7: TShort7;
+begin
+  // some cross-platform Windows/Linux/BSD error detection
+  CheckEqual(SystemError(seSuccess), 0);
+  CheckEqual(SystemError(seOther), 0);
+  CheckEqual(SystemErrorText(seSuccess), 'Success');
+  CheckEqual(SystemErrorText(seNameTooLong), 'NameTooLong');
+  CheckEqual(SystemErrorText(seOther), 'Other');
+  for se := succ(seSuccess) to pred(seOther) do
+  begin
+    err := SystemError(se);
+    CheckNotEqual(err, 0);
+    Check(GetSystemError(err) = se);
+    Check(IsSystemError(se, err), 'IsOsError');
+    ss := SystemErrorShort(err);
+    Check(ss[0] <> #0, 'SystemErrorShort');
+    txt := SystemErrorText(se);
+    CheckNotEqual(txt, '');
+    Check(PosEx(txt, ShortStringToUtf8(ss)) > 0);
+  end;
+  CheckEqualShort(WinErrorConstant(NO_ERROR)^, 'SUCCESS', 'weca');
+  CheckEqualShort(WinErrorConstant(995)^, 'OPERATION_ABORTED', 'wecb1');
+  CheckEqualShort(WinErrorConstant(1150)^, 'OLD_WIN_VERSION', 'wecb2');
+  CheckEqualShort(WinErrorConstant(1450)^, 'NO_SYSTEM_RESOURCES', 'wecb3');
+  CheckEqualShort(WinErrorConstant(1907)^, 'PASSWORD_MUST_CHANGE', 'wecb4');
+  CheckEqualShort(WinErrorConstant(1200)^, 'BAD_DEVICE', 'wecc');
+  CheckEqualShort(WinErrorConstant(234)^, 'MORE_DATA', 'wecd');
+  CheckEqualShort(WinErrorConstant(5)^, 'ACCESS_DENIED', 'wece');
+  CheckEqualShort(WinErrorConstant(12002)^, 'TIMEOUT', 'wecf');
+  CheckEqualShort(WinErrorConstant($800b010a)^, 'CERT_E_CHAINING', 'wecg');
+  CheckEqualShort(WinErrorConstant($800b010c)^, 'CERT_E_REVOKED', 'wecG');
+  CheckEqualShort(WinErrorConstant($800b010d)^[0], #0, 'wech');
+  CheckEqualShort(WinErrorConstant($80092002)^, 'CRYPT_E_BAD_ENCODE', 'wecH');
+  CheckEqualShort(WinErrorConstant(1229)^ , 'CONNECTION_INVALID', 'weci');
+  CheckEqualShort(WinErrorConstant(122)^, 'INSUFFICIENT_BUFFER', 'wecj');
+  CheckEqualShort(WinErrorConstant(12152)^, 'INVALID_SERVER_RESPONSE', 'weck');
+  CheckEqualShort(WinErrorConstant(87)^, 'INVALID_PARAMETER', 'wecl');
+  CheckEqualShort(WinErrorConstant(1315)^, 'INVALID_ACCOUNT_NAME', 'wecm');
+  CheckEqualShort(WinErrorConstant(1331)^, 'ACCOUNT_DISABLED', 'wecn');
+  CheckEqualShort(WinErrorConstant(1342)^, 'SERVER_NOT_DISABLED', 'weco');
+  CheckEqualShort(WinErrorShort(0), '0 ERROR_SUCCESS', 'w0');
+  CheckEqualShort(WinErrorShort(5), '5 ERROR_ACCESS_DENIED', 'wa');
+  CheckEqualShort(WinErrorShort(12002), '12002 ERROR_WINHTTP_TIMEOUT', 'w1');
+  CheckEqualShort(WinErrorShort($800b010a), '800b010a CERT_E_CHAINING', 'w2');
+  CheckEqualShort(WinErrorShort($80000003), '80000003 EXCEPTION_BREAKPOINT', 'w3');
+  CheckEqualShort(WinErrorShort(1722), '1722 RPC_S_SERVER_UNAVAILABLE', 'w4');
+  CheckEqualShort(WinErrorShort(12152), '12152 ERROR_WINHTTP_INVALID_SERVER_RESPONSE', 'w5');
+  CheckEqualShort(WinErrorShort($c00000fd), 'c00000fd EXCEPTION_STACK_OVERFLOW', 'w6');
+  CheckEqualShort(WinErrorShort($80090330), '80090330 SEC_E_DECRYPT_FAILURE', 'w7');
+  CheckEqualShort(WinErrorShort($00090321), '590625 SEC_I_RENEGOTIATE', 'w8');
+  CheckEqualShort(WinErrorShort(244, {noint=}false), '244', '244w');
+  CheckEqualShort(WinErrorShort(245, {noint=}true), '', '245w');
+  WinErrorShortVar($80092012, ss);
+  CheckEqualShort(ss, '80092012 CRYPT_E_NO_REVOCATION_CHECK', 'winrevoc');
+  WinErrorShortVar($80092012, s7);
+  CheckEqualShort(s7, '8009201', 'trunc to string[7]');
+  BsdErrorShortVar(1, ss);
+  CheckEqualShort(ss, '1 EPERM', '1bsd');
+  BsdErrorShortVar(5, ss);
+  CheckEqualShort(ss, '5 EIO', '5bsd');
+  BsdErrorShortVar(40, ss);
+  CheckEqualShort(ss, '40 EMSGSIZE', '40bsd');
+  BsdErrorShortVar(81, ss);
+  CheckEqualShort(ss, '81 ENEEDAUTH', '81bsd');
+  BsdErrorShortVar(82, ss);
+  CheckEqualShort(ss, '82', '82bsd');
+  LinuxErrorShortVar(1, ss);
+  CheckEqualShort(ss, '1 EPERM', '1lin');
+  LinuxErrorShortVar(5, ss);
+  CheckEqualShort(ss, '5 EIO', '5lin');
+  LinuxErrorShortVar(124, ss);
+  CheckEqualShort(ss, '124 EMEDIUMTYPE', '124');
+  LinuxErrorShortVar(125, ss);
+  CheckEqualShort(ss, '125', '125');
+  CheckEqualShort(OsErrorShort(244, {noint=}false), '244', '244a');
+  CheckEqualShort(OsErrorShort(244, {noint=}true), '', '244b');
+end;
+
 procedure TTestCoreBase._SID;
 var
   k: TWellKnownSid;
   s: RawUtf8;
   s1, s2: RawSid;
-  ss: TShort47;
   {$ifdef OSWINDOWS}
   known: TWellKnownSids;
   sids: TRawUtf8DynArray;
@@ -8542,59 +8748,6 @@ begin
     CheckEqual(s, RawSidToText(s2));
     CheckUtf8(SidCompare(pointer(s1), pointer(s2)) = 0, s);
   end;
-  // some cross-platform Windows/Linux/BSD error detection
-  Check(WinErrorConstant(NO_ERROR)^ = 'SUCCESS', 'weca');
-  Check(WinErrorConstant(995)^ = 'OPERATION_ABORTED', 'wecb1');
-  Check(WinErrorConstant(1150)^ = 'OLD_WIN_VERSION', 'wecb2');
-  Check(WinErrorConstant(1450)^ = 'NO_SYSTEM_RESOURCES', 'wecb3');
-  Check(WinErrorConstant(1907)^ = 'PASSWORD_MUST_CHANGE', 'wecb4');
-  Check(WinErrorConstant(1200)^ = 'BAD_DEVICE', 'wecc');
-  Check(WinErrorConstant(234)^ = 'MORE_DATA', 'wecd');
-  Check(WinErrorConstant(5)^ = 'ACCESS_DENIED', 'wece');
-  Check(WinErrorConstant(12002)^ = 'TIMEOUT', 'wecf');
-  Check(WinErrorConstant($800b010a)^ = 'CERT_E_CHAINING', 'wecg');
-  Check(WinErrorConstant($800b010c)^ = 'CERT_E_REVOKED', 'wecG');
-  Check(WinErrorConstant($800b010d)^[0] = #0, 'wech');
-  Check(WinErrorConstant($80092002)^ = 'CRYPT_E_BAD_ENCODE', 'wecH');
-  Check(WinErrorConstant(1229)^  = 'CONNECTION_INVALID', 'weci');
-  Check(WinErrorConstant(122)^ = 'INSUFFICIENT_BUFFER', 'wecj');
-  Check(WinErrorConstant(12152)^ = 'INVALID_SERVER_RESPONSE', 'weck');
-  Check(WinErrorConstant(87)^ = 'INVALID_PARAMETER', 'wecl');
-  Check(WinErrorConstant(1315)^ = 'INVALID_ACCOUNT_NAME', 'wecm');
-  Check(WinErrorConstant(1331)^ = 'ACCOUNT_DISABLED', 'wecn');
-  Check(WinErrorConstant(1342)^ = 'SERVER_NOT_DISABLED', 'weco');
-  Check(WinErrorShort(0) = '0 ERROR_SUCCESS', 'w0');
-  Check(WinErrorShort(5) = '5 ERROR_ACCESS_DENIED', 'wa');
-  Check(WinErrorShort(12002) = '12002 ERROR_WINHTTP_TIMEOUT', 'w1');
-  Check(WinErrorShort($800b010a) = '800b010a CERT_E_CHAINING', 'w2');
-  Check(WinErrorShort($80000003) = '80000003 EXCEPTION_BREAKPOINT', 'w3');
-  Check(WinErrorShort(1722) = '1722 RPC_S_SERVER_UNAVAILABLE', 'w4');
-  Check(WinErrorShort(12152) = '12152 ERROR_WINHTTP_INVALID_SERVER_RESPONSE', 'w5');
-  Check(WinErrorShort($c00000fd) = 'c00000fd EXCEPTION_STACK_OVERFLOW', 'w6');
-  Check(WinErrorShort($80090330) = '80090330 SEC_E_DECRYPT_FAILURE', 'w7');
-  Check(WinErrorShort($00090321) = '590625 SEC_I_RENEGOTIATE', 'w8');
-  Check(WinErrorShort(244, {noint=}false) = '244', '244w');
-  Check(WinErrorShort(245, {noint=}true) = '', '245w');
-  BsdErrorShort(1, @ss);
-  Check(ss = '1 EPERM', '1bsd');
-  BsdErrorShort(5, @ss);
-  Check(ss = '5 EIO', '5bsd');
-  BsdErrorShort(40, @ss);
-  Check(ss = '40 EMSGSIZE', '40bsd');
-  BsdErrorShort(81, @ss);
-  Check(ss = '81 ENEEDAUTH', '81bsd');
-  BsdErrorShort(82, @ss);
-  Check(ss = '82', '82bsd');
-  LinuxErrorShort(1, @ss);
-  Check(ss = '1 EPERM', '1lin');
-  LinuxErrorShort(5, @ss);
-  Check(ss = '5 EIO', '5lin');
-  LinuxErrorShort(124, @ss);
-  Check(ss = '124 EMEDIUMTYPE', '124');
-  LinuxErrorShort(125, @ss);
-  Check(ss = '125', '125');
-  Check(OsErrorShort(244, {noint=}false) = '244', '244a');
-  Check(OsErrorShort(244, {noint=}true) = '', '244b');
   // validate Windows specific SID function, especially about the current user
   {$ifdef OSWINDOWS}
   CurrentRawSid(s1, wttProcess);
@@ -9013,8 +9166,11 @@ begin
     Check(SecurityDescriptorToText(bin, u), 'sdtt1');
     CheckEqual(u, SD_TXT[i]);
     {$ifdef OSWINDOWS} // validate against the OS API
-    Check(CryptoApi.SecurityDescriptorToText(pointer(bin), u), 'winapi1');
-    CheckEqual(u, SD_TXT[i], 'winapi2');
+    if not (wsWine in WindowsSpecs) then
+    begin
+      Check(CryptoApi.SecurityDescriptorToText(pointer(bin), u), 'winapi1');
+      CheckEqual(u, SD_TXT[i], 'winapi2');
+    end;
     {$endif OSWINDOWS}
     // TSecurityDescriptor binary load and export as SDDL or binary
     sd.Clear;
@@ -9032,8 +9188,11 @@ begin
     Check(SecurityDescriptorToText(saved, u), 'sdtt2');
     CheckEqual(u, SD_TXT[i]);
     {$ifdef OSWINDOWS}
-    Check(CryptoApi.SecurityDescriptorToText(pointer(saved), u), 'winapi3');
-    CheckEqual(u, SD_TXT[i], 'winapi4');
+    if not (wsWine in WindowsSpecs) then
+    begin
+      Check(CryptoApi.SecurityDescriptorToText(pointer(saved), u), 'winapi3');
+      CheckEqual(u, SD_TXT[i], 'winapi4');
+    end;
     {$endif OSWINDOWS}
     if i in [1, 2, 8] then
       // serialization offsets are not consistent between XP or later
@@ -9221,7 +9380,7 @@ begin
     Check(length(sd.Dacl) in [1, 2]);
     CheckEqual(length(sd.Sacl), 0);
     Check(sd.Dacl[0].AceType = satCallbackAccessAllowed);
-    if not CheckFailed(sd.Dacl[0].Opaque <> '') then
+    if Check(sd.Dacl[0].Opaque <> '') then
     begin
       u := sd.Dacl[0].ConditionalExpression;
       Check(u <> '');
@@ -9645,11 +9804,14 @@ begin
   for i := 1 to 100 do
   begin
     s := DateTimeToIso8601(Now / 20 + rnd.NextDouble * 20, true);
-    t := UrlEncode(s);
+    t := UrlEncode(s); // e.g. '1906-05-18T02%3A02%3A22'
     CheckEqual(UrlDecode(t), s);
     d := 'seleCT=' + t + '&where=' + Int32ToUtf8(i);
     Check(UrlDecodeNeedParameters(pointer(d), 'where,select'));
     Check(not UrlDecodeNeedParameters(pointer(d), 'foo,select'));
+    Check(not UrlDecodeNeedParameters(pointer(d), 'wher,select'));
+    Check(not UrlDecodeNeedParameters(pointer(d), 'where,selected'));
+    Check(not UrlDecodeNeedParameters(pointer(d), 'wheres,select'));
     Check(UrlDecodeValue(pointer(d), 'SELECT=', t, @U));
     CheckEqual(t, s, 'UrlDecodeValue');
     Check(IdemPChar(U, 'WHERE='), 'Where');
@@ -9676,8 +9838,45 @@ begin
   {$endif OSWINDOWS}
 end;
 
-procedure TTestCoreBase.MimeTypes;
+type
+  /// TStream returning only a few bytes per Read, as a slow network source
+  // - used by TTestCoreBase.MultiPartDecoder to validate the incremental
+  // decoding of any content split at unpredictable positions
+  TTrickleStream = class(TStreamWithNoSeek)
+  protected
+    fData: RawByteString;
+    fMax: PtrInt;
+  public
+    constructor Create(const aData: RawByteString; aMax: PtrInt); reintroduce;
+    function Read(var Buffer; Count: Longint): Longint; override;
+  end;
+
+constructor TTrickleStream.Create(const aData: RawByteString; aMax: PtrInt);
+begin
+  inherited Create;
+  fData := aData;
+  fMax := aMax;
+  fSize := length(aData);
+end;
+
+function TTrickleStream.Read(var Buffer; Count: Longint): Longint;
+begin
+  result := length(fData) - fPosition;
+  if result > fMax then
+    result := fMax;
+  if result > Count then
+    result := Count;
+  if result <= 0 then
+  begin
+    result := 0;
+    exit;
+  end;
+  MoveFast(PByteArray(fData)[fPosition], Buffer, result);
+  inc(fPosition, result);
+end;
+
 const
+  // test data shared by TTestCoreBase.MimeTypes and MultiPartDecoder
   MIM: array[0 .. 27 * 2 - 1] of RawUtf8 = (
     'png',      'image/png',
     'PNg',      'image/png',
@@ -9706,6 +9905,9 @@ const
     'h264',     'video/H264',
     'x',        'application/x-compress',
     'ogv',      'video/ogg');
+
+procedure TTestCoreBase.MimeTypes;
+const
   BIN: array[0 .. 2] of Cardinal = (
     $04034B50, $38464947, $fd2fb528);
   BIN_MIME: array[0 .. high(BIN)] of RawUtf8 = (
@@ -9723,38 +9925,8 @@ const
     'video/mp4', 'image/heic', 'video/H264', 'image/avif',
     'audio/ogg', 'video/ogg');
 var
-  i, j, n: integer;
-  fa: TFileAge;
-  fdt: TDateTime;
-  fs: Int64;
-  fu: TUnixMSTime;
-  fn: array[0..10] of TFileName;
-  mp, mp2: TMultiPartDynArray;
-  s, ct, mpc, mpct: RawUtf8;
-  st: THttpMultiPartStream;
-  rfc2388: boolean;
-
-  procedure DecodeAndTest;
-  var
-    i: integer;
-  begin
-    mp2 := nil;
-    Check(MultiPartFormDataDecode(mpct, mpc, mp2));
-    CheckEqual(length(mp2), length(mp));
-    for i := 0 to high(mp2) do
-      if i <= n then
-      begin
-        CheckEqual(mp2[i].Name,    MIM[i * 2]);
-        CheckEqual(mp2[i].Content, MIM[i * 2 + 1]);
-      end
-      else
-      begin
-        j := i - n - 1;
-        CheckEqual(mp2[i].FileName, StringToUtf8(ExtractFileName(fn[j])));
-        CheckEqual(mp2[i].Content,  MIM[j * 2 + 1]);
-      end;
-  end;
-
+  i: integer;
+  s, ct: RawUtf8;
 begin
   // user agent bot detection
   Check(not IsHttpUserAgentBot(
@@ -9932,7 +10104,7 @@ begin
     CheckEqual(ct, BIN_MIME[i]);
   end;
   for i := 0 to high(HEX) do
-  if not CheckFailed(length(HEX[i]) shr 1 < length(s)) then
+  if Check(length(HEX[i]) shr 1 < length(s)) then
   begin
     Check(mormot.core.text.HexToBin(pointer(HEX[i]), pointer(s), length(HEX[i]) shr 1));
     CheckEqual(GetMimeContentType(s), HEX_MIME[i]);
@@ -10000,6 +10172,12 @@ begin
   Check(not IsContentTypeJsonU('application/vnd.mysoft.v1+'));
   Check(IsContentTypeJsonU('application/+json'));
   Check(not IsContentTypeJsonU('application/xml'));
+  Check(not IsContentTypeJsonU(XML_CONTENT_TYPE));
+  Check(IsContentTypeJsonU('anything/json'));
+  Check(IsContentTypeJsonU('something/JSON'));
+  Check(not IsContentTypeJsonU('something/SON'));
+  Check(not IsContentTypeJsonU('something/iSON'));
+  Check(not IsContentTypeJsonU('something/JS0N'));
   Check(IsContentTypeTextU('text/plain'));
   Check(IsContentTypeTextU('text/xml'));
   Check(IsContentTypeTextU('text/css'));
@@ -10007,6 +10185,7 @@ begin
   Check(IsContentTypeTextU('application/json'));
   Check(IsContentTypeTextU('APPLICATION/JSON'));
   Check(IsContentTypeTextU('application/xml'));
+  Check(IsContentTypeTextU(XML_CONTENT_TYPE));
   Check(not IsContentTypeTextU('application/octet-stream'));
   Check(IsContentTypeTextU('application/javascript'));
   Check(IsContentTypeTextU('application/VND.API+JSON'));
@@ -10017,7 +10196,172 @@ begin
   Check(IsContentTypeTextU('image/svg'));
   Check(not IsContentTypeTextU('image/X-ico'));
   Check(not IsContentTypeTextU('image/X-ICO'));
-  // mime multipart encoding
+end;
+
+procedure TTestCoreBase.MultiPartDecoder;
+var
+  i, j, n: integer;
+  fa: TFileAge;
+  fdt: TDateTime;
+  fs: Int64;
+  fu: TUnixMSTime;
+  fn: array[0..10] of TFileName;
+  mp, mp2: TMultiPartDynArray;
+  s, mpc, mpct, bound: RawUtf8;
+  st: THttpMultiPartStream;
+  rfc2388, raised: boolean;
+  big, got: RawByteString;
+  src: TStream;
+  dec: THttpMultiPartDecoder;
+  onebyte: array[0 .. 0] of byte;
+
+  procedure DecodeAndTest;
+  var
+    i: integer;
+  begin
+    mp2 := nil;
+    Check(MultiPartFormDataDecode(mpct, mpc, mp2));
+    CheckEqual(length(mp2), length(mp));
+    for i := 0 to high(mp2) do
+      if i <= n then
+      begin
+        CheckEqual(mp2[i].Name,    MIM[i * 2]);
+        CheckEqual(mp2[i].Content, MIM[i * 2 + 1]);
+      end
+      else
+      begin
+        j := i - n - 1;
+        CheckEqual(mp2[i].FileName, StringToUtf8(ExtractFileName(fn[j])));
+        CheckEqual(mp2[i].Content,  MIM[j * 2 + 1]);
+      end;
+  end;
+
+  function ReadAll(strm: TStream): RawByteString;
+  var
+    tmp: array[0 .. 998] of byte; // odd size to exercise the sliding window
+    r, len: PtrInt;
+  begin
+    result := '';
+    len := 0;
+    repeat
+      r := strm.Read(tmp, SizeOf(tmp));
+      if r > 0 then
+      begin
+        SetLength(result, len + r);
+        MoveFast(tmp, PByteArray(result)[len], r);
+        inc(len, r);
+      end;
+    until r = 0;
+  end;
+
+  procedure DecodeStreamAndTest(aBufferSize: PtrInt);
+  var
+    ssrc: TRawByteStringStream;
+    sdec, nested: THttpMultiPartDecoder;
+    i, f: integer;
+    sgot: RawByteString;
+
+    function ReadContent(part: THttpMultiPartDecoder): RawByteString;
+    begin
+      // the streaming decoder returns the raw section bytes: any
+      // Content-Transfer-Encoding is up to the caller, as with Go
+      result := ReadAll(part.Content); // also validate per-field properties
+      if PropNameEquals(part.Encoding, 'base64') then
+        result := Base64ToBin(result);
+    end;
+
+  begin
+    // same expectations as DecodeAndTest, but using the incremental decoder
+    ssrc := TRawByteStringStream.Create(mpc);
+    sdec := THttpMultiPartDecoder.CreateFromContentType(ssrc, mpct, aBufferSize);
+    try
+      i := 0;
+      f := 0;
+      while sdec.NextPart do
+        if IdemPChar(pointer(sdec.Current.ContentType), 'MULTIPART/MIXED') then
+        begin
+          // rfc2388 nested "files" section: decode it recursively
+          nested := THttpMultiPartDecoder.CreateFromContentType(
+            sdec.Current.Content, sdec.Current.ContentType, aBufferSize);
+          try
+            while nested.NextPart do
+            begin
+              CheckEqual(nested.Current.FileName,
+                StringToUtf8(ExtractFileName(fn[f])), 'nested filename');
+              sgot := ReadContent(nested);
+              CheckEqual(sgot, MIM[f * 2 + 1]);
+              inc(f);
+            end;
+            Check(nested.Close, 'nested Close');
+          finally
+            nested.Free;
+          end;
+        end
+        else if sdec.Current.FileName <> '' then
+        begin
+          CheckEqual(sdec.Current.FileName,
+            StringToUtf8(ExtractFileName(fn[f])), 'filename');
+          sgot := ReadContent(sdec);
+          CheckEqual(sgot, MIM[f * 2 + 1]);
+          inc(f);
+        end
+        else
+        begin
+          CheckEqual(sdec.Current.Name, MIM[i * 2], 'field name');
+          sgot := ReadContent(sdec);
+          CheckEqual(sgot, MIM[i * 2 + 1]);
+          inc(i);
+        end;
+      Check(sdec.Close, 'Close');
+      CheckEqual(i, n + 1, 'field count');
+      CheckEqual(f, length(fn), 'file count');
+    finally
+      sdec.Free;
+      ssrc.Free;
+    end;
+  end;
+
+  procedure TestOne(const body: RawByteString; const ctxt: RawUtf8;
+    expparts: integer; expclose: boolean;
+    const expcontent: RawByteString = ''; checkcontent: boolean = true);
+  var
+    tsrc: TRawByteStringStream;
+    tdec: THttpMultiPartDecoder;
+    parts: integer;
+    tgot: RawByteString;
+  begin
+    // decode a hand-made body with the fixed 'xyz' boundary
+    tsrc := TRawByteStringStream.Create(body);
+    tdec := THttpMultiPartDecoder.Create(tsrc, 'xyz', 4096);
+    try
+      parts := 0;
+      tgot := '';
+      while tdec.NextPart do
+      begin
+        inc(parts);
+        if parts = 1 then
+          tgot := ReadAll(tdec.Current.Content);
+      end;
+      CheckEqual(parts, expparts, ctxt);
+      CheckUtf8(tdec.Close = expclose, ctxt);
+      CheckUtf8((tdec.State = mpdsFinished) = tdec.Close, ctxt);
+      if checkcontent and
+         (expparts <> 0) then
+        CheckEqual(tgot, expcontent, ctxt); // '' = expect a void section
+    finally
+      tdec.Free;
+      tsrc.Free;
+    end;
+  end;
+
+const
+  TRUNC: array[0 .. 3] of RawByteString = (
+    'partial data without a final boundary', // eof within the content
+    'data'#13#10'--xyz',                     // eof just after the delimiter
+    'data'#13#10'--xyz'#13,                  // eof within the final crlf
+    'data'#13#10'--xyz-');                   // eof within the final --
+begin
+  // mime multipart encoding, and round-trip with the incremental decoder
   for rfc2388 := false to true do
   begin
     mp := nil;
@@ -10055,6 +10399,7 @@ begin
     end;
     Check(MultiPartFormDataEncode(mp, mpct, mpc, rfc2388));
     DecodeAndTest;
+    DecodeStreamAndTest(4096);
     st := THttpMultiPartStream.Create;
     st.Rfc2388NestedFiles := rfc2388;
     for i := 0 to n do
@@ -10065,9 +10410,263 @@ begin
     mpct := st.MultipartContentType;
     mpc := StreamToRawByteString(st);
     DecodeAndTest;
+    DecodeStreamAndTest(4096);
+    DecodeStreamAndTest(65536);
     st.Free;
     for i := 0 to high(fn) do
       check(DeleteFile(fn[i]));
+  end;
+  // incremental decoding of a huge section using a small work buffer, with
+  // '--xyz' delimiter near-misses so that the scanner has to handle
+  // delimiter prefixes split by the work buffer boundaries
+  big := '';
+  while length(big) < 300000 do
+    Append(big, [#13#10'--xyzZ', length(big),      // wrong delimiter tail
+                 #13#10'---xyz'#13#10,             // one dash too many
+                 #13'--xyz'#13#10,                 // CR without LF
+                 #13#10'--xyz'#13, 'no LF here'#10,// truncated CRLF tail
+                 'plain content bytes'#13#10]);
+  SetLength(big, 300000);
+  mpc := Join(['--xyz'#13#10'Content-Disposition: form-data; name="f"'#13#10 +
+    'Content-Type: application/octet-stream'#13#10#13#10, big, #13#10'--xyz--'#13#10]);
+  // decode it with several work buffer sizes and consumer read sizes
+  for i := 0 to 3 do
+  begin
+    case i of
+      0: j := 4096;
+      1: j := 4097;
+      2: j := 8192;
+    else
+      j := 65536;
+    end;
+    src := TRawByteStringStream.Create(mpc);
+    dec := THttpMultiPartDecoder.Create(src, 'xyz', j);
+    try
+      Check(dec.NextPart, 'big');
+      CheckEqual(dec.Current.Name, 'f');
+      CheckEqual(ReadAll(dec.Current.Content), big, 'big content');
+      Check(not dec.NextPart, 'big end');
+      Check(dec.Close, 'big Close');
+    finally
+      dec.Free;
+      src.Free;
+    end;
+  end;
+  // same, but from a source trickling only a few bytes per Read()
+  for i := 1 to 7 do
+  begin
+    src := TTrickleStream.Create(mpc, i);
+    dec := THttpMultiPartDecoder.Create(src, 'xyz', 4096);
+    try
+      Check(dec.NextPart, 'trickle');
+      CheckEqual(ReadAll(dec.Current.Content), big, 'trickle content');
+      Check(dec.Close, 'trickle Close');
+    finally
+      dec.Free;
+      src.Free;
+    end;
+  end;
+  // delimiters split at every possible offset around the work buffer edge
+  for i := 4060 to 4110 do
+  begin
+    s := '';
+    SetLength(s, i);
+    FillCharFast(pointer(s)^, i, ord('a'));
+    src := TRawByteStringStream.Create(Join(['--xyz'#13#10 +
+      'Content-Disposition: form-data; name="s"'#13#10#13#10, s,
+      #13#10'--xyz--'#13#10]));
+    dec := THttpMultiPartDecoder.Create(src, 'xyz', 4096);
+    try
+      Check(dec.NextPart, 'edge');
+      CheckEqual(ReadAll(dec.Current.Content), s, 'edge content');
+      Check(dec.Close, 'edge Close');
+    finally
+      dec.Free;
+      src.Free;
+    end;
+  end;
+  // delimiter-like bytes within the content should be decoded as content
+  TestOne('--xyz'#13#10'Content-Disposition: form-data; name="a"'#13#10#13#10 +
+    'AAA'#13#10'--xyzZZZ more'#13#10'BBB'#13#10'--xyz--'#13#10,
+    'fake delimiter', 1, true, 'AAA'#13#10'--xyzZZZ more'#13#10'BBB');
+  TestOne('--xyz'#13#10'Content-Disposition: form-data; name="a"'#13#10#13#10 +
+    'x'#13#10'--xyz-not-final'#13#10'y'#13#10'--xyz--'#13#10,
+    'single dash', 1, true, 'x'#13#10'--xyz-not-final'#13#10'y');
+  // preamble, transport padding and epilogue
+  TestOne('some preamble'#13#10'--xyz '#9' '#13#10 +
+    'Content-Disposition: form-data; name="p"'#13#10#13#10 +
+    'v'#13#10'--xyz--  epilogue ignored', 'preamble padding', 1, true, 'v');
+  SetLength(s, 80);
+  FillCharFast(pointer(s)^, 80, 32); // 80 spaces > padding cap = content
+  TestOne('--xyz'#13#10'Content-Disposition: form-data; name="a"'#13#10#13#10 +
+    'x'#13#10'--xyz' + s + #13#10'y'#13#10'--xyz--'#13#10,
+    'huge padding', 1, true, 'x'#13#10'--xyz' + s + #13#10'y');
+  // void section, void multipart, no Content-Disposition
+  TestOne('--xyz'#13#10'Content-Disposition: form-data; name="e"'#13#10#13#10 +
+    #13#10'--xyz--'#13#10, 'void section', 1, true);
+  TestOne('--xyz--'#13#10, 'void multipart', 0, true);
+  TestOne('--xyz'#13#10'Content-Type: text/plain'#13#10#13#10 +
+    'plain'#13#10'--xyz--'#13#10, 'no disposition', 1, true, 'plain');
+  // header lines in any order/case/spacing, and unterminated quoted value
+  src := TRawByteStringStream.Create(
+    '--xyz'#13#10 +
+    'content-disposition: form-data; filename="f.bin"; name="upload"'#13#10 +
+    'content-type:application/octet-stream'#13#10#13#10 +
+    'DATA'#13#10'--xyz--'#13#10);
+  dec := THttpMultiPartDecoder.Create(src, 'xyz', 4096);
+  try
+    Check(dec.NextPart, 'hdr');
+    CheckEqual(dec.Name, 'upload'); // direct per-field properties
+    CheckEqual(dec.FileName, 'f.bin');
+    CheckEqual(dec.ContentType, 'application/octet-stream');
+    CheckEqual(ReadAll(dec.Content), 'DATA');
+    Check(dec.Close, 'hdr Close');
+  finally
+    dec.Free;
+    src.Free;
+  end;
+  TestOne('--xyz'#13#10 +
+    'Content-Disposition: form-data; name="unterminated'#13#10#13#10 +
+    'v'#13#10'--xyz--'#13#10, 'unterminated quote', 1, true, 'v');
+  // token (unquoted) parameter values, and \" quoted-pairs in a value
+  src := TRawByteStringStream.Create(
+    '--xyz'#13#10'Content-Disposition: form-data; name=plain'#13#10#13#10 +
+    'tok'#13#10'--xyz'#13#10 +
+    'Content-Disposition: form-data; name="n"; filename="a\"b\\c.txt"'#13#10 +
+    #13#10'esc'#13#10'--xyz--'#13#10);
+  dec := THttpMultiPartDecoder.Create(src, 'xyz', 4096);
+  try
+    Check(dec.NextPart, 'token');
+    CheckEqual(dec.Current.Name, 'plain', 'token name');
+    CheckEqual(ReadAll(dec.Current.Content), 'tok');
+    Check(dec.NextPart, 'quotedpair');
+    CheckEqual(dec.Current.Name, 'n');
+    CheckEqual(dec.Current.FileName, 'a"b\c.txt', 'quoted-pair filename');
+    CheckEqual(ReadAll(dec.Current.Content), 'esc');
+    Check(dec.Close, 'token Close');
+  finally
+    dec.Free;
+    src.Free;
+  end;
+  // header lines flood: up to 100 lines per section, then rejected
+  s := '';
+  for i := 1 to 99 do
+    Append(s, ['X-', i, ': v'#13#10]);
+  TestOne('--xyz'#13#10'Content-Disposition: form-data; name="a"'#13#10 + s +
+    #13#10'v'#13#10'--xyz--'#13#10, 'headers below limit', 1, true, 'v');
+  TestOne('--xyz'#13#10'Content-Disposition: form-data; name="a"'#13#10 + s +
+    'X-100: v'#13#10#13#10'v'#13#10'--xyz--'#13#10,
+    'headers above limit', 0, false);
+  // truncated input before any content -> no part, error state
+  TestOne('preamble bytes with no boundary at all', 'trunc preamble', 0, false);
+  TestOne('--xy', 'trunc first delimiter', 0, false);
+  TestOne('--xyz'#13#10'Content-Type: text/pl', 'trunc headers', 0, false);
+  // truncated content should raise EHttpMultiPart on Read
+  for i := 0 to high(TRUNC) do
+  begin
+    src := TRawByteStringStream.Create(
+      '--xyz'#13#10'Content-Disposition: form-data; name="a"'#13#10#13#10 +
+      TRUNC[i]);
+    dec := THttpMultiPartDecoder.Create(src, 'xyz', 4096);
+    try
+      Check(dec.NextPart, 'trunc');
+      raised := false;
+      try
+        ReadAll(dec.Current.Content);
+      except
+        on EHttpMultiPart do
+          raised := true;
+      end;
+      Check(raised, 'trunc raised');
+      Check(dec.State = mpdsError, 'trunc state');
+      Check(not dec.Close, 'trunc Close');
+    finally
+      dec.Free;
+      src.Free;
+    end;
+  end;
+  // one-byte consumer reads
+  src := TRawByteStringStream.Create(
+    '--xyz'#13#10'Content-Disposition: form-data; name="s"'#13#10#13#10 +
+    'abcdefghij'#13#10'--xyz--'#13#10);
+  dec := THttpMultiPartDecoder.Create(src, 'xyz', 4096);
+  try
+    Check(dec.NextPart, 'onebyte');
+    got := '';
+    while dec.Current.Content.Read(onebyte, 1) = 1 do
+      Append(RawUtf8(got), [AnsiChar(onebyte[0])]);
+    CheckEqual(got, 'abcdefghij', 'onebyte content');
+    Check(dec.Close, 'onebyte Close');
+  finally
+    dec.Free;
+    src.Free;
+  end;
+  // MultiPartFormDataBoundary() edge cases
+  Check(MultiPartFormDataBoundary(
+    'multipart/form-data; boundary=abc', bound) and (bound = 'abc'), 'b1');
+  Check(MultiPartFormDataBoundary(
+    'multipart/form-data; Boundary=abc', bound) and (bound = 'abc'), 'b2');
+  Check(MultiPartFormDataBoundary(
+    'multipart/form-data; boundary="q1"', bound) and (bound = 'q1'), 'b3');
+  Check(MultiPartFormDataBoundary(
+    'multipart/form-data; notboundary=evil; boundary=real', bound) and
+    (bound = 'real'), 'b4');
+  Check(MultiPartFormDataBoundary(
+    'multipart/form-data; foo="boundary=fake"; boundary=real', bound) and
+    (bound = 'real'), 'b5');
+  Check(MultiPartFormDataBoundary(
+    'multipart/form-data; boundary=abc; charset=utf-8', bound) and
+    (bound = 'abc'), 'b6');
+  Check(MultiPartFormDataBoundary(
+    'multipart/form-data; note="x\"; boundary=evil"; boundary=good', bound) and
+    (bound = 'good'), 'b7');
+  Check(not MultiPartFormDataBoundary(
+    'multipart/form-data; boundary="abc', bound), 'b8');
+  Check(not MultiPartFormDataBoundary(
+    'multipart/form-data; charset=utf-8', bound), 'b9');
+  Check(MultiPartFormDataBoundary( // \: quoted-pair is unescaped
+    'multipart/form-data; boundary="ab\:cd"', bound) and
+    (bound = 'ab:cd'), 'b10');
+  Check(MultiPartFormDataBoundary(
+    'multipart/form-data;boundary=nospace', bound) and
+    (bound = 'nospace'), 'b11');
+  Check(MultiPartFormDataBoundary(
+    'MULTIPART/FORM-DATA; BOUNDARY=upper', bound) and
+    (bound = 'upper'), 'b12');
+  // invalid boundaries are rejected in the constructors
+  src := TRawByteStringStream.Create('X');
+  try
+    raised := false;
+    try
+      SetLength(bound, 500);
+      FillCharFast(pointer(bound)^, 500, ord('A'));
+      dec := THttpMultiPartDecoder.Create(src, bound, 4096);
+      dec.Free;
+    except
+      on EHttpMultiPart do
+        raised := true;
+    end;
+    Check(raised, 'oversized boundary');
+    raised := false;
+    try
+      dec := THttpMultiPartDecoder.Create(src, 'bad'#10'bnd', 4096);
+      dec.Free;
+    except
+      on EHttpMultiPart do
+        raised := true;
+    end;
+    Check(raised, 'control char boundary');
+    raised := false;
+    try
+      dec := THttpMultiPartDecoder.CreateFromContentType(src, 'text/plain', 4096);
+      dec.Free;
+    except
+      on EHttpMultiPart do
+        raised := true;
+    end;
+    Check(raised, 'no boundary content type');
+  finally
+    src.Free;
   end;
 end;
 
@@ -10225,8 +10824,8 @@ begin
     islinux := false;
     for ld := succ(low(ld)) to high(ld) do
       if os in LINUX_DIST[ld] then
-        if not CheckFailed(not islinux, 'os twice') then
-          if not CheckFailed(LinuxDistribution(os) = ld, 'ld') then
+        if Check(not islinux, 'os twice') then
+          if Check(LinuxDistribution(os) = ld, 'ld') then
             islinux := true;
     Check((os in OS_LINUX) = islinux, 'islinux');
     Check(islinux = not (os in LINUX_DIST[ldNotLinux]));
@@ -10870,7 +11469,8 @@ begin
     json := dict.SaveToJson;
     Check(IsValidUtf8(json));
     Check(IsValidJson(json));
-    CheckHash(json, $F67B5FA8, 'dict.savetojson');
+    if MAX = 10000 then
+      CheckHash(json, $F67B5FA8, 'dict.savetojson');
     for i := 1 to MAX do
     begin
       i64 := i;
@@ -10883,7 +11483,8 @@ begin
   dict := TSynDictionary.Create(TypeInfo(TInt64DynArray), TypeInfo(tvalues));
   try
     check(dict.LoadFromJson(json));
-    CheckHash(json, $F67B5FA8, 'untouched after loadfromjson');
+    if MAX = 10000 then
+      CheckHash(json, $F67B5FA8, 'untouched after loadfromjson');
     checkEqual(json, dict.SaveToJson);
     for i := 1 to MAX do
     begin
@@ -11157,12 +11758,12 @@ begin
   end;
 end;
 
-procedure TTestCoreBase._DeltaCompress;
+procedure TTestCoreBase.DeltaCompression;
 var
   o, n, d, s: RawByteString;
-  i, buflen, chunk: integer;
-  P: PAnsiChar;
-  s1, s2: TStream;
+  i, j, size, diff, percent: integer;
+  comp, extr: TPrecisionTimer;
+  res: TDeltaError;
 begin
   n := RandomTextParagraph(100);
   d := DeltaCompress(n, o{%H-});
@@ -11172,25 +11773,47 @@ begin
   check(d = '=');
   check(DeltaExtract(d, n, s) = dsSuccess, 'delta=');
   Check(s = n);
+  comp.Init;
+  extr.Init;
+  size := 0;
   for i := 1 to 20 do
   begin
     o := n;
-    s := RandomTextParagraph(100);
-    case i and 7 of
-      2:
-        n := n + s;
-      7:
-        n := s + n;
-    else
-      insert(s, n, i * 50);
-    end;
+    s := RandomTextParagraph(200 + i shr 3);
+    for j := 1 to (i shr 2) + 1 do
+      case Random32 and 7 of
+        2:
+          Append(n, s);
+        5:
+          delete(n, i * ord(s[j]), j * 3);
+        7:
+          Prepend(n, s);
+      else
+        insert(s, n, i * ord(s[j]));
+      end;
+    inc(size, length(n));
+    comp.Resume;
     d := DeltaCompress(n, o);
-    //ConsoleWrite('d=% s=% o=% n=%', [length(d), length(s), length(o), length(n)]);
+    comp.Pause;
+    diff := length(n) - length(o);
+    percent := (100 * length(d)) div diff;
+    //ConsoleWrite('%k delta=% diff=% %%', [length(n) shr 10, length(d), diff, percent, '%']);
     check(d <> '=');
-    check(length(d) < length(s), 'delta should be compressed');
-    check(DeltaExtract(d, o, s) = dsSuccess, 'delta+');
-    Check(s = n);
+    if diff > 100 then
+      check(percent < 200, 'delta compressed');
+    s := '';
+    extr.Resume;
+    res := DeltaExtract(d, o, s);
+    {if res <> dsSuccess then begin
+      d := DeltaCompress(n, o);
+      res := DeltaExtract(d, o, s);
+    end;}
+    checkUtf8(res = dsSuccess, '%', [ToText(res)^]);
+    extr.Pause;
+    CheckEqual(s, n);
   end;
+  NotifyTestSpeed('DeltaCompress', 1, size, @comp);
+  NotifyTestSpeed('DeltaExtract', 1, size, @extr);
   o := n;
   delete(n, 100, 100);
   d := DeltaCompress(n, o);
@@ -11201,30 +11824,7 @@ begin
   insert(RandomIdentifier(50), n, 200);
   d := DeltaCompress(n, o);
   check(DeltaExtract(d, o, s) = dsSuccess, 'delta-+');
-  if CheckFailed(s = n, 'delta extract') then
-    exit;
-  s1 := TRawByteStringStream.Create(s);
-  try
-    for buflen := 8 to 32 do
-      for chunk := 1 to buflen * 3 do
-      begin
-        s2 := TBufferedStreamReader.Create(s1, buflen);
-        try
-          P := pointer(n);
-          FillCharFast(P^, length(n), 48);
-          repeat
-            i := s2.Read(P^, chunk);
-            inc(P, i);
-          until i = 0;
-          CheckEqual(s2.Position, length(n));
-          CheckEqual(s, n);
-        finally
-          s2.Free;
-        end;
-      end;
-  finally
-    s1.Free;
-  end;
+  CheckEqual(s, n, 'delta extract');
 end;
 
 procedure TTestCoreBase.BloomFilters;

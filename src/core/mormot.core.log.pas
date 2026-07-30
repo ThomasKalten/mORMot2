@@ -27,13 +27,13 @@ uses
   classes,
   mormot.core.base,
   mormot.core.os,
-  mormot.core.buffers,
-  mormot.core.rtti,
-  mormot.core.data,
-  mormot.core.json,
   mormot.core.unicode,
   mormot.core.text,
-  mormot.core.datetime
+  mormot.core.datetime,
+  mormot.core.rtti,
+  mormot.core.buffers,
+  mormot.core.data,
+  mormot.core.json
   {$ifdef DELPHIPOSIX}
   , Mormot.core.posix.delphi
   {$endif DELPHIPOSIX}
@@ -42,59 +42,111 @@ uses
 
 { ************** Debug Symbols Processing from Delphi .map or FPC/GDB DWARF }
 
-type
-  /// a debugger symbol, as decoded by TDebugFile from a .map/.dbg file
-  TDebugSymbol = packed record
-    /// symbol internal name
-    Name: RawUtf8;
-    /// starting offset of this symbol in the executable
-    Start: integer;
-    /// end offset of this symbol in the executable
-    Stop: integer;
-  end;
+{
+   Our TDebugFile is able to export the function names and line numbers into
+   an optimized .mab binary, e.g. for our regression tests with Delphi 13.1:
 
+   07/28/2026  06:02 PM        12,912,640 mormot2tests.exe
+   07/28/2026  06:02 PM        18,159,799 mormot2tests.map
+   07/28/2026  06:02 PM           518,119 mormot2tests.mab
+
+   For a 13MB executable, Delphi .map text was 18MB but our .mab is only 500KB.
+   Then this .mab file can be distributed alongside the executable, or just
+   appended to it after build. See also /src/tools/mab/mab.dpr
+
+   The benefit seems even more obvious with FPC Win32 and GDB information:
+
+   07/28/2026  05:56 PM         8,024,595 mormot2tests.exe
+   07/28/2026  05:56 PM        33,427,255 mormot2tests.dbg
+   07/28/2026  05:56 PM           452,689 mormot2tests.mab
+}
+
+type
+  /// we store 32-bit relative virtual addresses (RVA) in memory and in .mab files
+  // - they are computed and persisted as VirtualAddress - ImageBase
+  // - 32-bit RVAs are sufficient in practice for any executable or shared
+  // library supported by mORMot; larger executables are typically installers with
+  // compressed payloads appended after an initial Setup executable of a few MB
+  // - enable efficient TBufferWriter.WriteVarUInt32Array encoding in .mab files
+  TDebugAddress = integer;
+  TDebugAddressDynArray = TIntegerDynArray;
+
+  /// a debugger symbol, as decoded by TDebugFile from a .map/.dbg/.mab file
+  TDebugSymbol = packed record
+    /// symbol identifier
+    Name: RawUtf8;
+    /// relative virtual address where this symbol starts
+    Start: TDebugAddress;
+    /// last relative virtual address belonging to this symbol
+    Stop: TDebugAddress;
+  end;
   PDebugSymbol = ^TDebugSymbol;
 
-  /// a dynamic array of symbols, as decoded by TDebugFile from a .map/.dbg file
+  /// a dynamic array of symbols, as decoded by TDebugFile from .map/.dbg/.mab
+  // - stored in Start increasing order in memory for fast O(log(n)) lookup
   TDebugSymbolDynArray = array of TDebugSymbol;
 
-  /// a debugger unit, as decoded by TDebugFile from a .map/.dbg file
-  TDebugUnit = packed record
-    /// Name, Start and Stop of this Unit
+  /// line number information for one contiguous source code range
+  // - as decoded by TDebugFile from a .map/.dbg/.mab file
+  // - may refer to the main .pas file, a nested .inc file, or source locations
+  // generated for compiler features such as inlined routines or generics
+  TDebugLines = packed record
+    /// identifier and address range of this source block
+    // - Name is the main Pascal unit identifier, e.g. 'mormot.core.base'
     Symbol: TDebugSymbol;
-    /// associated source file name
+    /// associated source file name for this source block
+    // - usually matches Symbol.Name + '.pas', but may instead refer to an
+    // included source file such as 'mormot.core.base.asmx64.inc' or the
+    // source file defining a generic specialization
     FileName: RawUtf8;
-    /// list of all mapped source code lines of this unit
+    /// list of all mapped source code lines of this block
     Line: TIntegerDynArray;
-    /// start code address of each source code line
-    Addr: TIntegerDynArray;
+    /// relative virtual address of each mapped source line
+    // - stored in increasing order in memory for fast O(log(n)) lookup
+    Addr: TDebugAddressDynArray;
   end;
+  PDebugLines = ^TDebugLines;
 
-  PDebugUnit = ^TDebugUnit;
+  /// a dynamic array of blocks, as decoded by TDebugFile from .map/.dbg/.mab
+  // - stored in Start increasing order in memory for fast O(log(n)) lookup
+  TDebugLinesDynArray = array of TDebugLines;
 
-  /// a dynamic array of units, as decoded by TDebugFile from a .map/.dbg file
-  TDebugUnitDynArray = array of TDebugUnit;
+  /// allow to customize TDebugFile.Create and TDebugFile.SaveToFile process
+  TDebugFileScope = set of (
+    dfsIncludePathInFileName,
+    dfsNoMabSaveAtCreate,
+    dfsNoSymbols,
+    dfsNoLines,
+    dfsNoProducer);
 
   /// process a .map/.dbg file content, to be used e.g. with TSynLog to provide
   // additional debugging information for a given executable
   // - debug info can be saved as .mab file in a much more optimized format
-  // (e.g. mormot2tests 4MB .map into a 280KB .mab, 13MB .dbg into a 290KB .mab)
   // - on FPC, DWARF symbols embedded to the executable can also be retrieved - but
   // you would better use an external .dbg file then convert it into a .mab
   // - on FPC, you don't need to specifly the -gl compiler switch
   // - location of a source code information from its address is below 10us
   TDebugFile = class(TSynPersistent)
   protected
-    fDebugFile: TFileName;
     fSymbol: TDebugSymbolDynArray;
-    fUnit: TDebugUnitDynArray;
-    fSymbols, fUnits: TDynArray;
-    fSymbolsCount, fUnitsCount: integer;
+    fLine: TDebugLinesDynArray;
     fCodeOffset: PtrUInt;
+    fExeFile, fDebugFile: TFileName;
+    fProducer: RawUtf8;
     fHasDebugInfo: boolean;
-    // called by Create() constructor
-    procedure GenerateFromMapOrDbg(aDebugToConsole: boolean);
+    fSymbols, fLines: TDynArray;
+    fLoadingMicroSec: Int64;
+    fSymbolsCount, fLinesCount: integer;
+    fStart, fStop: PtrUInt; // efficient IsCode()
+    procedure GenerateFromMapOrDwarf(includedir: boolean); // from Create()
     function LoadMab(const aMabFile: TFileName): boolean;
+    function AbsoluteToRelative(aAddressAbsolute: PtrUInt): TDebugAddress;
+      {$ifdef HASINLINE}inline;{$endif}
+    // use fast O(log n) binary search to locate a symbol or line number
+    function FindSymbol(rva: TDebugAddress): PDebugSymbol;
+    function FindLines(rva: TDebugAddress; out line: integer): PDebugLines; overload;
+    function FindLines(rva: TDebugAddress): PDebugLines; overload;
+    function FindLinesByName(const aUnitName: RawUtf8): PDebugLines;
   public
     /// get the available debugging information
     // - if aExeName is specified, will use it in its search for .map/.dbg/.mab
@@ -104,22 +156,24 @@ type
     // file will be also created in the same directory (if MabCreate is TRUE)
     // - if .map/.dbg is not not available, will search for the .mab file
     // - if no .mab is available, will search for a .mab appended to the .exe/.dll
-    // - if nothing is available, will log as hexadecimal pointers, without
-    // debugging information
-    constructor Create(const aExeName: TFileName = ''; MabCreate: boolean = true;
-      DebugToConsole: boolean = false); reintroduce;
+    // - if nothing is available, will eventually log as hexadecimal pointers,
+    // without debugging information
+    constructor Create(const aExeName: TFileName = '';
+      Scope: TDebugFileScope = []); reintroduce;
     /// save all debugging information in the .mab custom binary format
     // - if no file name is specified, it will be saved as ExeName.mab or DllName.mab
     // - this file content can be appended to the executable via SaveToExe method
     // - this function returns the created file name
-    function SaveToFile(const aFileName: TFileName = ''): TFileName;
+    function SaveToFile(const aFileName: TFileName = '';
+      Scope: TDebugFileScope = []): TFileName;
     /// save all debugging informat in our custom binary format
-    procedure SaveToStream(aStream: TStream);
+    procedure SaveToStream(aStream: TStream; Scope: TDebugFileScope);
     /// append all debugging information to an executable (or library)
     // - the executable name must be specified, because it's impossible to
     // write to the executable of a running process
     // - this method will work for .exe and for .dll (or .ocx)
-    procedure SaveToExe(const aExeName: TFileName);
+    procedure SaveToExe(const aExeName: TFileName;
+      Scope: TDebugFileScope = []);
     /// save all debugging information as JSON content
     // - may be useful from debugging purposes
     procedure SaveToJson(W: TTextWriter); overload;
@@ -133,62 +187,63 @@ type
     // the raw address pointer as hexadecimal
     class function Log(W: TTextWriter; aAddressAbsolute: PtrUInt;
       AllowNotCodeAddr: boolean; SymbolNameNotFilename: boolean = false): boolean;
-    /// compute the relative memory address from its absolute (pointer) value
-    function AbsoluteToOffset(aAddressAbsolute: PtrUInt): integer;
-      {$ifdef HASINLINE}inline;{$endif}
-    /// check if this memory address is part of the code segments
+    /// check if this memory address is part of the code segments of this instance
     function IsCode(aAddressAbsolute: PtrUInt): boolean;
-    /// retrieve a symbol according to a relative code address
-    // - use fast O(log n) binary search
-    function FindSymbol(aAddressOffset: integer): PtrInt;
-    /// retrieve an unit and source line, according to a relative code address
-    // - use fast O(log n) binary search
-    function FindUnit(aAddressOffset: integer; out LineNumber: integer): PtrInt; overload;
-    /// retrieve an unit, according to a relative code address
-    // - use fast O(log n) binary search
-    function FindUnit(aAddressOffset: integer): PtrInt; overload;
-    /// retrieve an unit information, according to the unit name
-    // - will search within Units array
-    function FindUnit(const aUnitName: RawUtf8): PtrInt; overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// return the symbol location according to the supplied absolute address
     // - filename, symbol name and line number (if any), as plain text, e.g.
-    // '4cb765 ../src/core/mormot.core.base.pas statuscodeissuccess (11183)' on FPC
-    // - returns only the hexadecimal value if no match is found in .map/.gdb info
+    // $ 57f480 mormot.core.log.pas TSynLog.LogEscape (5782)
+    // $ 4a0a40 mormot.core.base.asmx64.inc (mormot.core.base) Rdtsc (3005)
+    // - returns only the hexadecimal value if no match is found in .map/.dbg/.mab
     function FindLocation(aAddressAbsolute: PtrUInt): RawUtf8; overload;
     /// return the symbol location according to the supplied absolute address
     // - filename, symbol name and line number (if any), as plain text, e.g.
-    // '4cb765 ../src/core/mormot.core.base.pas statuscodeissuccess (11183)' on FPC
-    // - returns only the hexadecimal value if no match is found in .map/.gdb info
+    // $ 5880ea mormot.core.log.pas InitializeUnit (8475)
+    // $ 57f480 mormot.core.log.pas TSynLog.LogEscape (5782)
+    // $ 4a0a40 mormot.core.base.asmx64.inc (mormot.core.base) Rdtsc (3005)
+    // - returns only the hexadecimal value if no match is found in .map/.dbg/.mab
     // - won't allocate any heap memory during the text creation
     // - mormot.core.os.pas' GetExecutableLocation() redirects to this method
-    function FindLocationShort(aAddressAbsolute: PtrUInt): ShortString;
-    /// load .map/.gdb info and return the symbol location according
+    procedure FindLocationShort(aAddressAbsolute: PtrUInt; var aInfo: ShortString);
+    /// load .map/.dbg/.mab info and return the symbol location according
     // to the supplied ESynException
     // - i.e. unit name, symbol name and line number (if any), as plain text
     class function FindLocation(exc: ESynException): RawUtf8; overload;
-    /// load .map/.gdb info and returns the file name of a given unit
-    // - if unitname = '', returns the main file name of the current executable
+    /// load .map/.dbg/.mab info and returns the file name of a given unit
+    // - if unitname is '', returns the main file name of the current executable
     class function FindFileName(const unitname: RawUtf8): TFileName;
     {$ifdef FPC}
-    /// load DWARF .gdb info and replace FPC RTL BacktraceStrFunc()
-    // - uses much less disk space (e.g. 13MB .gdb into 284KB)
-    // - is much faster: around 10us per call, whereas lnfodwrf is 20ms
+    /// load DWARF .dbg/.mab info and replace FPC RTL BacktraceStrFunc()
+    // - uses much less disk space (e.g. 33MB .dbg into 500KB)
+    // - is much faster: around 1us per lookup, whereas lnfodwrf is 20ms
     class function RegisterBacktraceStrFunc: boolean;
     {$endif FPC}
     /// all symbols, mainly function and method names and addresses
     property Symbols: TDebugSymbolDynArray
       read fSymbol;
-    /// all units, including line numbers, associated to the executable
-    property Units: TDebugUnitDynArray
-      read fUnit;
+    /// all source blocks, including line numbers, associated to the executable
+    property Lines: TDebugLinesDynArray
+      read fLine;
   published
     /// the associated file name
     // - e.g. 'exec.map', 'exec.dbg' or even plain 'exec'/'exec.exe'
     property FileName: TFileName
       read fDebugFile;
+    /// details about the compiler version - only available for FPC yet
+    property Producer: RawUtf8
+      read fProducer;
     /// equals true if a .map/.dbg or .mab debugging information has been loaded
     property HasDebugInfo: boolean
       read fHasDebugInfo;
+    /// how many identifiers are currently stored in Symbols[]
+    property SymbolsCount: integer
+      read fSymbolsCount;
+    /// how many code blocks with line info are currently stored in Lines[]
+    property LinesCount: integer
+      read fLinesCount;
+    /// how many microseconds did it need to parse .map/.dbg or .mab input
+    property LoadingMicroSec: Int64
+      read fLoadingMicroSec;
   end;
 
 {$ifndef PUREMORMOT2}
@@ -644,7 +699,7 @@ type
   /// callback signature used by TSynLogFamilly.OnBeforeException
   // - should return false to log the exception, or true to ignore it
   TOnBeforeException = function(const Context: TSynLogExceptionContext;
-    const ThreadName: shortstring): boolean of object;
+    const ThreadName: ShortString): boolean of object;
   {$endif NOEXCEPTIONINTERCEPT}
 
   /// available TSynLogThreadInfo.Flags definition
@@ -695,7 +750,7 @@ type
     {$ifdef OSWINDOWS}
     fNoEnvironmentVariable: boolean;
     {$endif OSWINDOWS}
-    fHandleExceptions, fExceptionIgnoreLibrary: boolean;
+    fHandleExceptions, fExceptionIgnoreExternal: boolean;
     {$ifndef NOEXCEPTIONINTERCEPT}
     fOnBeforeException: TOnBeforeException;
     {$endif NOEXCEPTIONINTERCEPT}
@@ -801,11 +856,11 @@ type
     // - do nothing if exceptions are not intercepted on this target platform
     property ExceptionIgnoreCurrentThread: boolean
       index tiExceptionIgnore read GetCurrentThreadFlag write SetCurrentThreadFlag;
-    /// set true will log exceptions only from the main executable, not from library
-    // - will follow IsMainExecutable() result
+    /// set true will log exceptions only from the current (exe/dll) module
+    // - will follow IsCurrentExecutable() logic against HInstance
     // - do nothing if exceptions are not intercepted on this target platform
-    property ExceptionIgnoreLibrary: boolean
-      read fExceptionIgnoreLibrary write fExceptionIgnoreLibrary;
+    property ExceptionIgnoreExternal: boolean
+      read fExceptionIgnoreExternal write fExceptionIgnoreExternal;
     /// allow to temporarly avoid logging in the current thread
     // - won't affect exceptions logging, as one would expect for safety reasons
     // - after setting true to this property, should eventually be reset to false:
@@ -1654,11 +1709,13 @@ type
   TSynLogFileProc = record
     /// the index of the sllEnter event in the TSynLogFile.fLevels[] array
     Index: cardinal;
-    /// the associated time elapsed in this method (in micro seconds)
+    /// the associated time elapsed in this method (in microseconds)
     // - computed from the sllLeave time difference (high resolution timer)
+    // - 32-bit microseconds value would overflow after 1 hour and 11 minutes
     Time: cardinal;
     /// the time elapsed in this method and not in nested methods
     // - computed from Time property, minus the nested calls
+    // - 32-bit microseconds value would overflow after 1 hour and 11 minutes
     ProperTime: cardinal;
   end;
   PSynLogFileProc = ^TSynLogFileProc;
@@ -1703,7 +1760,8 @@ type
     fHost, fUser, fCPU, fOSDetailed, fFramework: RawUtf8;
     fExeDate: TDateTime;
     fOS: TWindowsVersion;
-    fWow64, fWow64Emulated: boolean;
+    fWow64: boolean;
+    fWindowsSpecs: TWindowsSpecs;
     fOSServicePack: integer;
     fStartDateTime: TDateTime;
     fDayCurrent: Int64; // as PInt64('20160607')^
@@ -1890,8 +1948,8 @@ type
     property Wow64: boolean
       read fWow64;
     /// if the process was running under WOW 64 hardware emulation, e.g. Prism
-    property Wow64Emulated: boolean
-      read fWow64Emulated;
+    property WindowsSpecs: TWindowsSpecs
+      read fWindowsSpecs;
     /// the computer Operating System in which the process was running on
     // - returns e.g. '2.3=5.1.2600' for Windows XP
     // - under Linux, it will return the full system version, e.g.
@@ -2115,10 +2173,10 @@ procedure TrimSynLogMessage(var P: PUtf8Char; var len: PtrInt;
 
 implementation
 
-{$ifdef FPC}
+{$ifdef FPCDARWIN}
 uses
-  exeinfo; // cross-platform executable raw access for GDB DWARF support
-{$endif FPC}
+  exeinfo; // MachO executable raw access for GDB DWARF support
+{$endif FPCDARWIN}
 {$ifdef DELPHIPOSIX}
 uses  Posix.Stdio, // inline expand
       Posix.Unistd, // inline expand
@@ -2156,18 +2214,6 @@ end;
 {$ifdef FPC}
 
 {  FPC can export DWARF/GDB info on POSIX and Windows from the project options.
-
-   Our TDebugFile is able to export the function names and line numbers into
-   an optimized .mab binary, e.g. for our regression tests:
-
-  -rwxrwxr-x 1 ab ab  6 541 672 Jan 31 16:10 mormot2tests*
-  -rwxrwxr-x 1 ab ab 13 352 584 Jan 31 16:10 mormot2tests.dbg*
-  -rw-rw-r-- 1 ab ab    291 057 Jan 31 16:10 mormot2tests.mab
-
-   For a 6MB executable, raw DWARF/GDB was 13MB but our .mab is only 290KB...
-   Then this .mab file can be distributed along the executable, or just
-   appended to it after build.
-
    Code below was inspired - but highly rewritten - from RTL's linfodwrf.pp }
 
 type
@@ -2209,106 +2255,134 @@ type
     address_size: byte;
   end;
 
-  TDwarfDebugAbbrev = record
-    Tag: QWord;
-    Attrs: array of record
-      attr, form: cardinal;
-    end;
-    AttrsCount: integer;
-    Child: byte;
+  TDwarfDebugAttr = packed record
+    attr, form: byte;
   end;
 
-  TDwarfMachineState = object
+  TDwarfDebugAbbrev = record
+    Tag: HalfUInt;
+    AttrsCount: byte;
+    Child: byte;
+    Attrs: array of TDwarfDebugAttr;
+  end;
+
+  TDwarfMachineState = record
   public
-    address: cardinal;
-    line: cardinal;
-    fileid: cardinal;
-    column: cardinal;
-    isstmt: boolean;
-    basicblock: boolean;
-    endsequence: boolean;
-    prologueend: boolean;
-    epiloguebegin: boolean;
-    appendrow: boolean;
-    isa: cardinal;
+    flags: set of (isstmt, basicblock, endsequence,
+      prologueend, epiloguebegin, appendrow, invalidaddress);
+    line, address, fileid: cardinal; // PInt64(@state.line)^ stored in Lines[]
     procedure Init(aIs_Stmt: ByteBool);
   end;
 
-  TDwarfReader = object
+  TDwarfReader = record
   public
     read: TFastReader;
-    DebugLineSectionOffset, DebugLineSection_Size, // debug_line section
-    DebugInfoSectionOffset, DebugInfoSection_Size, // debug_info section
-    DebugAbbrevSectionOffset, DebugAbbrevSectionSize: integer; // debug_abbrev
     Abbrev: array of TDwarfDebugAbbrev; // debug_abbrev content
-    Lines: TInt64DynArray;              // store TDebugUnit.Addr[]/Line[]
+    AttrsMax: cardinal;
+    isdwarf64, includesdir: boolean;
+    LineOffset, LineSize,              // debug_line
+    InfoOffset, InfoSize,              // debug_info
+    AbbrevOffset, AbbrevSize: integer; // debug_abbrev
+    ImageBase: QWord; // e.g. 0100000000 on Win64 or 00400000 on Win32
+    debug: TDebugFile;
+    Lines: TInt64DynArray; // TDebugLines.Addr[] in high 32-bit, Line[] in lower
     dirs, files: TRawUtf8DynArray;
     filesdir: TIntegerDynArray;
-    isdwarf64, debugtoconsole: boolean;
-    debug: TDebugFile;
     Map: TMemoryMap;
-    function FindSections(const filename: ShortString): boolean;
+    name, typname, fullname: ShortString;
+    function LoadSections: boolean;
     procedure ReadInit(aBase, aLimit: Int64);
     function ReadLeb128: Int64;
-    function ReadAddress(addr_size: PtrInt): QWord; inline;
-    procedure ReadString(var s: ShortString);
-    function SkipString: PtrInt;
-    procedure SkipAttr(form: QWord; const header64: TDwarfDebugInfoHeader64);
+    function ReadAddress(addr_size: PtrInt; ctx: PUtf8Char): cardinal;
+    procedure SkipAttr(form: PtrUInt; const header64: TDwarfDebugInfoHeader64);
     procedure ReadAbbrevTable(file_offset, file_size: QWord);
-    function ParseCompilationUnits(file_offset, file_size: QWord): QWord;
+    function ParseCompilationUnit(file_offset, file_size: QWord): QWord;
     function ParseCompilationFunctions(file_offset, file_size: QWord): QWord;
   end;
 
 procedure TDwarfMachineState.Init(aIs_Stmt: ByteBool);
 begin
+  byte(flags) := 0;
+  if aIs_Stmt then
+    include(flags, isstmt);
   address := 0;
-  fileid := 1;
   line := 1;
-  column := 0;
-  isstmt := aIs_Stmt;
-  basicblock := false;
-  endsequence := false;
-  prologueend := false;
-  epiloguebegin := false;
-  isa := 0;
-  appendrow := false;
+  fileid := 1;
 end;
 
-{$I-} // for debugtoconsole
+{.$define DWARFDEBUG} // for internal raw debugging
 
-function TDwarfReader.FindSections(const filename: ShortString): boolean;
+{$ifdef FPCDARWIN}
+// use FPC RTL's cross-OS exeinfo.pp unit for macho format
+function TDwarfReader.LoadSections: boolean;
 var
-  dbgfn: ShortString;
-  e: TExeFile; // use RTL's cross-OS exeinfo.pp unit
+  e: TExeFile;
 begin
   result := false;
   // open exe filename or follow '.gnu_debuglink' redirection
-  if not OpenExeFile(e, filename) then
+  name := debug.fDebugFile;
+  if not OpenExeFile(e, name) then
   begin
-    DisplayError('OpenExeFile failed on  %s', [filename]);
+    {$ifdef DWARFDEBUG}
+    DisplayError('OpenExeFile failed on  %s', [name]);
+    {$endif DWARFDEBUG}
     exit;
   end;
-  if ReadDebugLink(e, dbgfn) then // is there an external .dbg file?
+  if ReadDebugLink(e, name) then // is there an external .dbg file?
   begin
     CloseExeFile(e);
-    if not OpenExeFile(e, dbgfn) then
+    if not OpenExeFile(e, name) then
     begin
-      DisplayError('OpenExeFile failed on  %s', [dbgfn]);
+      {$ifdef DWARFDEBUG}
+      DisplayError('OpenExeFile failed on  %s', [name]);
+      {$endif DWARFDEBUG}
       exit;
     end;
-  end
-  else
-    dbgfn := filename;
-  // locate debug_* sections
-  if FindExeSection(e, '.debug_line',
-       DebugLineSectionOffset, DebugLineSection_size) and
-     FindExeSection(e, '.debug_info',
-       DebugInfoSectionOffset, DebugInfoSection_size) and
-     FindExeSection(e, '.debug_abbrev',
-       DebugAbbrevSectionOffset, DebugAbbrevSectionSize) then
-    result := Map.Map(dbgfn);
+  end;
+  // locate debug_* sections after successfull OpenExeFile()
+  if FindExeSection(e, '.debug_line', LineOffset, LineSize) and
+     FindExeSection(e, '.debug_info', InfoOffset, InfoSize) and
+     FindExeSection(e, '.debug_abbrev', AbbrevOffset, AbbrevSize) then
+    result := Map.Map(name);
   CloseExeFile(e);
 end;
+{$else}
+// use our faster mormot.core.os.FindExeSection(TMemoryMap) on Linux+BSD+Windows
+function TDwarfReader.LoadSections: boolean;
+var
+  off, siz, dbglen: integer; // not PtrInt
+  crc: cardinal;
+  dbgname: PUtf8Char;
+  fn: string;
+begin
+  result := false;
+  if not Map.Map(debug.fDebugFile, {forcemap=}true) then // main exe
+    exit;
+  if FindExeSection(Map, '.gnu_debuglink', off, siz) <> efUnknown then
+  begin
+    dbgname := pointer(Map.Buffer + off);
+    dbglen := StrLen(dbgname);
+    if (dbglen = 0) or
+       (dbglen > siz) or
+       not IsValidUtf8WithoutControlChars(pointer(dbgname), dbglen) then
+      exit;
+    crc := PCardinal(dbgname + ((dbglen + 4) and not 3))^; // read before UnMap
+    Utf8DecodeToString(dbgname, dbglen, fn); // e.g. mormot2tests.dbg
+    Map.UnMap; // close main exe
+    if Map.Map(Executable.ProgramFilePath + fn) then // search dbg in exe folder
+      if crc32(0, Map.Buffer, Map.Size) <> crc then  // zlib algorithm
+        Map.UnMap; // the located debug file does not match the executable
+  end;
+  if (FindExeSection(Map, '.debug_line', LineOffset, LineSize, @ImageBase) <> efUnknown) and
+     (FindExeSection(Map, '.debug_info', InfoOffset, InfoSize) <> efUnknown) and
+     (FindExeSection(Map, '.debug_abbrev', AbbrevOffset, AbbrevSize) <> efUnknown) then
+    result := true;
+  if result then
+    SetLength(files, 64) // good enough for most executables
+  else
+    Map.UnMap;
+end;
+{$endif FPCDARWIN}
 
 procedure TDwarfReader.ReadInit(aBase, aLimit: Int64);
 begin
@@ -2317,19 +2391,12 @@ begin
   read.Init(Map.Buffer + aBase, aLimit);
 end;
 
-function TDwarfReader.SkipString: PtrInt;
-begin
-  result := 0; // return length
-  while read.NextByte <> 0 do
-    inc(result);
-end;
-
 function TDwarfReader.ReadLeb128: Int64;
 var
   shift: byte;
   data: PtrInt;
   val: Int64;
-begin
+begin // LEB-128 encoding does not match our FromVarInt64 sign extension
   data := read.NextByte;
   if data <= 127 then
     // optimize the most common case of -64..+63 range
@@ -2344,58 +2411,76 @@ begin
       break;
     data := read.NextByte;
   until false;
-  // extend sign from current shifted bits - do not match FromVarInt64 encoding
+  // extend sign from current shifted bits
   result := (not ((result and (Int64(1) shl (shift - 1))) - 1)) or result;
 end;
 
-function TDwarfReader.ReadAddress(addr_size: PtrInt): QWord;
-begin
-  result := 0;
-  read.Copy(@result, addr_size);
-end;
-
-procedure TDwarfReader.ReadString(var s: ShortString);
+function TDwarfReader.ReadAddress(addr_size: PtrInt; ctx: PUtf8Char): cardinal;
 var
-  c: AnsiChar;
+  tmp: QWord; // temporary 64-bit variable on stack
 begin
-  s[0] := #0;
-  while read.NextByteSafe(@c) and
-        ({%H-}c <> #0) do
-    AppendShortCharSafe(c, s);
+  if addr_size > SizeOf(tmp) then // typically 4 or 8
+    read.ErrorData('DWARF: ReadAddress % len=%', [ctx, addr_size]);
+  tmp := 0;
+  read.Copy(@tmp, addr_size);
+  if tmp > ImageBase then
+  begin
+    dec(tmp, ImageBase);  // e.g. 0100000000 on Win64 or 00400000 on Win32
+    if tmp > MaxInt then
+      read.ErrorData('DWARF: ReadAddress %=% overflow %',
+        [ctx, Int64ToHexShort(tmp), addr_size]);
+    result := tmp; // it is fine to truncate to 32-bit
+  end
+  else
+    result := 0; // skip null/invalid values emitted by FPC
 end;
 
 procedure TDwarfReader.ReadAbbrevTable(file_offset, file_size: QWord);
 var
-  nr, attr, form: PtrInt;
-  prev: TFastReader;
+  nr, t, a, f, n: PtrUInt;
+  p: ^TDwarfDebugAbbrev;
+  bakp, baklast: pointer;
 begin
-  prev := read;
+  bakp := read.P;
+  baklast := read.Last;
   ReadInit(file_offset, file_size);
+  AttrsMax := 0;
   repeat
-    nr := read.VarUInt64;
+    nr := read.VarUInt32;
     if nr = 0 then
       break;
-    if nr > high(Abbrev) then
+    AttrsMax := MaxPtrUInt(nr, AttrsMax);
+    if nr >= PtrUInt(length(Abbrev)) then
       SetLength(Abbrev, nr + 256);
-    with Abbrev[nr] do
-    begin
-      Tag := read.VarUInt64;
-      Child := read.NextByte;
-      AttrsCount := 0;
-      repeat
-        attr := read.VarUInt32;
-        form := read.VarUInt32;
-        if attr = 0 then
-          break;
-        if AttrsCount >= length(Attrs) then
-          SetLength(Attrs, AttrsCount + 32);
-        Attrs[AttrsCount].attr := attr;
-        Attrs[AttrsCount].form := form;
-        inc(AttrsCount);
-      until false;
-    end;
+    p := @Abbrev[nr];
+    if p^.Attrs = nil then
+      SetLength(p^.Attrs, 250);
+    t := read.VarUInt32;
+    if t > high(p^.Tag) then
+      read.ErrorData('DWARF: tag=% overflow', [t]);
+    p^.Tag := t;
+    p^.Child := read.NextByte;
+    n := 0;
+    repeat
+      a := read.VarUInt32;
+      f := read.VarUInt32;
+      if a = 0 then
+        break;
+      if (a > 255) or
+         (f > 255) or
+         (n > 250) then
+        read.ErrorData('DWARF: a=% f=% n=% overflow', [a, f, n]);
+      with p^.Attrs[n] do
+      begin
+        attr := a;
+        form := f;
+      end;
+      inc(n);
+    until false;
+    p^.AttrsCount := n;
   until false;
-  read := prev;
+  read.P := bakp;
+  read.Last := baklast;
 end;
 
 function CalculateAddressIncrement(opcode: PtrInt;
@@ -2405,85 +2490,93 @@ begin
     header.minimum_instruction_length;
 end;
 
-// DWARF 2 default opcodes
+// DWARF 2/3 most common opcodes
 const
-  DW_LNS_LNE = 0; // see DW_LNE_*
-  DW_LNS_COPY = 1;
-  DW_LNS_ADVANCE_PC = 2;
-  DW_LNS_ADVANCE_LINE = 3;
-  DW_LNS_SET_FILE = 4;
-  DW_LNS_SET_COLUMN = 5;
-  DW_LNS_NEGATE_STMT = 6;
-  DW_LNS_SET_BASIC_BLOCK = 7;
-  DW_LNS_CONST_ADD_PC = 8;
-  DW_LNS_FIXED_ADVANCE_PC = 9;
-  DW_LNS_SET_PROLOGUE_END = 10;
+  DW_LNS_LNE                = 0; // see DW_LNE_*
+  DW_LNS_COPY               = 1;
+  DW_LNS_ADVANCE_PC         = 2;
+  DW_LNS_ADVANCE_LINE       = 3;
+  DW_LNS_SET_FILE           = 4;
+  DW_LNS_SET_COLUMN         = 5;
+  DW_LNS_NEGATE_STMT        = 6;
+  DW_LNS_SET_BASIC_BLOCK    = 7;
+  DW_LNS_CONST_ADD_PC       = 8;
+  DW_LNS_FIXED_ADVANCE_PC   = 9;
+  DW_LNS_SET_PROLOGUE_END   = 10;
   DW_LNS_SET_EPILOGUE_BEGIN = 11;
-  DW_LNS_SET_ISA = 12;
+  DW_LNS_SET_ISA            = 12;
 
   DW_LNE_END_SEQUENCE = 1;
-  DW_LNE_SET_ADDRESS = 2;
-  DW_LNE_DEFINE_FILE = 3;
+  DW_LNE_SET_ADDRESS  = 2;
+  DW_LNE_DEFINE_FILE  = 3;
 
-  DW_TAG_class_type = 2;      // map Object Pascal class or object
-  DW_TAG_structure_type = 19; // map Object Pascal record
-  DW_TAG_subprogram = 46;     // map object function or method
+  DW_TAG_padding        = $00;
+  DW_TAG_class_type     = $02; // map Object Pascal class or object
+  DW_TAG_compile_unit   = $11; // map Object pascal unit
+  DW_TAG_structure_type = $13; // map Object Pascal record
+  DW_AT_producer        = $25;
+  DW_TAG_subprogram     = $2e; // map object function or method
 
-  DW_AT_name = $3;
-  DW_AT_low_pc = $11;
+  DW_AT_name    = $03;
+  DW_AT_low_pc  = $11;
   DW_AT_high_pc = $12;
 
-  DW_FORM_addr = $1;
-  DW_FORM_block2 = $3;
-  DW_FORM_block4 = $4;
-  DW_FORM_data2 = $5;
-  DW_FORM_data4 = $6;
-  DW_FORM_data8 = $7;
-  DW_FORM_string = $8;
-  DW_FORM_block = $9;
-  DW_FORM_block1 = $a;
-  DW_FORM_data1 = $b;
-  DW_FORM_flag = $c;
-  DW_FORM_sdata = $d;
-  DW_FORM_strp = $e;
-  DW_FORM_udata = $f;
-  DW_FORM_ref_addr = $10;
-  DW_FORM_ref1 = $11;
-  DW_FORM_ref2 = $12;
-  DW_FORM_ref4 = $13;
-  DW_FORM_ref8 = $14;
-  DW_FORM_ref_udata = $15;
-  DW_FORM_indirect = $16;
-  DW_FORM_sec_offset = $17;
-  DW_FORM_exprloc = $18;
+  DW_FORM_addr         = $01;
+  DW_FORM_block2       = $03;
+  DW_FORM_block4       = $04;
+  DW_FORM_data2        = $05;
+  DW_FORM_data4        = $06;
+  DW_FORM_data8        = $07;
+  DW_FORM_string       = $08;
+  DW_FORM_block        = $09;
+  DW_FORM_block1       = $0a;
+  DW_FORM_data1        = $0b;
+  DW_FORM_flag         = $0c;
+  DW_FORM_sdata        = $0d;
+  DW_FORM_strp         = $0e;
+  DW_FORM_udata        = $0f;
+  DW_FORM_ref_addr     = $10;
+  DW_FORM_ref1         = $11;
+  DW_FORM_ref2         = $12;
+  DW_FORM_ref4         = $13;
+  DW_FORM_ref8         = $14;
+  DW_FORM_ref_udata    = $15;
+  DW_FORM_indirect     = $16;
+  DW_FORM_sec_offset   = $17;
+  DW_FORM_exprloc      = $18;
   DW_FORM_flag_present = $19;
 
-procedure TDwarfReader.SkipAttr(form: QWord;
-  const header64: TDwarfDebugInfoHeader64);
+procedure TDwarfReader.SkipAttr(form: PtrUInt; const header64: TDwarfDebugInfoHeader64);
 begin
   case form of
     DW_FORM_addr:
       read.Next(header64.address_size);
+    DW_FORM_block,
+    DW_FORM_exprloc:
+      read.Next(read.VarUInt32);
+    DW_FORM_block1:
+      read.Next(read.NextByte);
     DW_FORM_block2:
       read.Next(read.Next2);
     DW_FORM_block4:
       read.Next(read.Next4);
-    DW_FORM_data2:
-      read.Next2;
-    DW_FORM_data4:
-      read.Next4;
-    DW_FORM_data8:
-      read.Next8;
-    DW_FORM_string:
-      SkipString;
-    DW_FORM_block,
-    DW_FORM_exprloc:
-      read.Next(read.VarUInt64);
-    DW_FORM_block1:
-      read.Next(read.NextByte);
+    DW_FORM_ref1,
     DW_FORM_data1,
     DW_FORM_flag:
       read.NextByte;
+    DW_FORM_ref2,
+    DW_FORM_data2:
+      read.Next2;
+    DW_FORM_ref4,
+    DW_FORM_data4:
+      read.Next4;
+    DW_FORM_ref8,
+    DW_FORM_data8:
+      read.Next8;
+    DW_FORM_string:
+      read.NextAsciiz;
+    DW_FORM_ref_udata,
+    DW_FORM_udata,
     DW_FORM_sdata:
       read.VarNextInt;
     DW_FORM_ref_addr:
@@ -2502,28 +2595,16 @@ begin
         read.Next8
       else
         read.Next4;
-    DW_FORM_udata:
-      read.VarUInt64;
-    DW_FORM_ref1:
-      read.NextByte;
-    DW_FORM_ref2:
-      read.Next2;
-    DW_FORM_ref4:
-      read.Next4;
-    DW_FORM_ref8:
-      read.Next8;
-    DW_FORM_ref_udata:
-      read.VarUInt64;
     DW_FORM_indirect:
-      SkipAttr(read.VarUInt64, header64);
+      SkipAttr(read.VarUInt32, header64);
     DW_FORM_flag_present:
       ; // none
   else
-    DisplayError('Internal error: unknown dwarf form: %x', [form]);
+    read.ErrorData('DWARF: unknown form: %', [form]);
   end;
 end;
 
-procedure FinalizeLines(u: PDebugUnit; linesn: PtrInt; Lines: PInt64; unsorted: boolean);
+procedure FinalizeLines(u: PDebugLines; linesn: PtrInt; Lines: PInt64; unsorted: boolean);
 var
   i: PtrInt;
 begin
@@ -2532,33 +2613,32 @@ begin
     exit;
   if unsorted then
   begin
-    QuickSortInt64(pointer(Lines), 0, linesn - 1); // sort by Addr (high 40-bit)
-    u^.Symbol.Start := Lines^ shr 24; // set to unit first function Addr
+    QuickSortInt64(pointer(Lines), 0, linesn - 1); // sort by Addr (high 32-bit)
+    u^.Symbol.Start := Lines^ shr 32; // set to unit first function Addr
   end;
   SetLength(u^.Addr, linesn);
   SetLength(u^.Line, linesn);
   for i := 0 to linesn - 1 do
   begin
-    u^.Line[i] := Lines^ and $ffffff; // low 24-bit
-    u^.Addr[i] := Lines^ shr 24;      // high 40-bit
+    u^.Line[i] := Lines^;        // low 32-bit
+    u^.Addr[i] := Lines^ shr 32; // high 32-bit
     inc(Lines);
   end;
 end;
 
-function TDwarfReader.ParseCompilationUnits(file_offset, file_size: QWord): QWord;
+function TDwarfReader.ParseCompilationUnit(file_offset, file_size: QWord): QWord;
 var
-  opcode, opcodeext, opcodeadjust, divlinerange,
+  opcode, opcodeadjust, divlinerange,
   prevaddr, prevfile, prevline: cardinal;
   unitlen: QWord;
-  opcodeextlen, headerlen: PtrInt;
-  dirsn, filedirsn, filesn, linesn: integer;
+  opcodeextlen, headerlen, ndx: PtrInt;
+  dirsn, filesn, linesn: integer;
   state: TDwarfMachineState;
   c: ansichar;
   unsorted: boolean;
   header64: TDwarfLineInfoHeader64;
   header32: TDwarfLineInfoHeader32;
-  u: PDebugUnit;
-  s: ShortString;
+  u: PDebugLines;
   numoptable: array[1..255] of byte;
 begin
   // check if DWARF 32-bit or 64-bit format
@@ -2572,7 +2652,13 @@ begin
   result := file_offset + unitlen;
   // process debug_line header
   ReadInit(file_offset, unitlen);
-  if header32.unit_length <> $ffffffff then
+  if isdwarf64 then
+  begin
+    read.Copy(@header64, SizeOf(header64));
+    headerlen := SizeOf(header64.magic) + SizeOf(header64.unit_length) +
+      SizeOf(header64.version) + SizeOf(header64.length) + header64.length;
+  end
+  else
   begin
     read.Copy(@header32, SizeOf(header32));
     header64.magic := $ffffffff;
@@ -2585,13 +2671,7 @@ begin
     header64.line_range := header32.line_range;
     header64.opcode_base := header32.opcode_base;
     headerlen := SizeOf(header32.version) + SizeOf(header32.unit_length) +
-      SizeOf(header32.length) + header32.length;
-  end
-  else
-  begin
-    read.Copy(@header64, SizeOf(header64));
-    headerlen := SizeOf(header64.magic) + SizeOf(header64.unit_length) +
-      SizeOf(header64.version) + SizeOf(header64.length) + header64.length;
+                 SizeOf(header32.length) + header32.length;
   end;
   // read opcode parameter count table
   FillcharFast(numoptable, SizeOf(numoptable), 0);
@@ -2599,26 +2679,29 @@ begin
   // read directory and file names
   dirsn := 0;
   repeat
-    ReadString(s);
-    if s[0] = #0 then
+    read.NextAsciiz(name);
+    if name[0] = #0 then
       break;
+    if not includesdir then
+      continue;
     c := PathDelim;
-    if Pos('/', s) > 0 then
+    if Pos('/', name) > 0 then
       c := '/'
-    else if Pos('\', s) > 0 then
+    else if Pos('\', name) > 0 then
       c := '\';
-    if s[ord(s[0])] <> c then
-      AppendShortCharSafe(c, s);
-    AddRawUtf8(dirs, dirsn, ShortStringToUtf8(s));
+    if name[ord(name[0])] <> c then
+      AppendShortCharSafe(c, name);
+    AddRawUtf8(dirs, dirsn, ShortStringToUtf8(name));
   until false;
   filesn := 0;
-  filedirsn := 0;
   repeat
-    ReadString(s);
-    if s[0] = #0 then
+    read.NextAsciiz(name);
+    if name[0] = #0 then
       break;
-    AddRawUtf8(files, filesn, ShortStringToUtf8(s));
-    AddInteger(filesdir, filedirsn, read.VarUInt32);
+    if filesn = length(files) then
+      SetLength(files, NextGrow(filesn));
+    ShortStringToAnsi7String(name, files[filesn]);
+    AddInteger(filesdir, filesn, read.VarUInt32);
     read.VarNextInt(2); // we ignore the attributes
   until false;
   // main decoding loop
@@ -2638,19 +2721,16 @@ begin
         begin
           // extended opcode
           opcodeextlen := read.VarUInt32;
-          opcodeext := read.NextByte;
-          case opcodeext of
+          case read.NextByte of
             DW_LNE_END_SEQUENCE:
-              begin
-                state.endsequence := true;
-                state.appendrow := true;
-              end;
+              state.flags := state.flags + [endsequence, appendrow];
             DW_LNE_SET_ADDRESS:
-              state.address := ReadAddress(opcodeextlen - 1);
-            DW_LNE_DEFINE_FILE:
               begin
-                SkipString;
-                read.VarNextInt(3);
+                state.address := ReadAddress(opcodeextlen - 1, 'CU');
+                if state.address = 0 then // FPC sometimes emits these :(
+                  include(state.flags, invalidaddress) // just ignore
+                else
+                  exclude(state.flags, invalidaddress)
               end;
           else
             // Unknown extended opcode
@@ -2658,35 +2738,33 @@ begin
           end;
         end;
       DW_LNS_COPY:
-        begin
-          state.basicblock := false;
-          state.prologueend := false;
-          state.epiloguebegin := false;
-          state.appendrow := true;
-        end;
+        state.flags := state.flags - [basicblock, prologueend, epiloguebegin]
+                                   + [appendrow];
       DW_LNS_ADVANCE_PC:
         inc(state.address, read.VarUInt32 * header64.minimum_instruction_length);
       DW_LNS_ADVANCE_LINE:
-        // most of the time, to decrease state.line
+        // use ReadLeb128 < 0 to decrease state.line when needed
         state.line := Int64(state.line) + ReadLeb128;
       DW_LNS_SET_FILE:
-        state.fileid := read.VarUInt64;
-      DW_LNS_SET_COLUMN:
-        state.column := read.VarUInt64;
+        state.fileid := read.VarUInt32;
       DW_LNS_NEGATE_STMT:
-        state.isstmt := not state.isstmt;
+        if isstmt in state.flags then
+          exclude(state.flags, isstmt)
+        else
+          include(state.flags, isstmt);
       DW_LNS_SET_BASIC_BLOCK:
-        state.basicblock := true;
+        include(state.flags, basicblock);
       DW_LNS_CONST_ADD_PC:
         inc(state.address, CalculateAddressIncrement(255, header64));
       DW_LNS_FIXED_ADVANCE_PC:
         inc(state.address, read.Next2);
       DW_LNS_SET_PROLOGUE_END:
-        state.prologueend := true;
+        include(state.flags, prologueend);
       DW_LNS_SET_EPILOGUE_BEGIN:
-        state.epiloguebegin := true;
+        include(state.flags, epiloguebegin);
+      DW_LNS_SET_COLUMN,
       DW_LNS_SET_ISA:
-        state.isa := read.VarUInt64;
+        read.VarNextInt;
     else
       if opcode < header64.opcode_base then
         // skip unsupported standard opcode
@@ -2705,64 +2783,104 @@ begin
         else
           // FPC set line_range=255 and prefer explicit DW_LNS_ADVANCE_PC
           inc(state.line, header64.line_base + PtrInt(opcodeadjust));
-        state.basicblock := false;
-        state.prologueend := false;
-        state.epiloguebegin := false;
-        state.appendrow := true;
+        state.flags := state.flags - [basicblock, prologueend, epiloguebegin]
+                                   + [appendrow];
       end;
     end;
-    if state.appendrow then
+    if appendrow in state.flags then
     begin
-      state.appendrow := false;
-      if state.isstmt and
-         (state.line <> prevline) and
-         (state.address <> 0) and
-         (state.line > 1) then
+      exclude(state.flags, appendrow);
+      if (state.flags * [isstmt, invalidaddress] = [isstmt]) and
+         (state.line > 1) and
+         (state.line <> prevline) then
       begin
         prevline := state.line;
         if prevfile <> state.fileid then
         begin
-          // handle new unit / file
+          // each nested .inc/.pas triggers a new Lines[] block
           FinalizeLines(u, linesn, pointer(Lines), unsorted);
           linesn := 0; // reuse the same 64-bit Lines[] buffer for Addr[]+Line[]
           prevaddr := 0;
-          prevfile := state.fileid - 1;
-          if debugtoconsole then
-            writeln('-------------- ', files[prevfile]);
-          u := debug.fUnits.NewPtr;
-          u^.Symbol.Name := StringToAnsi7(GetFileNameWithoutExt(
-            Ansi7ToString(files[prevfile])));
-          if filesdir[prevfile] > 0 then
-            u^.FileName := dirs[filesdir[prevfile] - 1];
-          u^.FileName := u^.FileName + files[prevfile];
+          prevfile := state.fileid;
+          ndx := prevfile - 1;
+          {$ifdef DWARFDEBUG}
+          ConsoleWrite(['-------------- ', files[ndx]]);
+          {$endif DWARFDEBUG}
+          u := debug.fLines.NewPtr;
+          u^.Symbol.Name := files[ndx]; // will eventually be replaced with CU
+          if includesdir and
+             (filesdir[ndx] > 0) then
+            Join([dirs[filesdir[ndx] - 1], files[ndx]], u^.FileName)
+          else
+            u^.FileName := files[ndx];
           u^.Symbol.Start := state.address;
-          inc(prevfile);
         end;
         if state.address < prevaddr then
           // not increasing: need to sort u^.Addr[]+Line[] and u^.Symbol.Start
           unsorted := true;
         prevaddr := state.address;
-        AddInt64(Lines, linesn, QWord(state.address) shl 24 + state.line);
-        if debugtoconsole then
-          writeln(files[state.fileid - 1], ' ', state.line, ' ',
-            CardinalToHexShort(state.address));
+        AddInt64(Lines, linesn, PInt64(@state.line)^); // address=hi 32-bit
+        {$ifdef DWARFDEBUG}
+        ConsoleWrite([files[state.fileid - 1], ' ', state.line, ' ',
+          CardinalToHexShort(state.address)]);
+        {$endif DWARFDEBUG}
       end;
-      if state.endsequence then
+      if endsequence in state.flags then
         state.Init(header64.default_is_stmt);
     end;
   end;
   FinalizeLines(u, linesn, pointer(Lines), unsorted);
 end;
 
+procedure FinalizeLinesSymbol(u: PDebugLines; n, low_pc, high_pc: PtrInt;
+  ident: PShortstring);
+var
+  start, len, i: PtrInt;
+  name: RawUtf8;
+begin // set Symbol.Name as main Pascal unit identifier as with Delphi .map
+  if u <> nil then
+    repeat
+      start := u^.Symbol.Start; // note: u^.Symbol.Stop = 0 at this point
+      if start >= high_pc then
+        break // GenerateFromMapOrDwarf made fLines.Sort(SymbolSortByStartAddr)
+      else if start >= low_pc then
+      begin
+        if name = '' then
+        begin
+          start := 0;
+          len := 0;
+          for i := ord(ident^[0]) downto 1 do
+            case ident^[i] of
+              '/', '\':
+                begin // ../src/mormot.core.os.pas -> mormot.core.os.pas
+                  start := i;
+                  break;
+                end;
+              '.': // mormot.core.os.pas -> mormot.core.os
+                if len = 0 then
+                  len := i - 1;
+            end;
+          if len = 0 then
+            len := ord(ident^[0]);
+          LowerCaseCopy(@ident^[start + 1], len - start, name);
+        end;
+        u^.Symbol.Name := name;
+      end;
+      inc(u);
+      dec(n);
+    until n = 0;
+end;
+
 function TDwarfReader.ParseCompilationFunctions(file_offset, file_size: QWord): QWord;
 var
   s: ^TDebugSymbol;
+  ab: ^TDwarfDebugAbbrev;
+  a: ^TDwarfDebugAttr;
   header64: TDwarfDebugInfoHeader64;
   header32: TDwarfDebugInfoHeader32;
-  unit_length, low_pc, high_pc: QWord;
-  abbr, level: cardinal;
-  i: PtrInt;
-  name, typname: ShortString;
+  unit_length: QWord;
+  low_pc, high_pc: integer;
+  abbr, level, n: cardinal;
 begin
   // check if DWARF 32-bit or 64-bit format
   ReadInit(file_offset, file_size);
@@ -2787,71 +2905,99 @@ begin
   else
     read.Copy(@header64, SizeOf(header64));
   // read the debug_abbrev section corresponding to this debug_info section
-  ReadAbbrevTable(DebugAbbrevSectionOffset + header64.debug_abbrev_offset,
-    DebugAbbrevSectionSize);
+  ReadAbbrevTable(AbbrevOffset + header64.debug_abbrev_offset, AbbrevSize);
   // main decoding loop
   level := 0;
   abbr := read.VarUInt32;
   typname[0] := #0;
   while abbr <> 0 do
   begin
-    with Abbrev[abbr] do
-    begin
-      if Child <> 0 then
-        inc(level);
-      if Tag = DW_TAG_subprogram then
+    if abbr > AttrsMax then
+      read.ErrorData('DWARF: unexpected abbr=%>%', [abbr, AttrsMax]);
+    ab := @Abbrev[abbr];
+    if ab^.Child <> 0 then
+      inc(level);
+    a := pointer(ab^.Attrs);
+    n := ab^.AttrsCount;
+    if n <> 0 then
+      if (ab^.Tag = DW_TAG_subprogram) or
+         (ab^.Tag = DW_TAG_compile_unit) then
       begin
         low_pc := 1;
         high_pc := 0;
         name := '';
-        for i := 0 to AttrsCount - 1 do
-          with Attrs[i] do
-          begin
-            if (attr = DW_AT_low_pc) and
-               (form = DW_FORM_addr) then
-              low_pc := ReadAddress(header64.address_size)
-            else if (attr = DW_AT_high_pc) and
-                    (form = DW_FORM_addr) then
-              high_pc := ReadAddress(header64.address_size)
-            else if (attr = DW_AT_name) and
-                    (form = DW_FORM_string) then
-              ReadString(name)
-            else
-              SkipAttr(form, header64);
+        repeat
+          case cardinal(PWord(a)^) of
+            DW_AT_low_pc + DW_FORM_addr shl 8:
+              low_pc := ReadAddress(header64.address_size, 'low_pc');
+            DW_AT_high_pc + DW_FORM_addr shl 8:
+              high_pc := ReadAddress(header64.address_size, 'high_pc');
+            DW_AT_name + DW_FORM_string shl 8:
+              read.NextAsciiz(name);
+            DW_AT_producer + DW_FORM_string shl 8:
+              if debug.fProducer = '' then
+              begin
+                read.NextAsciiz(fullname);
+                ShortStringToAnsi7String(fullname, debug.fProducer);
+              end
+              else
+                read.NextAsciiz;
+          else
+            SkipAttr(a^.form, header64);
           end;
+          inc(a);
+          dec(n);
+        until n = 0;
         if low_pc < high_pc then
-        begin
-          s := debug.fSymbols.NewPtr;
-          if (typname[0] <> #0) and
-             (typname[ord(typname[0])] <> '.') then
-            AppendShortCharSafe('.', typname);
-          // DWARF2 symbols are emitted as UPPER by FPC -> lower for esthetics
-          if header64.version < 3 then
-            ShortStringToAnsi7String(lowercase(typname + name), s^.name);
-          s^.Start := low_pc;
-          s^.Stop := high_pc - 1;
-          if debugtoconsole then
-            writeln(s^.name, ' ', CardinalToHexShort(low_pc), '-',
-              CardinalToHexShort(high_pc));
-        end;
+          if ab^.Tag = DW_TAG_subprogram then
+          begin
+            s := debug.fSymbols.NewPtr;
+            if typname[0] = #0 then
+              ShortStringToAnsi7String(name, s^.name)
+            else
+            begin
+              fullname := typname;
+              AppendShort(name, fullname);
+              ShortStringToAnsi7String(fullname, s^.name);
+            end;
+            s^.Start := low_pc;
+            s^.Stop := high_pc - 1;
+            {$ifdef DWARFDEBUG}
+            ConsoleWrite([s^.name, ' ', CardinalToHexShort(low_pc), '-',
+              CardinalToHexShort(high_pc)]);
+            {$endif DWARFDEBUG}
+          end
+          else // Tag = DW_TAG_compile_unit
+            // e.g. 'mormot.core.base.asmx86.inc' -> 'mormot.core.base.pas'
+            FinalizeLinesSymbol(
+              pointer(debug.fLine), debug.fLinesCount, low_pc, high_pc, @name);
       end
       else if (level = 2) and
-              ((Tag = DW_TAG_class_type) or
-               (Tag = DW_TAG_structure_type)) then
+              ((ab^.Tag = DW_TAG_class_type) or
+               (ab^.Tag = DW_TAG_structure_type)) then
       begin
         typname[0] := #0;
-        for i := 0 to AttrsCount - 1 do
-          with Attrs[i] do
-            if (attr = DW_AT_name) and
-               (form = DW_FORM_string) then
-              ReadString(typname)
-            else
-              SkipAttr(form, header64);
+        repeat
+          if (a^.attr = DW_AT_name) and
+             (a^.form = DW_FORM_string) then
+          begin
+            read.NextAsciiz(typname);
+            if (typname[0] <> #0) and
+               (typname[ord(typname[0])] <> '.') then
+              AppendShortCharSafe('.', typname);
+          end
+          else
+            SkipAttr(a^.form, header64);
+          inc(a);
+          dec(n);
+        until n = 0;
       end
       else
-        for i := 0 to AttrsCount - 1 do
-          SkipAttr(Attrs[i].form, header64);
-    end;
+        repeat
+          SkipAttr(a^.form, header64);
+          inc(a);
+          dec(n);
+        until n = 0;
     if read.EOF then
       exit;
     abbr := read.VarUInt32;
@@ -2864,42 +3010,38 @@ begin
       dec(level);
       if read.EOF then
         exit;
-      abbr := read.VarUInt64;
+      abbr := read.VarUInt32;
     end;
   end;
 end;
 
-{$I+}
-
-function SymbolSortByAddr(const A, B): integer;
+function SymbolSortByStartAddr(const A, B): integer;
 begin
   result := CompareInteger(TDebugSymbol(A).Start, TDebugSymbol(B).Start);
 end;
 
-procedure TDebugFile.GenerateFromMapOrDbg(aDebugToConsole: boolean);
+procedure TDebugFile.GenerateFromMapOrDwarf(includedir: boolean);
 var
   dwarf: TDwarfReader;
-  current_offset, end_offset: QWord;
+  curr, last: QWord;
 begin
   FillCharFast(dwarf, SizeOf(dwarf), 0);
-  dwarf.debugtoconsole := aDebugToConsole;
-  if dwarf.FindSections(fDebugFile) then
+  dwarf.debug := self;
+  dwarf.includesdir := includedir;
+  if dwarf.LoadSections then
   try
-    // retrieve units name and line numbers
-    dwarf.debug := self;
-    current_offset := dwarf.DebugLineSectionOffset;
-    end_offset := current_offset + dwarf.DebugLineSection_Size;
-    while current_offset < end_offset do
-      current_offset := dwarf.ParseCompilationUnits(
-        current_offset, end_offset - current_offset);
-    fUnits.Sort(SymbolSortByAddr);
-    // retrieve function names
-    current_offset := dwarf.DebugInfoSectionOffset;
-    end_offset := current_offset + dwarf.DebugInfoSection_Size;
-    while current_offset < end_offset do
-      current_offset := dwarf.ParseCompilationFunctions(current_offset,
-        end_offset - current_offset);
-    fSymbols.Sort(SymbolSortByAddr);
+    // retrieve line numbers and addresses into Lines[]
+    curr := dwarf.LineOffset;
+    last := curr + dwarf.LineSize;
+    while curr < last do
+      curr := dwarf.ParseCompilationUnit(curr, last - curr);
+    fLines.Sort(SymbolSortByStartAddr);
+    // retrieve function names into Symbols[]
+    curr := dwarf.InfoOffset;
+    last := curr + dwarf.InfoSize;
+    while curr < last do
+      curr := dwarf.ParseCompilationFunctions(curr, last - curr);
+    fSymbols.Sort(SymbolSortByStartAddr);
   finally
     dwarf.Map.UnMap;
   end;
@@ -2907,7 +3049,7 @@ end;
 
 function BacktraceStrFpc(Addr: CodePointer): ShortString;
 begin
-  result := GetInstanceDebugFile.FindLocationShort(PtrUInt(Addr));
+  GetInstanceDebugFile.FindLocationShort(PtrUInt(Addr), result);
 end;
 
 class function TDebugFile.RegisterBacktraceStrFunc: boolean;
@@ -2919,20 +3061,7 @@ end;
 
 {$else}
 
-
-{  Delphi can export detailed .map info from the project options.
-
-   Our TDebugFile is able to export the function names and line numbers into
-   an optimized .mab binary, e.g. for our regression tests:
-
-   31/01/2021  16:10    5 380 096 mormot2tests.exe
-   31/01/2021  16:10      286 931 mormot2tests.mab
-   31/01/2021  16:10    4 339 623 mormot2tests.map
-
-   For a 5MB executable, .map text was 4MB but our .mab is only 280KB...
-   Then this .mab file can be distributed along the executable, or just
-   appended to it after build. }
-
+{ Delphi can export detailed .map info as text from the project options }
 
 function MatchPattern(P, PEnd, Up: PUtf8Char; var Dest: PUtf8Char): boolean;
 begin
@@ -2971,10 +3100,10 @@ begin
   Dest := P;
 end;
 
-procedure TDebugFile.GenerateFromMapOrDbg(aDebugToConsole: boolean);
+procedure TDebugFile.GenerateFromMapOrDwarf(includedir: boolean);
 var
   P, PEnd: PUtf8Char;
-  sections: TDebugUnitDynArray;
+  sections: TDebugLinesDynArray;
 
   procedure NextLine;
   begin
@@ -3016,7 +3145,7 @@ var
   procedure ReadSegments;
   var
     Beg: PAnsiChar;
-    U: TDebugUnit;
+    U: TDebugLines;
   begin
     NextLine;
     NextLine;
@@ -3027,7 +3156,7 @@ var
           (P^ >= ' ') do
     begin
       // we just need the unit names now for ReadSymbols to detect and trim them
-      // final Unit[] will be filled in ReadLines with potential nested files
+      // final Lines[] will be filled in ReadLines with potential nested files
       if GetCode(U.Symbol.Start) and
          HexDisplayToCardinal(PAnsiChar(P), PCardinal(@U.Symbol.Stop)^) then
       begin
@@ -3040,12 +3169,12 @@ var
         while (P < PEnd) and
               (P^ > ' ') do
           inc(P);
-        FastSetString(U.Symbol.Name, Beg, P - Beg);
+        FastSetString(U.Symbol.Name, Beg, P);
         inc(U.Symbol.Stop, U.Symbol.Start - 1);
         if (U.Symbol.Name <> '') and
            ((U.Symbol.Start <> 0) or
             (U.Symbol.Stop <> 0)) then
-          fUnits.FindAndAddIfNotExisting(U);
+          fLines.FindAndAddIfNotExisting(U);
       end;
       NextLine;
     end;
@@ -3085,8 +3214,8 @@ var
         begin
           // manual unit name search
           LastUnitUp := '';
-          for u := 0 to fUnitsCount - 1 do
-            with fUnit[u].Symbol do
+          for u := 0 to fLinesCount - 1 do
+            with fLine[u].Symbol do
             begin
               l := length(Name);
               if (Beg[l] = '.') and
@@ -3103,33 +3232,32 @@ var
           end;
         end;
         {$endif ISDELPHI2005ANDUP}
-        FastSetString(Sym.Name, Beg, P - Beg);
+        FastSetString(Sym.Name, Beg, P);
         if (Sym.Name <> '') and
            not (Sym.Name[1] in ['$', '?']) then
           fSymbols.Add(Sym);
       end;
       NextLine;
     end;
-    sections := fUnit;
-    SetLength(sections, fUnitsCount);
-    fUnits.Clear; // ReadLines will repopulate all units :)
+    sections := fLine;
+    SetLength(sections, fLinesCount);
+    fLines.Clear; // ReadLines will repopulate Lines[] with code blocks :)
   end;
 
   procedure ReadLines;
   var
-    Beg: PAnsiChar;
+    Beg, SymbolBeg, SymbolEnd: PAnsiChar;
     n, capa: PtrInt;
-    aName: RawUtf8;
-    U: PDebugUnit;
+    U: PDebugLines;
   begin
-    Beg := pointer(P);
+    SymbolBeg := pointer(P);
     while P^ <> '(' do
       if P = PEnd then
         exit
       else
         inc(P);
-    FastSetString(aName, Beg, P - Beg);
-    if aName = '' then
+    SymbolEnd := pointer(P);
+    if SymbolEnd = SymbolBeg then
       exit;
     inc(P);
     Beg := pointer(P);
@@ -3140,9 +3268,9 @@ var
         inc(P);
     if not IdemPChar(P, ') SEGMENT .TEXT') then
       exit;
-    U := fUnits.NewPtr; // always recreate all units due to nested .inc
-    U^.Symbol.Name := aName;
-    FastSetString(U^.FileName, Beg, P - Beg);
+    U := fLines.NewPtr; // each nested .inc/.pas triggers a new Lines[] block
+    FastSetString(U^.Symbol.Name, SymbolBeg, SymbolEnd); // unit name
+    FastSetString(U^.FileName, Beg, P); // may be nested .inc
     NextLine;
     NextLine;
     capa := 0;
@@ -3186,7 +3314,7 @@ begin
      (StrLen(P) <> l) then
     exit; // this is no .map file for sure
   PEnd := P + l;
-  // parse .map/.dbg sections into fSymbol[] and fUnit[]
+  // parse .map sections into Symbols[] and Lines[]
   fSymbols.Capacity := 8000;
   while P < PEnd do
     if MatchPattern(P, PEnd, 'DETAILED MAP OF SEGMENTS', P) then
@@ -3198,17 +3326,17 @@ begin
     else
       NextLine;
   // now we should have read all .map/.dbg content
-  for i := fUnitsCount - 1 downto 0 do
-    with fUnit[i] do
+  for i := fLinesCount - 1 downto 0 do
+    with fLine[i] do
       if (Symbol.Start = 0) and
          (Symbol.Stop = 0) then
-        fUnits.Delete(i); // occurs with Delphi 2010 :(
-  for i := 0 to fUnitsCount - 1 do
-    with fUnit[i] do
+        fLines.Delete(i); // occurs with Delphi 2010 :(
+  for i := 0 to fLinesCount - 1 do
+    with fLine[i] do
       if Symbol.Stop = 0 then
       begin
-        if i < fUnitsCount - 1 then
-          Symbol.Stop := fUnit[i + 1].Symbol.Start - 1;
+        if i < fLinesCount - 1 then
+          Symbol.Stop := fLine[i + 1].Symbol.Start - 1;
         for j := 0 to length(sections) - 1 do
           if sections[j].Symbol.Name = Symbol.Name then
           begin
@@ -3252,7 +3380,7 @@ begin
     S^.Start := prev;
     inc(prev, FromVarUInt32(P));
     S^.Stop := prev;
-    inc(PByte(S), A.Info.Cache.ItemSize); // may be TDebugSymbol or TDebugUnit
+    inc(PByte(S), A.Info.Cache.ItemSize); // may be TDebugSymbol or TDebugLines
   end;
   S := A.Value^;
   for i := 1 to n do
@@ -3270,10 +3398,9 @@ var
   R: TFastReader;
   i: PtrInt;
   MS: TMemoryStream;
-  u: PDebugUnit;
+  u: PDebugLines;
 begin
   result := false;
-  fDebugFile := aMabFile;
   if FileExists(aMabFile) then
   try
     // StreamUnCompress() will try from the end if aMabFile is an executable
@@ -3282,16 +3409,19 @@ begin
     try
       R.Init(MS.Memory, MS.Size);
       ReadSymbol(R, fSymbols);
-      ReadSymbol(R, fUnits);
-      for i := 0 to fUnitsCount - 1 do
-        R.VarUtf8(fUnit[i].FileName);
-      u := pointer(fUnit);
-      for i := 1 to fUnitsCount do
+      ReadSymbol(R, fLines);
+      for i := 0 to fLinesCount - 1 do
+        R.VarUtf8(fLine[i].FileName);
+      u := pointer(fLine);
+      for i := 1 to fLinesCount do
       begin
         R.ReadVarUInt32Array(u^.Line);
         R.ReadVarUInt32Array(u^.Addr);
         inc(u);
       end;
+      if not R.EOF then
+        R.VarUtf8(fProducer);
+      fDebugFile := aMabFile;
       result := true;
     finally
       MS.Free;
@@ -3302,113 +3432,134 @@ begin
   end;
 end;
 
-constructor TDebugFile.Create(const aExeName: TFileName;
-  MabCreate, DebugToConsole: boolean);
+constructor TDebugFile.Create(const aExeName: TFileName; Scope: TDebugFileScope);
 var
   i: PtrInt;
-  ExeFile, MabFile: TFileName;
-  MapAge, MabAge: TUnixTime;
+  ExeAge, DbgAge, MabAge: TUnixTime;
+  MabFile, MabPath: TFileName;
+  savemab: boolean;
+  start: Int64;
 begin
+  QueryPerformanceMicroSeconds(start);
   inherited Create; // may have been overriden
   fSymbols.InitSpecific(TypeInfo(TDebugSymbolDynArray), fSymbol, ptRawUtf8,
     @fSymbolsCount, true);
-  fUnits.InitSpecific(TypeInfo(TDebugUnitDynArray), fUnit, ptRawUtf8,
-    @fUnitsCount, true);
+  fLines.InitSpecific(TypeInfo(TDebugLinesDynArray), fLine, ptRawUtf8,
+    @fLinesCount, true);
   if SynLogFileFreeing then // avoid GPF
     exit;
-  // search for an external .map/.dbg file matching the running .exe/.dll name
+  // check the supplied aExeName
   if aExeName = '' then
-  begin
-    // guess the debug information source for the current process
-    {$ifdef OSWINDOWS}
-    ExeFile := GetModuleName(hInstance);
-    {$ifdef FPC}
-    fDebugFile := ExeFile;
-    {$else}
-    fCodeOffset := GetModuleHandle(pointer(ExtractFileName(ExeFile))) +
-      $1000; // fixed .map offset on Delphi Windows
-    fDebugFile := ChangeFileExt(ExeFile, '.map');
-    {$endif FPC}
-    {$else}
-    ExeFile := Executable.InstanceFileName;
-    fDebugFile := ExeFile; // exeinfo's ReadDebugLink() would redirect to .dbg
-    {$endif OSWINDOWS}
-  end
+    fExeFile := Executable.InstanceFileName // use current dll/exe instance
   else
-    // supplied e.g. 'exec.map', 'exec.dbg' or even plain 'exec'/'exec.exe'
-    fDebugFile := aExeName;
-  MabFile := ChangeFileExt(ExpandFileName(fDebugFile), '.mab');
-  if not FileExists(MabFile) then
-    if not IsDirectoryWritable(ExtractFilePath(MabFile)) then
-      // (do not include [idwExcludeWinSys] because if we can as admin then fine)
-      // read/only exe folder -> store .mab in local non roaming user folder
-      MabFile := GetSystemPath(spUserData) + ExtractFileName(Mabfile);
+    fExeFile := aExeName;
+  ExeAge := FileAgeToUnixTimeUtc(fExeFile);
+  if ExeAge = 0 then
+    exit;
+  fDebugFile := fExeFile;
+  {$ifdef OSWINDOWS}
+  // get execution location in the current process - especially for .dll or ASLR
+  fCodeOffset := GetModuleHandle(pointer(fExeFile));
+  {$ifdef ISDELPHI}
+  if fCodeOffset <> 0 then   // this exe/dll runs in the current process
+    inc(fCodeOffset, $1000); // Delphi include BaseOfCode as .map offset
+  // search for an external .map file matching the running .exe/.dll name
+  fDebugFile := ChangeFileExt(fExeFile, '.map'); // information is in .map
+  DbgAge := FileAgeToUnixTimeUtc(fDebugFile);
+  if (DbgAge = 0) or
+     (abs(DbgAge - ExeAge) > SecsPerMin) then // deprecated .map
+    DbgAge := 0;
+  {$else}
+  DbgAge := ExeAge;
+  {$endif ISDELPHI}
+  {$else}
+  fCodeOffset := GetExecutableBase; // for the current exe/so
+  DbgAge := ExeAge;
+  {$endif OSWINDOWS}
+  // main thread-safe process
+  savemab := false;
   SynLogGlobalLock.Lock;
   try
-    MapAge := FileAgeToUnixTimeUtc(fDebugFile);
-    MabAge := FileAgeToUnixTimeUtc(MabFile);
-    if (MapAge > 0) and
-       (MabAge < MapAge) then
-      // recompute from .map/.dbg if no faster-to-load .mab available
-      try
-        GenerateFromMapOrDbg(DebugToConsole);
-        fSymbols.Capacity := fSymbolsCount; // only consume the needed memory
-        fUnits.Capacity := fUnitsCount;
-        for i := 0 to fUnitsCount - 2 do
-          if fUnit[i].Symbol.Stop = 0 then
-            fUnit[i].Symbol.Stop := fUnit[i + 1].Symbol.Start - 1;
-        if fUnitsCount <> 0 then // wild guess of the last unit end of code
-          with fUnit[fUnitsCount - 1] do
-            if Symbol.Stop = 0 then
-              if Addr <> nil then
-                // units may overlap with .inc -> use Addr[]
-                Symbol.Stop := Addr[high(Addr)] + 64
-              else
-                Symbol.Stop := Symbol.Start;
-      except
-        fSymbols.ClearSafe;
-        fUnits.ClearSafe;
-      end;
     // search for a .mab file matching the running .exe/.dll name
-    if (fSymbolsCount = 0) and
-       (MabAge <> 0) then
-      MabCreate := not LoadMab(MabFile);
-    // search for an embedded compressed .mab file appended to the .exe/.dll
-    if fSymbolsCount = 0 then
-      if aExeName = '' then
-        MabCreate := not LoadMab(ExeFile)
-      else
-        MabCreate := not LoadMab(aExeName);
-    // verify available symbols
-    if fSymbolsCount > 0 then
+    MabFile := ChangeFileExt(ExpandFileName(fDebugFile), '.mab');
+    MabAge := FileAgeToUnixTimeUtc(MabFile);
+    if MabAge = 0 then
     begin
-      // in DWARF, fSymbol[i].Start/Stop sometimes overlap -> ignore on FPC
-      // GenerateFromMapOrDbg() did Sort() by Start so we can guess its enough
-      {$ifdef ISDELPHI}
-      for i := 1 to fSymbolsCount - 1 do
-        if fSymbol[i].Start <= fSymbol[i - 1].Stop then
-        begin
-          // on Delphi, there should be no overlap
-          fUnits.ClearSafe;
-          fSymbols.ClearSafe;
-          exit;
-        end;
-      {$endif ISDELPHI}
-      if MabCreate then // just created from .map/.dbg -> create .mab file
-        SaveToFile(MabFile);
-      fHasDebugInfo := true;
+      MabPath := ExtractFilePath(MabFile);
+      if not IsDirectoryWritable(MabPath) then
+      begin
+        // ([idwExcludeWinSys] not needed because if we are admin then fine)
+        // read/only exe folder -> store .mab in local non roaming user folder
+        MabFile := MakeString([GetSystemPath(spUserData),
+          crc32cStringToHexShort(MabPath), '-', // make it unique per-path
+          ExtractFileName(Mabfile)]);
+        MabAge := FileAgeToUnixTimeUtc(MabFile);
+      end;
+    end;
+    if (MabAge <> 0) and // SaveToFile() set FileSetDateFrom(fExeFile);
+       (abs(DbgAge - MabAge) < 2) then
+      LoadMab(MabFile);
+    if fLinesCount + fSymbolsCount = 0 then
+    try
+      // recompute from .map/.dbg if no faster-to-load .mab available
+      DeleteFile(MabFile);
+      GenerateFromMapOrDwarf(dfsIncludePathInFileName in Scope);
+      fSymbols.Capacity := fSymbolsCount; // only consume the needed memory
+      fLines.Capacity := fLinesCount;
+      for i := 0 to fLinesCount - 2 do
+        if fLine[i].Symbol.Stop = 0 then
+          fLine[i].Symbol.Stop := fLine[i + 1].Symbol.Start - 1;
+      if fLinesCount <> 0 then // wild guess of the last unit end of code
+        with fLine[fLinesCount - 1] do
+          if Symbol.Stop = 0 then
+            if Addr <> nil then
+              // Lines[] blocks may overlap with .inc -> use Addr[]
+              Symbol.Stop := Addr[high(Addr)]
+            else
+              Symbol.Stop := Symbol.Start;
+      if fLinesCount + fSymbolsCount <> 0 then
+        savemab := true; // trigger SaveToFile(MabFile) below
+    except
+      fSymbols.Clear;
+      fLines.Clear;
+    end;
+    // search for a .mab file matching the running .exe/.dll name
+    if (fLinesCount + fSymbolsCount = 0) and
+       (MabAge <> 0) then
+    // search for an embedded compressed .mab file appended to the .exe/.dll
+    if fLinesCount + fSymbolsCount = 0 then
+      LoadMab(fExeFile);
+    // finalize (and optionally persist as .mab) this instance
+    if fLinesCount + fSymbolsCount <> 0 then
+    begin
+      if fLine <> nil then
+      begin
+        fStart := fLine[0].Symbol.Start;
+        fStop := fLine[fLinesCount - 1].Symbol.Stop;
+      end;
+      if fSymbol <> nil then
+      begin
+        fStart := MinPtrInt(fStart, fSymbol[0].Start);
+        fStop := MaxPtrInt(fStop, fSymbol[fSymbolsCount - 1].Stop);
+      end;
+      fHasDebugInfo := true; // mark as success
+      if savemab and // just created from .map/.dbg -> create .mab file
+         not (dfsNoMabSaveAtCreate in Scope) then
+        SaveToFile(MabFile, Scope);
     end
     else
       fDebugFile := '';
   finally
     SynLogGlobalLock.UnLock;
   end;
+  QueryPerformanceMicroSeconds(fLoadingMicroSec);
+  dec(fLoadingMicroSec, start);
 end;
 
 procedure WriteSymbol(var W: TBufferWriter; const A: TDynArray);
 var
   i, n: integer;
-  prev: integer;
+  prev: TDebugAddress;
   S: PDebugSymbol;
   P, Beg: PByte;
   tmp: RawByteString;
@@ -3426,61 +3577,79 @@ begin
     P := ToVarUInt32(S^.Start - prev, P);
     P := ToVarUInt32(S^.Stop - S^.Start, P);
     prev := S^.Stop;
-    inc(PByte(S), A.Info.Cache.ItemSize); // may be TDebugSymbol or TDebugUnit
+    inc(PByte(S), A.Info.Cache.ItemSize); // may be TDebugSymbol or TDebugLines
   end;
   W.DirectWriteFlush(PtrUInt(P) - PtrUInt(Beg), tmp);
   S := A.Value^;
-  for i := 1 to n do
-  begin
+  repeat
     W.Write(S^.Name); // group for better compression
     inc(PByte(S), A.Info.Cache.ItemSize);
-  end;
+    dec(n);
+  until n = 0;
 end;
 
-procedure TDebugFile.SaveToStream(aStream: TStream);
+procedure TDebugFile.SaveToStream(aStream: TStream; Scope: TDebugFileScope);
 var
   W: TBufferWriter;
-  i: PtrInt;
+  i: integer;
   MS: TMemoryStream;
-  u: PDebugUnit;
+  u: PDebugLines;
 begin
   MS := TMemoryStream.Create;
-  W := TBufferWriter.Create(MS, 1 shl 20); // 1 MB should be enough at first
   try
-    WriteSymbol(W, fSymbols);
-    WriteSymbol(W, fUnits);
-    for i := 0 to high(fUnit) do
-      W.Write(fUnit[i].FileName); // group for better compression
-    u := pointer(fUnit);
-    for i := 1 to length(fUnit) do
-    begin
-      // Line values are not always increasing -> wkOffsetI
-      W.WriteVarUInt32Array(u^.Line, length(u^.Line), wkOffsetI);
-      // Addr are sorted, so always increasing -> wkOffsetU
-      W.WriteVarUInt32Array(u^.Addr, length(u^.Addr), wkOffsetU);
-      inc(u);
+    W := TBufferWriter.Create(MS, 1 shl 20); // 1 MB should be enough at first
+    try
+      if dfsNoSymbols in Scope then
+        W.Write1(0)
+      else
+        WriteSymbol(W, fSymbols);
+      if dfsNoLines in Scope then
+        W.Write1(0)
+      else
+      begin
+        WriteSymbol(W, fLines);
+        u := pointer(fLine);
+        for i := 1 to fLinesCount do
+        begin
+          W.Write(u^.FileName); // group for better compression
+          inc(u);
+        end;
+        u := pointer(fLine);
+        for i := 1 to fLinesCount do
+        begin
+          // Line values are not always increasing -> wkOffsetI
+          W.WriteVarUInt32Array(u^.Line, length(u^.Line), wkOffsetI);
+          // Addr are sorted, so always increasing -> wkOffsetU
+          W.WriteVarUInt32Array(u^.Addr, length(u^.Addr), wkOffsetU);
+          inc(u);
+        end;
+      end;
+      if (fProducer <> '') and
+         not (dfsNoProducer in Scope) then
+        W.Write(fProducer);
+      W.Flush; // now MS contains the uncompressed binary data
+    finally
+      W.Free;
     end;
-    W.Flush; // now MS contains the uncompressed binary data
     AlgoSynLZ.StreamCompress(MS, aStream, MAGIC_MAB, {hash32=}true, {trailer=}true);
   finally
-    W.Free;
     MS.Free;
   end;
 end;
 
 const
-  _TDebugSymbol = 'Name:RawUtf8 Start,Stop:integer';
-  _TDebugUnit ='Symbol:TDebugSymbol FileName:RawUtf8 Line,Addr:TIntegerDynArray';
+  _TDebugSymbol = 'name:RawUtf8 start,stop:integer';
+  _TDebugLines = 'symbol:TDebugSymbol filename:RawUtf8 line,addr:TIntegerDynArray';
 
 procedure TDebugFile.SaveToJson(W: TTextWriter);
 begin
   if Rtti.RegisterType(TypeInfo(TDebugSymbol)).Props.Count = 0 then
     Rtti.RegisterFromText([TypeInfo(TDebugSymbol), _TDebugSymbol,
-                           TypeInfo(TDebugUnit),   _TDebugUnit]);
-  W.AddShort('{"Symbols":');
+                           TypeInfo(TDebugLines),  _TDebugLines]);
+  W.AddShort('{"symbols":');
   fSymbols.SaveToJson(W, []);
-  W.AddShort(',"Units":');
-  fUnits.SaveToJson(W, []);
+  W.AddShort(',"lines":');
+  fLines.SaveToJson(W, []);
   W.Add('}');
 end;
 
@@ -3500,165 +3669,153 @@ begin
   end;
 end;
 
-function TDebugFile.SaveToFile(const aFileName: TFileName): TFileName;
+function TDebugFile.SaveToFile(const aFileName: TFileName; Scope: TDebugFileScope): TFileName;
 var
   F: TStream;
 begin
   if aFileName = '' then
-    result := ChangeFileExt(GetModuleName(hInstance), '.mab')
+    result := ChangeFileExt(Executable.InstanceFileName, '.mab')
   else
     result := aFileName;
   DeleteFile(result);
   F := TFileStreamEx.Create(result, fmCreate);
   try
-    SaveToStream(F);
+    SaveToStream(F, Scope);
   finally
     F.Free;
   end;
+  if fExeFile <> '' then
+    FileSetDateFrom(aFileName, fExeFile);
 end;
 
-procedure TDebugFile.SaveToExe(const aExeName: TFileName);
+procedure TDebugFile.SaveToExe(const aExeName: TFileName; Scope: TDebugFileScope);
 var
-  mabfilename: TFileName;
   exe, mab: TMemoryStream;
   exesize, mabsize: PtrUInt;
 begin
   if not FileExists(aExeName) then
     exit;
-  mabfilename := SaveToFile(ChangeFileExt(aExeName, '.mab'));
+  mab := TMemoryStream.Create;
   try
+    // generate the .mab content in memory
+    SaveToStream(mab, Scope);
+    mabsize := mab.Size;
+    // open the executable file in memory, trim any existing mab, append new mab
     exe := TMemoryStream.Create;
-    mab := TMemoryStream.Create;
     try
-      // load both files
-      mab.LoadFromFile(mabfilename);
-      mabsize := mab.Size;
       exe.LoadFromFile(aExeName);
       exesize := exe.Size;
       if exesize < 16 then
         exit;
-      // trim existing mab content
       exesize := AlgoSynLZ.StreamComputeLen(exe.Memory, exesize, MAGIC_MAB);
-      exe.Size := exesize + mabsize;
-      // append mab content to exe
-      MoveFast(mab.Memory^, PAnsiChar(exe.Memory)[exesize], mabsize);
-      exe.SaveToFile(aExeName);
+      exe.Size := exesize + mabsize; // trim and reserve space for .mab
+      MoveFast(mab.Memory^, PAnsiChar(exe.Memory)[exesize], mabsize); // append
+      exe.SaveToFile(aExeName); // save
     finally
-      mab.Free;
       exe.Free;
     end;
   finally
-    DeleteFile(mabfilename);
+    mab.Free;
   end;
 end;
 
-function TDebugFile.FindSymbol(aAddressOffset: integer): PtrInt;
+function TDebugFile.FindSymbol(rva: TDebugAddress): PDebugSymbol;
 var
-  L, R: PtrInt;
-  s: PDebugSymbol;
+  i, L, R: PtrInt;
 begin
-  R := length(fSymbol) - 1;
   L := 0;
+  R := fSymbolsCount - 1;
   if (R >= 0) and
-     (aAddressOffset >= fSymbol[0].Start) and
-     (aAddressOffset <= fSymbol[R].Stop) then
-    repeat
-      result := (L + R) shr 1;
-      s := @fSymbol[result];
-      if aAddressOffset < s^.Start then
-        R := result - 1
-      else if aAddressOffset > s^.Stop then
-        L := result + 1
+     (rva > 0) then
+    repeat // efficient O(log(n)) binary search
+      i := (L + R) shr 1;
+      result := @fSymbol[i];
+      if rva < result^.Start then
+        R := i - 1
+      else if rva > result^.Stop then
+        L := i + 1
       else
         exit; // found
     until L > R;
-  result := -1;
+  result := nil; // not found
 end;
 
-function TDebugFile.FindUnit(aAddressOffset: integer): PtrInt;
+function TDebugFile.FindLines(rva: TDebugAddress): PDebugLines;
 var
-  L, R: PtrInt;
-  s: PDebugSymbol;
+  i, L, R: PtrInt;
 begin
-  R := length(fUnit) - 1;
   L := 0;
+  R := fLinesCount - 1;
   if (R >= 0) and
-     (aAddressOffset >= fUnit[0].Symbol.Start) and
-     (aAddressOffset <= fUnit[R].Symbol.Stop) then
+     (rva > 0) then
     repeat // efficient O(log(n)) binary search
-      result := (L + R) shr 1;
-      s := @fUnit[result].Symbol;
-      if aAddressOffset < s^.Start then
-        R := result - 1
-      else if aAddressOffset > s^.Stop then
-        L := result + 1
+      i := (L + R) shr 1;
+      result := @fLine[i];
+      if rva < result^.Symbol.Start then
+        R := i - 1
+      else if rva > result^.Symbol.Stop then
+        L := i + 1
       else
-        exit;
+        exit; // found
     until L > R;
-  result := -1;
+  result := nil; // not found
 end;
 
-function TDebugFile.FindUnit(aAddressOffset: integer;
-  out LineNumber: integer): PtrInt;
+function TDebugFile.FindLines(rva: TDebugAddress; out line: integer): PDebugLines;
 var
-  L, R, n, max: PtrInt;
-  u: PDebugUnit;
+  i, L, R, max: PtrInt;
+  a: PIntegerArray;
 begin
-  LineNumber := 0;
-  result := FindUnit(aAddressOffset);
-  if result < 0 then
+  line := 0;
+  result := FindLines(rva);
+  if result = nil then
     exit;
-  // unit found -> search line number
-  u := @fUnit[result];
-  if u^.Addr = nil then
+  // unit found -> search line number from within matching Addr[]
+  if result^.Addr = nil then
     exit;
-  max := length(u^.Addr) - 1;
+  max := PDALen(PAnsiChar(result^.Addr) - _DALEN)^ + (_DAOFF- 1);
   L := 0;
   R := max;
   if R >= 0 then
-    repeat // efficient O(log(n)) binary search
-      n := (L + R) shr 1;
-      if aAddressOffset < u^.Addr[n] then
-        R := n - 1
-      else if (n < max) and
-              (aAddressOffset >= u^.Addr[n + 1]) then
-        L := n + 1
+    repeat // efficient O(log(i)) binary search
+      i := (L + R) shr 1;
+      a := @result^.Addr[i];
+      if rva < a^[0] then
+        R := i - 1
+      else if (i < max) and
+              (rva >= a^[1]) then
+        L := i + 1
       else
       begin
-        LineNumber := u^.Line[n];
+        line := result^.Line[i]; // found
         exit;
       end;
     until L > R;
 end;
 
-function TDebugFile.AbsoluteToOffset(aAddressAbsolute: PtrUInt): integer;
+function TDebugFile.AbsoluteToRelative(aAddressAbsolute: PtrUInt): TDebugAddress;
 begin
-  if (self = nil) or
-     (aAddressAbsolute = 0) then
-    result := 0
-  else
-    result := PtrInt(aAddressAbsolute) - PtrInt(fCodeOffset);
+  dec(aAddressAbsolute, fCodeOffset);
+  if (PtrInt(aAddressAbsolute) < PtrInt(fStart)) or
+     (aAddressAbsolute > fStop) then
+    aAddressAbsolute := 0; // our RVA should be positive and in 32-bit range
+  result := aAddressAbsolute;
 end;
 
 function TDebugFile.IsCode(aAddressAbsolute: PtrUInt): boolean;
-var
-  offset: integer;
 begin
-  offset := AbsoluteToOffset(aAddressAbsolute);
-  result := (offset <> 0) and
-            HasDebugInfo and
-            (((fUnit <> nil) and
-              (offset >= fUnit[0].Symbol.Start) and
-              (offset <= fUnit[length(fUnit) - 1].Symbol.Stop)) or
-             ((fSymbol <> nil) and
-              (offset >= fSymbol[0].Start) and
-              (offset <= fSymbol[length(fSymbol) - 1].Stop)));
+  dec(aAddressAbsolute, fCodeOffset); // inlined AbsoluteToRelative()
+  result := (PtrInt(aAddressAbsolute) >= PtrInt(fStart)) and
+            (aAddressAbsolute <= fStop);
 end;
 
 class function TDebugFile.Log(W: TTextWriter; aAddressAbsolute: PtrUInt;
   AllowNotCodeAddr, SymbolNameNotFilename: boolean): boolean;
 var
-  u, s, Line, offset: integer;
+  line: integer; // not PtrInt
+  rva: TDebugAddress;
+  s: PDebugSymbol;
+  l: PDebugLines;
   debug: TDebugFile;
 
   procedure AddHex;
@@ -3683,40 +3840,41 @@ begin
       AddHex;
       exit;
     end;
-    offset := debug.AbsoluteToOffset(aAddressAbsolute);
-    s := debug.FindSymbol(offset);
-    u := debug.FindUnit(offset, Line);
-    if (s < 0) and
-       (u < 0) then
+    rva := debug.AbsoluteToRelative(aAddressAbsolute);
+    s := debug.FindSymbol(rva);
+    l := debug.FindLines(rva, line);
+    if (s = nil) and
+       (l = nil) then
     begin
       AddHex;
       exit;
     end;
     {$ifdef ISDELPHI}
-    if (s >= 0) and
+    if (s <> nil) and
        not AllowNotCodeAddr and
        (FindPropName(['SynRtlUnwind', '@HandleAnyException',  'LogExcept',
          '@HandleOnException', 'ThreadWrapper', 'ThreadProc'],
-         debug.Symbols[s].Name) >= 0) then
+         s^.Name) >= 0) then
       // no stack trace within the Delphi exception interception functions
       exit;
     {$endif ISDELPHI}
     AddHex;
-    if u >= 0 then
+    if l <> nil then
     begin
-      if SymbolNameNotFilename then
-        W.AddString(debug.Units[u].Symbol.Name)
+      if SymbolNameNotFilename and
+         (line = 0) then
+        W.AddString(l^.Symbol.Name) // unit name for convenience
       else
-        W.AddString(debug.Units[u].FileName);
+        W.AddString(l^.FileName);   // line number is always against a file
       W.AddDirect(' ');
     end;
-    if s >= 0 then
-      W.AddString(debug.Symbols[s].Name);
+    if s <> nil then
+      W.AddString(s^.Name);
     W.AddDirect(' ');
-    if Line > 0 then
+    if line > 0 then
     begin
       W.AddDirect('(');
-      W.AddU(Line);
+      W.AddU(line);
       W.AddDirect(')', ' ');
     end;
     result := true;
@@ -3726,40 +3884,57 @@ begin
 end;
 
 function TDebugFile.FindLocation(aAddressAbsolute: PtrUInt): RawUtf8;
+var
+  tmp: ShortString;
 begin
-  ShortStringToAnsi7String(FindLocationShort(aAddressAbsolute), result);
+  FindLocationShort(aAddressAbsolute, tmp);
+  ShortStringToAnsi7String(tmp, result);
 end;
 
-function TDebugFile.FindLocationShort(aAddressAbsolute: PtrUInt): ShortString;
+procedure TDebugFile.FindLocationShort(aAddressAbsolute: PtrUInt; var aInfo: ShortString);
 var
-  u, s, line, offset: integer;
+  line: integer; // not PtrInt
+  rva: TDebugAddress;
+  s: PDebugSymbol;
+  l: PDebugLines;
+  c: PUtf8Char;
 begin
-  result := PointerToHexShort(pointer(aAddressAbsolute));
+  aInfo := PointerToHexShort(pointer(aAddressAbsolute));
   if (self = nil) or
      (aAddressAbsolute = 0) or
      not HasDebugInfo then
     exit;
-  offset := AbsoluteToOffset(aAddressAbsolute);
-  s := FindSymbol(offset);
-  u := FindUnit(offset, line);
-  if (s < 0) and
-     (u < 0) then
+  rva := AbsoluteToRelative(aAddressAbsolute);
+  if rva = 0 then
+    exit;
+  s := FindSymbol(rva);
+  l := FindLines(rva, line);
+  if (s = nil) and
+     (l = nil) then
      exit;
-  AppendShortChar(' ', @result);
-  if u >= 0 then
+  AppendShortChar(' ', @aInfo);
+  if l <> nil then
   begin
-    AppendShortAnsi7String(Units[u].FileName, result);
-    AppendShortCharSafe(' ', result);
-  end
-  else
-    result[0] := #0;
-  if s >= 0 then
-    AppendShortAnsi7String(Symbols[s].Name, result);
+    AppendShortAnsi7String(l^.FileName, aInfo);
+    c := PUtf8Char(pointer(l^.FileName)) + length(l^.Symbol.Name);
+    if not StartWithLower(l^.FileName, l^.Symbol.Name) or
+       (c^ <> '.') or
+       (PosChar(c + 1, '.') <> nil) then
+    begin
+      // e.g. 'a0a40 mormot.core.base.asmx64.inc (mormot.core.base) Rdtsc (3005)'
+      AppendShort(' (', aInfo);
+      AppendShortAnsi7String(l^.Symbol.Name, aInfo);
+      AppendShortCharSafe(')', aInfo);
+    end;
+    AppendShortCharSafe(' ', aInfo);
+  end;
+  if s <> nil then
+    AppendShortAnsi7String(s^.Name, aInfo);
   if line > 0 then
   begin
-    AppendShortTwoChars(ord(' ') + ord('(') shl 8, @result);
-    AppendShortCardinal(line, result);
-    AppendShortCharSafe(')', result);
+    AppendShortTwoCharsSafe(ord(' ') + ord('(') shl 8, aInfo);
+    AppendShortCardinal(line, aInfo);
+    AppendShortCharSafe(')', aInfo);
   end;
 end;
 
@@ -3774,24 +3949,31 @@ end;
 
 function _GetExecutableLocation(aAddress: pointer): ShortString;
 begin
-  result := GetInstanceDebugFile.FindLocationShort(PtrUInt(aAddress));
+  GetInstanceDebugFile.FindLocationShort(PtrUInt(aAddress), result);
 end;
 
-function TDebugFile.FindUnit(const aUnitName: RawUtf8): PtrInt;
+function TDebugFile.FindLinesByName(const aUnitName: RawUtf8): PDebugLines;
+var
+  i: integer;
 begin
   if (self <> nil) and
      (aUnitName <> '') then
-    for result := 0 to high(fUnit) do
-      if IdemPropNameU(fUnit[result].Symbol.Name, aUnitName) then // inlined
-        exit;
-  result := -1;
+  begin
+    result := pointer(fLine);
+    for i := 1 to fLinesCount do
+      if IdemPropNameU(result^.Symbol.Name, aUnitName) then // inlined
+        exit // return the first occurence skipping any next nested inclusion
+      else
+        inc(result);
+  end;
+  result := nil;
 end;
 
 class function TDebugFile.FindFileName(const unitname: RawUtf8): TFileName;
 var
   map: TDebugFile;
   name: RawUtf8;
-  u: integer;
+  l: PDebugLines;
 begin
   result := '';
   map := GetInstanceDebugFile;
@@ -3801,9 +3983,9 @@ begin
     name := Executable.ProgramName
   else
     name := unitname;
-  u := map.FindUnit(name);
-  if u >= 0 then
-    Utf8ToFileName(map.fUnit[u].FileName, result);
+  l := map.FindLinesByName(name);
+  if l <> nil then
+    Utf8ToFileName(l^.FileName, result);
 end;
 
 
@@ -3826,6 +4008,8 @@ end;
 
 function ToCaption(event: TSynLogLevel): string;
 begin
+  if _LogInfoCaption[high(_LogInfoCaption)] = '' then // delayed translation
+    GetEnumCaptions(TypeInfo(TSynLogLevel), @_LogInfoCaption);
   result := _LogInfoCaption[event];
 end;
 
@@ -3835,10 +4019,11 @@ begin
 end;
 
 function ToText(const Event: TMethod): RawUtf8;
+var
+  tmp: ShortString;
 begin
-  FormatUtf8('% using %(%)', [
-    GetInstanceDebugFile.FindLocationShort(PtrUInt(Event.Code)),
-    TObject(Event.Data), Event.Data], result);
+  GetInstanceDebugFile.FindLocationShort(PtrUInt(Event.Code), tmp);
+  FormatUtf8('% using %(%)', [tmp, TObject(Event.Data), Event.Data], result);
 end;
 
 function ToText(apl: TAppLogLevel): RawUtf8;
@@ -4806,7 +4991,7 @@ begin
   try
     // reset this thread name for ptIdentifiedInOneFile
     if num <= length(thd^.Name) then
-      thd^.Name[num - 1] := '';
+      FastAssignNew(thd^.Name[num - 1]);
     // mark thread number to be recycled by InitThreadNumber
     AddWord(thd^.IndexReleased, thd^.IndexReleasedCount, num);
   finally
@@ -5787,7 +5972,7 @@ begin
     end;
     {$ifdef OSWINDOWS}
     w.AddShorter(' Wow64=');
-    w.AddB(ord(IsWow64) + ord(IsWow64Emulation) shl 1); // 0, 1, 2 or 3
+    w.AddB(byte(WindowsSpecs));
     {$else}
     w.AddShorter(' Wow64=0');
     {$endif OSWINDOWS}
@@ -6077,6 +6262,7 @@ begin
   if fn = '' then
     // compute the default filename as '<exename>(<user>@<host>)'
     with Executable do
+    begin
       if fFamily.IncludeComputerNameInFileName then
         if fFamily.IncludeUserNameInFileName then
           fn := FormatString('%(%@%)', [ProgramName, User, Host])
@@ -6086,6 +6272,9 @@ begin
         fn := FormatString('%(%)', [ProgramName, User])
       else
         Utf8ToFileName(ProgramName, fn);
+      if IsLibrary then // include library name
+        fn := fn + ' ' + ExtractFileName(Executable.InstanceFileName);
+    end;
   // prepare for any file flush or rotation - as checked in OnFlushToStream
   fRotateBytes := 0;
   fFlushTix32 := 0;
@@ -6111,19 +6300,14 @@ begin
      (fRotateDailyTix32 = 0) then
     fn := FormatString('% %',
       [fn, NowToFileShort(fFamily.LocalTimestamp)]);
-  {$ifdef OSWINDOWS}
-  // include library name
-  if IsLibrary and
-     (fFamily.fCustomFileName = '') then
-    fn := fn + ' ' + ExtractFileName(GetModuleName(HInstance));
-  {$else}
-  // normalize file name to be more readable and usable on POSIX command line
-  fn := StringReplace(fn, ' ', '-', [rfReplaceAll]);
-  {$endif OSWINDOWS}
   // include thread ID in ptOneFilePerThread mode
   if fFamily.fPerThreadLog = ptOneFilePerThread then
     fn := FormatString('% %',
       [fn, PointerToHexShort({%H-}pointer(GetCurrentThreadId))]);
+  {$ifdef OSPOSIX}
+  // normalize file name to be more readable and usable on POSIX command line
+  fn := StringReplace(fn, ' ', '-', [rfReplaceAll]);
+  {$endif OSPOSIX}
   // include inherited TSynLog class name as suffix
   if PClass(self)^ <> TSynLog then
   begin
@@ -6134,7 +6318,7 @@ begin
       delete(classn, 1, 1); // TCustomLog -> 'customlog'
     LowerCaseSelf(classn);
     if SetName([fn, '-', classn]) then
-      exit; // exename-secondary.log is not yet active
+      exit; // exename-secondary.log was not yet active so has been selected
   end;
   // ensure this file name is unique among all opened files
   if SetName([fn]) then
@@ -6482,10 +6666,15 @@ begin
     exit; // disabled for this thread (avoid nested call)
   log := HandleExceptionFamily.Add;
   if log = nil then
+<<<<<<< HEAD
    exit;
   if log.fFamily.ExceptionIgnoreLibrary and
+=======
+    exit;
+  if log.fFamily.ExceptionIgnoreExternal and
+>>>>>>> 3b11ad4b2a3a7edf23c13fb8e0ca33432b766dea
      (Ctxt.EAddr <> 0) and
-     not IsMainExecutable(pointer(Ctxt.EAddr)) then // fast guess
+     not IsCurrentExecutable(pointer(Ctxt.EAddr)) then // fast guess
     exit;
   thrdnam := CurrentThreadNameShort;
   bak := nfo^.Flags;
@@ -6659,18 +6848,21 @@ end;
 function ToText(var info: TSynLogExceptionInfo): RawUtf8;
 var
   i: PtrInt;
+  tmp: ShortString;
 begin
   with info.Context do
     if ELevel <> sllNone then
     begin
-      FormatUtf8('% % at %: % [%]', [_LogInfoCaption[ELevel], EClass,
-        GetInstanceDebugFile.FindLocationShort(EAddr),
+      GetInstanceDebugFile.FindLocationShort(EAddr, tmp);
+      FormatUtf8('% % at %: % [%]', [_LogInfoText[ELevel], EClass, tmp,
         UnixTimeToString(ETimestamp, {expanded=}true, ' '),
         StringToUtf8(info.Message)], result);
       if EStack <> nil then
         for i := 0 to EStackCount - 1 do
-          result := FormatUtf8('%, %',
-            [result, ExeInstanceDebugFile.FindLocationShort(EStack[i])]);
+        begin
+          ExeInstanceDebugFile.FindLocationShort(EStack[i], tmp);
+          Append(result, [', ', tmp]);
+        end;
     end
     else
       FastAssignNew(result);
@@ -7014,7 +7206,7 @@ end;
 procedure TSynLogFile.RecomputeTime(p: PSynLogFileProc);
 var
   ndx, lev: PtrInt;
-  enter64, leave64: Int64;
+  enter64, leave64, time64: Int64;
   thd: cardinal;
 begin // only called when out-of-range '99.xxx.xxx' was written in sllLeave
   lev := 0;
@@ -7037,17 +7229,21 @@ begin // only called when out-of-range '99.xxx.xxx' was written in sllLeave
           begin
             if fFreq = 0 then
               // adjust huge seconds timing from date/time column
-              p^.Time := Round(
-                (EventDateTime(ndx) -
-                 EventDateTime(p^.Index)) * 86400000000.0) +
-                p^.Time mod 1000000
+              time64 := round(
+                (EventDateTime(ndx) - EventDateTime(p^.Index)) * MicroSecsPerDay) +
+                Int64(p^.Time mod 1000000)
             else
             begin
               // directly use high resolution timestamps as 64-bit integers
               HexDisplayToBin(fLines[p^.Index], @enter64, SizeOf(enter64));
               HexDisplayToBin(fLines[ndx],      @leave64, SizeOf(leave64));
-              p^.Time := ((leave64 - enter64) * (1000 * 1000)) div fFreq;
+              time64 := leave64 - enter64;
+              if fFreq <> MicroSecsPerSec then
+                time64 := (time64 * MicroSecsPerSec) div fFreq;
             end;
+            if time64 shr 32 <> 0 then
+              time64 := high(cardinal); // overflow over 1 hour and 11 minutes
+            p^.Time := time64;
             break;
           end
           else
@@ -7123,7 +7319,7 @@ var
       result := false
     else
     begin
-      FastSetString(S, PBeg, P - PBeg);
+      FastSetString(S, PBeg, P);
       PBeg := P + LUP;
       result := pointer(S) <> nil;
     end;
@@ -7215,9 +7411,8 @@ begin
       else
         mormot.core.text.HexToBin(f, @fIntelCPU, SizeOf(fIntelCPU));
       end;
-    i := GetInteger(pointer(aWow64)); // 0, 1, 2 or 3
-    fWow64 := (i and 1) <> 0;
-    fWow64Emulated := (i and 2) <> 0; // + ord(IsWow64Emulation) shl 1
+    fWindowsSpecs := TWindowsSpecs(byte(GetInteger(pointer(aWow64))));
+    fWow64 := wsWow64 in fWindowsSpecs;
     SetInt64(PBeg, fFreq);
     while (PBeg < PEnd) and
           (PBeg^ > ' ') do
@@ -7798,7 +7993,7 @@ begin
   begin
     dt := EventDateTime(aRow);
     FormatString('% %'#9'%'#9, [DateToStr(dt), FormatDateTime(TIME_FORMAT, dt),
-      _LogInfoCaption[EventLevel[aRow]]], result);
+      ToCaption(EventLevel[aRow])], result);
     if fThreads <> nil then
       result := result + IntToString(cardinal(fThreads[aRow])) + #9;
     result := result + EventString(aRow, '   ');
@@ -7818,7 +8013,7 @@ begin
         0:
           DateTimeToString(result, TIME_FORMAT, EventDateTime(aRow));
         1:
-          result := _LogInfoCaption[EventLevel[aRow]];
+          result := ToCaption(EventLevel[aRow]);
         2:
           if fThreads <> nil then
             result := IntToString(cardinal(fThreads[aRow]));
@@ -8327,9 +8522,9 @@ end;
 procedure InitializeUnit;
 begin
   SynLogGlobalLock.Init;
+  if (PtrUInt(@SynLogThreads) and POINTERAND) <> 0 then
+    ESynLogException.RaiseU('SynLogThreads alignment issue');
   GetEnumTrimmedNames(TypeInfo(TSynLogLevel), @_LogInfoText);
-  GetEnumCaptions(TypeInfo(TSynLogLevel), @_LogInfoCaption);
-  _LogInfoCaption[sllNone] := '';
   GetEnumTrimmedNames(TypeInfo(TAppLogLevel), @_LogAppText);
   SetThreadName := _SetThreadName;
   GetCurrentThreadName := _GetCurrentThreadName;
@@ -8339,8 +8534,8 @@ begin
   LogCompressAlgoArchive := @_LogCompressAlgoArchive;
   //writeln(BacktraceStrFpc(Get_pc_addr));
   //writeln(GetExecutableLocation(get_caller_addr(get_frame)));
-  //writeln(GetInstanceDebugFile.FindLocationShort(PtrUInt(@TDynArray.InitFrom)));
-  //GetInstanceDebugFile.SaveToJson(NowToFileShort+'.json',jsonUnquotedPropName);
+  //writeln(GetInstanceDebugFile.FindLocation(PtrUInt(@TDynArray.InitFrom)));
+  //GetInstanceDebugFile.SaveToJson('debug.json',jsonUnquotedPropName);
 end;
 
 procedure FinalizeUnit;

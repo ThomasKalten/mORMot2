@@ -12,7 +12,7 @@ uses
   unix,
   unixcp,
   unixtype,
-  unixutil, // for TZSeconds - as used by sysutils anyway
+  unixutil, // for TTZInfo/TZSeconds - as used by sysutils anyway
   {$ifdef OSBSDDARWIN}
   sysctl,
   {$else}
@@ -64,14 +64,8 @@ uses
 
 // define some raw text functions, to avoid linking mormot.core.text
 
-// function _fmt(const Fmt: string; const Args: array of const): RawUtf8;
-//   overload; forward;
-// procedure _fmt(const Fmt: string; const Args: array of const;
-//   var result: RawUtf8); overload; forward;
-// procedure _AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8); forward;
 function _GetNextSpaced(var P: PAnsiChar): RawUtf8; {$ifdef ISDELPHI} overload; {$endif ISDELPHI} forward;
 function _GetNextCardinal(var P: PAnsiChar): PtrUInt; {$ifdef ISDELPHI} overload; {$endif ISDELPHI} forward;
-function PosExtString(Str: PChar): PChar; forward; // to extract extension
 
 procedure LowerSelf(p: PAnsiChar);
 begin
@@ -88,14 +82,6 @@ function LowerU(const u: RawUtf8): RawUtf8;
 begin
   FastSetString(result, pointer(u), length(u));
   LowerSelf(pointer(result));
-end;
-
-procedure WrDeb(const t: ShortString; const p; l: PtrInt); // internal use below
-var
-  tmp: RawUtf8;
-begin
-  ToHumanHex(tmp, @p, l);
-  {$I-}writeln(t, ' = ',tmp);{$I+}
 end;
 
 function IdemPChar(p, up: PUtf8Char): boolean; inline;
@@ -137,8 +123,20 @@ end;
 
 { ****************** Unicode, Time, File process }
 
+procedure FileTimeToInt64(FT: PFileTime; Q64: PQWordRec);
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  Q64^.V := PQWord(FT)^; // TFileTime = packed record on POSIX
+end;
+
+procedure Int64ToFileTime(Q64: PQWordRec; FT: PFileTime);
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  PQWord(FT)^ := Q64^.V;
+end;
+
 var // two flag sets of 8 items = 8-bit byte efficient storage and access
-  _F0: set of (fIsDebuggerTested, fIsDebuggerPresent, fStdOutIsTTY,
+  _F0: set of (fIsDebuggerTested, fIsDebuggerPresent, fStdOutHasColors,
     fNoURandom, fNoRandom, fProcFileSystemsTested,
     fLinuxEventFdFailed, fLinuxGetRandomFailed);
   _F1: set of (fMachTimeNanoSec, fNoTryProcExe, fStubMemoryExecXorWrite,
@@ -223,6 +221,8 @@ end;
 
 function TIcuLibrary.IsAvailable: boolean;
 begin
+  if Disabled then
+    exit(false);
   if not fLoaded then
     DoLoad;
   result := Assigned(ucnv_open);
@@ -280,7 +280,7 @@ var
   err: SizeInt;
   P: PPointerArray;
   {$ifndef OSDARWIN}
-  so: string;
+  fn, so: string;
   {$endif OSDARWIN}
   v, vers: string;
   data: PAnsiChar;
@@ -312,12 +312,16 @@ begin
       begin
         // there is no link to the library -> try e.g. 'libicudata.so.67'
         if Version <> '' then
-          icudata := LibraryOpen(string('libicudata.so.') + Version);
+        begin
+          fn := 'libicudata.so.' + Version;
+          icudata := LibraryOpen(fn);
+        end;
         if icudata = 0 then
           for i := ICU_MAX downto ICU_MIN do
           begin
             v := IntToStr(i);
-            icudata := LibraryOpen(string('libicudata.so.') + v);
+            fn := 'libicudata.so.' + v;
+            icudata := LibraryOpen(fn);
             if icudata <> 0 then
             begin
               Version := v;
@@ -330,9 +334,13 @@ begin
       {$endif OSANDROID}
       if icudata <> 0 then
       begin
-        icu := LibraryOpen(string('libicuuc.so') + so);
+        fn := 'libicuuc.so' + so;
+        icu := LibraryOpen(fn);
         if icu <> 0 then
-          icui18n := LibraryOpen(string('libicui18n.so') + so);
+        begin
+          fn := 'libicui18n.so' + so;
+          icui18n := LibraryOpen(fn);
+        end;
       end;
       {$endif OSDARWIN}
       if icui18n = 0 then
@@ -403,6 +411,9 @@ begin
   fLoaded := false;
   DoLoad(LibName, Version);
   result := Assigned(ucnv_open);
+  if result and
+     Disabled then
+    Disabled := false; // reset on success
 end;
 
 function TIcuLibrary.ucnv(codepage: cardinal): pointer;
@@ -507,7 +518,7 @@ begin
   syslog(priority, '%s', [msg]);
 end;
 
-{$ifdef FPC}
+{$ifdef FPC} // if not in mormot.core.os.delphi.pas
 
 {$ifdef NODIRECTTHREADMANAGER} // try to stabilize MacOS/BSD pthreads API calls
 
@@ -628,7 +639,7 @@ end;
 
 {$endif FPC}
 
-  const
+const
   // for CompareStringW() Windows-like call in Unicode_CompareString()
   LOCALE_USER_DEFAULT = $400; // ignored in practice
   NORM_IGNORECASE = 1 shl ord(coIgnoreCase); // [widestringmanager.coIgnoreCase]
@@ -670,8 +681,11 @@ begin
     exit;
   end
   else if (CodePage < CP_MIN) or
+          (CodePage >= CP_RAWBLOB) or
           (LA <= 0) then
     exit(0); // clearly invalid/unsupported CodePage or void input
+  if not icu.IsAvailable then
+    exit(AnsiToWideRTL(CodePage, A, W, LA, LW)); // don't try ICU at all
   err := 0;
   cnv := icu.SharedUcnv(CodePage, ndx); // try from our thread-safe cache
   if cnv <> nil then
@@ -688,7 +702,7 @@ begin
       icu.ucnv_close(cnv);
     end
     else // fallback to cwstring/iconv
-      result := AnsiToWideRTL(CodePage, A, W, LA, LW);
+      exit(AnsiToWideRTL(CodePage, A, W, LA, LW));
   end;
   if result < 0 then
     result := 0;
@@ -709,26 +723,32 @@ begin
     exit;
   end
   else if (CodePage < CP_MIN) or
+          (CodePage >= CP_RAWBLOB) or
           (LW <= 0) then
     exit(0); // clearly invalid/unsupported CodePage or void input
-  err := 0;
-  cnv := icu.SharedUcnv(CodePage, ndx); // try from our thread-safe cache
-  if cnv <> nil then
+  if icu.IsAvailable then
   begin
-    result := icu.ucnv_fromUChars(cnv, A, LA, W, LW, err);
-    icu.SharedUcnvUnLock(ndx);
-  end
-  else
-  begin
-    cnv := icu.ucnv(CodePage); // use a transient converter if locked
+    err := 0;
+    cnv := icu.SharedUcnv(CodePage, ndx); // try from our thread-safe cache
     if cnv <> nil then
     begin
       result := icu.ucnv_fromUChars(cnv, A, LA, W, LW, err);
-      icu.ucnv_close(cnv);
+      icu.SharedUcnvUnLock(ndx);
     end
-    else // fallback to cwstring/iconv (less complete than ICU)
-      result := WideToAnsiRTL(CodePage, W, A, LW, LA);
-  end;
+    else
+    begin
+      cnv := icu.ucnv(CodePage); // use a transient converter if locked
+      if cnv <> nil then
+      begin
+        result := icu.ucnv_fromUChars(cnv, A, LA, W, LW, err);
+        icu.ucnv_close(cnv);
+      end
+      else // fallback to cwstring/iconv (less complete than ICU)
+        result := WideToAnsiRTL(CodePage, W, A, LW, LA);
+    end;
+  end
+  else
+    result := WideToAnsiRTL(CodePage, W, A, LW, LA); // don't try ICU at all
   if result <= 0 then
     result := 0
   else
@@ -833,6 +853,91 @@ begin
   t := epoch div SecsPerMin;
   result.Minute := t;
   result.Second := epoch - t * SecsPerMin;
+end; // caller should set result.MilliSecond
+
+function ToEpoch(const utc: TDateTime): TUnixTime; inline;
+begin // inlined DateTimeToUnixTime() from mormot.core.datetime.pas
+  result := round((utc - UnixDateDelta) * SecsPerDay);
+end;
+
+{$ifdef FPC} // if not in mormot.core.os.delphi.pas
+
+{$if declared(TTZInfo) and
+     not defined(OSANDROID)}
+// TTZInfo is the new native FPC way of handling time zones on POSIX
+
+function GetLocalBias(I64: TUnixTime): PtrInt; inline;
+var
+  nfo: TTZInfo; // thread-safe local copy
+begin
+  if GetLocalTimezone(I64, {utc=}true, nfo) then // very fast RTL function
+    result := nfo.seconds
+  else
+    result := TZSeconds; // fallback to old global value (paranoid)
+end;
+
+function ToLocalTime(const utc: TDateTime): TDateTime; inline;
+begin
+  result := utc + GetLocalBias(ToEpoch(utc)) * SecsPerDate;
+end;
+
+function ToUtcTime(const local: TDateTime): TDateTime; inline;
+begin // use TZSeconds to assume it is the current local time
+  result := local - GetLocalBias(ToEpoch(local) - TZSeconds) * SecsPerDate;
+end;
+
+function EpochToLocal(I64: TUnixTime): TUnixTime; inline;
+begin
+  result := I64 + GetLocalBias(I64);
+end;
+
+{$else}
+
+// fallback to TZSeconds i.e. libc localtime() on Android or FPC 3.2.0/3.2.2
+
+function ToLocalTime(const utc: TDateTime): TDateTime; inline;
+begin
+  result := utc + TZSeconds * SecsPerDate;
+end;
+
+function ToUtcTime(const local: TDateTime): TDateTime; inline;
+begin
+  result := local - TZSeconds * SecsPerDate;
+end;
+
+function EpochToLocal(I64: TUnixTime): TUnixTime; inline;
+begin
+  result := I64 + TZSeconds;
+end;
+
+{$ifend declared(TTZInfo)}
+
+{$endif FPC}
+
+function UtcToLocal(utc: TDateTime): TDateTime;
+begin
+  result := ToLocalTime(utc);
+end;
+
+function LocalToUtc(local: TDateTime): TDateTime;
+begin
+  result := ToUtcTime(local);
+end;
+
+function UnixTimeToLocal(I64: TUnixTime): TDateTime;
+begin
+  result := EpochToLocal(I64) * SecsPerDate + UnixDateDelta;
+end;
+
+procedure UnixTimeToLocal(I64: TUnixTime; out Local: TSystemTime);
+begin
+  EpochToSystemTime(EpochToLocal(i64), Local);
+  Local.MilliSecond := 0;
+end;
+
+function LocalToUnixTime(local: TDateTime): TUnixTime;
+begin
+  result := ToEpoch(ToUtcTime(local));
 end;
 
 {$ifdef OSDARWIN} // OSX has no clock_gettime() API but its own MACH API
@@ -946,8 +1051,7 @@ var
   tz: TTimeVal;
 begin
   fpgettimeofday(@tz, nil);
-  // + unixutil.TZSeconds = UTC to local time conversion
-  EpochToSystemTime(tz.tv_sec + TZSeconds, result);
+  EpochToSystemTime(EpochToLocal(tz.tv_sec), result);
   result.MilliSecond := tz.tv_usec div MicroSecsPerMilliSec;
 end;
 
@@ -1063,8 +1167,7 @@ var
 begin
   // faster than fpgettimeofday() which makes a syscall and don't use vDSO
   clock_gettime(CLOCK_REALTIME_FAST, @r);
-  // + unixutil.TZSeconds = UTC to local time conversion
-  EpochToSystemTime(r.tv_sec + TZSeconds, result);
+  EpochToSystemTime(EpochToLocal(r.tv_sec), result);
   result.MilliSecond := PtrUInt(r.tv_nsec) div PtrUInt(NanoSecsPerMilliSec);
 end;
 
@@ -1113,6 +1216,11 @@ end;
 function UnixMSTimeUtcFast: TUnixMSTime;
 begin
   result := UnixMSTimeUtc;
+end;
+
+procedure NowUtcToWindowsFileTime(var ft: TFileTime);
+begin
+  UnixMSTimeToFileTime(UnixMSTimeUtc, ft);
 end;
 
 {$undef HAS_PTHREADSETNAMENP}
@@ -1265,7 +1373,7 @@ end;
 
 procedure PosixSetThreadName(ThreadID: TThreadID; const Name: RawByteString);
 var
-  {%H-}trunc: array[0..15] of AnsiChar; // trunc to 16 non space chars (including #0)
+  {%H-}trunc: TTemp16; // trunc to 16 non space chars (including #0)
   i, L, c4: integer;
 begin
   if Name = '' then
@@ -1354,21 +1462,19 @@ begin
   {$endif HAS_PTHREADSETAFFINITY}
 end;
 
-{$ifdef HAS_PTHREADSETAFFINITY}
-function sched_getaffinity(pid: integer;
-  cpusetsize: SizeUInt; cpuset: pointer): integer;
-    cdecl external clib name 'sched_getaffinity';
-{$endif HAS_PTHREADSETAFFINITY}
-
 function GetMaskAffinity(out CpuSet: TCpuSet): boolean;
 begin
-  {$ifdef HAS_PTHREADSETAFFINITY}
-  result := sched_getaffinity(0, SizeOf(CpuSet), @CpuSet) = 0;
+  {$ifdef OSLINUXANDROID}
+  {$ifdef FPC} // syscall returns the number of set bytes
+  result := Do_SysCall(syscall_nr_sched_getaffinity, 0,
+              SizeOf(CpuSet), PtrUInt(@CpuSet)) <> 0;
+  {$else}
+  result := sched_getaffinity(0, SizeOf(CpuSet), @CpuSet) = 0; // Delphi Linux
+  {$endif FPC}
   {$else}
   result := false; // unsupported by now
-  {$endif HAS_PTHREADSETAFFINITY}
+  {$endif OSLINUXANDROID}
 end;
-
 
 {$ifndef NOEXCEPTIONINTERCEPT}
 
@@ -1386,8 +1492,7 @@ begin
   if FileDate <= 0 then
     result := 0
   else
-    // + unixutil.TZSeconds = UTC to local time conversion
-    result := Int64(FileDate + TZSeconds) / Int64(SecsPerDay) + Int64(UnixDelta);
+    result := EpochToLocal(FileDate) / Int64(SecsPerDay) + Int64(UnixDelta);
 end;
 
 function FileAgeToDateTime(const FileName: TFileName): TDateTime;
@@ -1409,9 +1514,13 @@ begin
 end;
 
 function ValidHandle(Handle: THandle): boolean;
-begin
-  result := PtrInt(Handle) >= 0; // 0=StdIn is a valid POSIX file descriptor
-end;
+begin // FPC doc states THandle should be stated opaque
+  {$if SizeOf(THandle) = 8}
+  result := PtrInt(Handle) >= 0;
+  {$else}
+  result := integer(Handle) >= 0; // 32-bit integer even on POSIX 64-bit targets
+  {$ifend}
+end; // 0=StdIn is a valid POSIX file descriptor
 
 function FileHandleToUnixTimeUtc(F: THandle): TUnixTime;
 var
@@ -1593,16 +1702,20 @@ var
   p: PCharIntArray;
 begin
   result := faArchive; // as LinuxToWinAttr() in fpcsrc/rtl/unix/sysutils.pp
-  p := @PCharIntArray(fn)[GetLastDelim(fn)]; // no memory allocation
+  p := PCharIntArray(fn);
+  if p <> nil then
+    p := @p[GetLastDelim(fn)]; // extract file name with no memory allocation
   if FpS_ISDIR(st.st_mode) then
   begin
     result := result or faDirectory;
-    if (p[0] = ord('.')) and
+    if (p <> nil) and
+       (p[0] = ord('.')) and
        (p[1] <> 0) and
        (PTwoCharsInt(@p[1])^ <> ord('.')) then
       result := result or faHidden{%H-}; // '.' and '..' are not hidden
   end
-  else if p[0] = ord('.') then
+  else if (p <> nil) and
+          (p[0] = ord('.')) then
     result := result or faHidden{%H-}; // e.g. '.htdigest'
   if (st.st_mode and S_IWUSR) = 0 then
     result := result or faReadOnly;
@@ -1649,7 +1762,7 @@ begin
 end;
 
 function FileInfoByHandle(aFileHandle: THandle; FileId, FileSize: PInt64;
-  LastWriteAccess, FileCreateDateTime: PUnixMSTime): boolean;
+  LastWriteAccess, FileCreateDateTime: PUnixMSTime; FileAttr: PCardinal): boolean;
 var
   mtime, atime, ctime: TUnixMSTime;
   lp: TStat;
@@ -1669,6 +1782,8 @@ begin
   StatTimeMS(lp, mtime);
   if LastWriteAccess <> nil then
     LastWriteAccess^ := mtime;
+  if FileAttr <> nil then
+    FileAttr^ := StatFileAttr('', lp);
   if FileCreateDateTime = nil then
     exit;
   // some FS don't populate all fields, so we use what we actually got
@@ -1711,8 +1826,8 @@ begin
             not FpS_ISDIR(st.st_mode);
 end;
 
-var
-  PosixProgramInfo: dl_info; // set at startup
+var // set at startup about the module (exe or so) running this mormot unit
+  PosixProgramInfo: dl_info;
 
 procedure GetDlInfoName(var dlinfo: dl_info; var result: TFileName);
 begin
@@ -1726,22 +1841,31 @@ begin
     result := ExpandFileName(string(result));
 end;
 
-function GetExecutableName(aAddress: pointer): TFileName;
+function GetExecutableBase(aAddress: pointer): PtrUInt;
+var
+  dlinfo: dl_info;
+begin
+  if aAddress = nil then
+    exit(PtrUInt(PosixProgramInfo.dli_fbase));
+  FillCharFast(dlinfo, sizeof(dlinfo), 0);
+  dladdr(aAddress, @dlinfo);
+  result := PtrUInt(dlinfo.dli_fbase);
+end;
+
+function GetExecutableName(aAddress: pointer; aBase: PPtrUInt): TFileName;
 var
   dlinfo: dl_info;
 begin
   FillCharFast(dlinfo, sizeof(dlinfo), 0);
   dladdr(aAddress, @dlinfo);
   GetDlInfoName(dlinfo, result);
+  if aBase <> nil then
+    aBase^ := PtrUInt(dlinfo.dli_fbase);
 end;
 
-function IsMainExecutable(aAddress: pointer): boolean;
-var
-  dlinfo: dl_info;
+function IsCurrentExecutable(aAddress: pointer): boolean;
 begin
-  FillCharFast(dlinfo, sizeof(dlinfo), 0);
-  dladdr(aAddress, @dlinfo);
-  result := (dlinfo.dli_fbase = PosixProgramInfo.dli_fbase);
+  result := (GetExecutableBase(aAddress) = PtrUInt(PosixProgramInfo.dli_fbase));
 end;
 
 function CopyFile(const Source, Target: TFileName; FailIfExists: boolean): boolean;
@@ -1797,16 +1921,6 @@ begin
   result := FpPoll(@p, 1, timeout) > 0;
 end;
 
-function PosixUid: cardinal;
-begin
-  result := FpGetuid;
-end;
-
-function PosixGid: cardinal;
-begin
-  result := FpGetgid;
-end;
-
 procedure ConsoleErrorWrite(const text: RawUtf8);
 begin
   FileWriteAll(StdErrorHandle, pointer(Text), length(Text)); // assume UTF-8
@@ -1850,27 +1964,78 @@ begin
   result := fpgeterrno;
 end;
 
-function IsSharedViolation(ErrorCode: integer): boolean;
-begin
-  if ErrorCode = 0 then
-    ErrorCode := fpgeterrno;
-  result := ErrorCode = ESysEACCES;
-end;
-
 procedure SetLastError(error: integer);
 begin
   fpseterrno(error);
 end;
 
+function GetSystemError(error: integer): TSystemError;
+begin
+  case error of
+    0:
+      result := seSuccess;
+    ESysEPERM:
+      result := sePermissionDenied;
+    ESysEBUSY:
+      result := seBusy;
+    ESysENOENT:
+      result := seFileNotFound;
+    ESysEIO:
+      result := seIOError;
+    ESysENXIO,
+    ESysENODEV:
+      result := seNoSuchDevice;
+    ESysEACCES:
+      result := seAccessDenied;
+    ESysEBADF:
+      result := seInvalidHandle;
+    ESysEAGAIN,
+    ESysEINTR:
+      result := seInterrupted;
+    ESysENOMEM:
+      result := seOutOfMemory;
+    ESysEEXIST:
+      result := seAlreadyExists;
+    ESysENOTDIR:
+      result := seNotADirectory;
+    ESysEISDIR:
+      result := seIsADirectory;
+    ESysEINVAL:
+      result := seInvalidParameter;
+    ESysENFILE,
+    ESysEMFILE:
+      result := seTooManyOpenFiles;
+    ESysENOSPC:
+      result := seDiskFull;
+    ESysEPIPE:
+      result := seBrokenPipe;
+    ESysENAMETOOLONG:
+      result := seNameTooLong;
+    ESysENOTEMPTY:
+      result := seDirectoryNotEmpty;
+    ESysENOSYS:
+      result := seNotSupported;
+    else
+      result := seOther;
+  end;
+end;
+
+const
+  _OSERR: array[TSystemError] of byte = (
+    0, ESysEINVAL, ESysENOENT, ESysEEXIST, ESysEACCES, ESysENXIO, ESysENOMEM,
+    ESysEBADF, ESysEPERM, ESysEBUSY, ESysEIO, ESysENOTEMPTY, ESysENAMETOOLONG,
+    ESysENOTDIR, ESysEISDIR, ESysEMFILE, ESysENOSPC, ESysEPIPE, ESysEINTR,
+    ESysENOSYS, 0);
+
 procedure GetErrorShortVar(error: integer; var dest: ShortString);
 begin
-  OsErrorShort(error, @dest, {noint=}true); // known 'E###' on Linux + BSD
+  OsErrorShortVar(error, dest, {noint=}true); // known 'E###' on Linux + BSD
   if dest[0] = #0 then
   {$ifdef FPC}
-    dest := StrError(error) // FPC RTL returns its plain text as shortstring
+    dest := StrError(error) // FPC RTL returns its plain text as ShortString
   else
   begin
-    AppendShortTwoChars(ord(' ') + ord('(') shl 8, @dest);
+    AppendShortTwoCharsSafe(ord(' ') + ord('(') shl 8, dest);
     AppendShort(StrError(error), dest); // e.g. 'ECHILD (No child processes)'
     AppendShortCharSafe(')', dest);
   end;
@@ -2188,6 +2353,18 @@ begin
   result := true;
 end;
 
+{$else}
+
+function PosixUid: cardinal;
+begin
+  result := FpGetuid;
+end;
+
+function PosixGid: cardinal;
+begin
+  result := FpGetgid;
+end;
+
 {$endif OSLINUXANDROID}
 
 {$ifdef OSLINUX} { the systemd, eventfd or getrandom APIs are Linux-specific }
@@ -2258,7 +2435,7 @@ begin
 end;
 
 const
-  _MESSAGE: array[0..7] of AnsiChar = 'MESSAGE=';
+  _MESSAGE: TTemp8 = 'MESSAGE=';
 
 function TSystemD.Send(priority: integer; msg: PUtf8Char; len: PtrInt): boolean;
 var
@@ -2312,7 +2489,7 @@ const
 function LinuxSetProcessName(const NewName: RawUtf8): boolean;
 var
   L: PtrInt;
-  {%H-}trunc: array[0..15] of AnsiChar; // truncate to 16 chars (including #0)
+  {%H-}trunc: TTemp16; // truncate to 16 chars (including #0)
 begin
   L := MinPtrInt(15, length(NewName));
   MoveFast(NewName[1], trunc[0], L);
@@ -2434,7 +2611,7 @@ function StdOutIsTTY: boolean;
 begin
   if not (fIsDebuggerTested in _F0) then
     TestOnceDebuggerTty;
-  result := (fStdOutIsTTY in _F0);
+  result := (fStdOutHasColors in _F0);
 end;
 
 const
@@ -2581,8 +2758,7 @@ begin
   try
     try
       // extract information - v.Load() may raise EResNotFound
-      if (fFileName <> '') and
-         (fFileName <> ParamStr(0)) then
+      if fFileName <> Executable.ProgramFileName then
         v.Load(fFileName)
       else
         v.Load(HInstance); // load info for currently running program
@@ -2650,7 +2826,8 @@ end;
 {$else}
 function TFileVersion.RetrieveInformationFromFileName: boolean;
 begin
-  result := false; // nothing to be done
+  result := ((Major or Minor) = 0) and   // no need to ask it twice
+            RetrieveNumbersFromResource; // only for the current exe anyway
 end;
 {$endif FPCUSEVERSIONINFO}
 
@@ -2684,15 +2861,13 @@ begin
     p := e^;
     if p^ <> '=' then
     begin
-      b := p;
-      repeat
-        inc(p);
-      until p^ = '=';
-      FastSetString(_SystemEnvNames[n], b, p - b);
-      inc(p);
+      p := PosChar0(p, '=');
+      FastSetString(_SystemEnvNames[n], e^, p);
+      if p^ <> #0 then
+        inc(p); // ignore '='
       b := p;
       inc(p, StrLen(p));
-      FastSetString(_SystemEnvValues[n], b, p - b);
+      FastSetString(_SystemEnvValues[n], b, p);
       inc(n);
     end;
     inc(e);
@@ -2773,6 +2948,9 @@ begin
           // fallback to /var/tmp
           result := '/var/tmp/';
       end;
+    spUserDownloads: // try '$HOME/Downloads'
+       if not WritableFolder(GetSystemPath(spUserDocuments), 'Downloads', result) then
+         result := GetSystemPath(spUserDocuments);
   else
     // POSIX requires a value for the $HOME environment variable
     GetEnvFolder('HOME', result, {writable=}false);
@@ -2934,7 +3112,7 @@ var
     var
       plen: PtrInt;
       {$ifdef UNICODE}
-      tmp: TSynTempBuffer;
+      tmp: TSynTempBuffer; // sub-optimal: may use RawUtf8 everywhere
       {$endif UNICODE}
     begin
       if path <> '' then // fn := path + d_name
@@ -2969,21 +3147,22 @@ var
     if ExcludesDir then
       addedpath := subpath;
     repeat
-      ent := FpReaddir(dir^); // FPC RTL use getdents64 syscall on Linux and BSD :)
+      ent := FpReaddir(dir^); // FPC RTL use getdents64 syscall on Linux+BSD :)
       if ent = nil then
         break;
       // handle this entry type
       entlen := StrLen(@ent^.d_name);
       case ent^.d_type of
         DT_UNKNOWN, // assume modern FS over BSD or Linux Kernel >= 2.6.4
-        DT_REG:
+        DT_LNK,     // symbolic link
+        DT_REG:     // regular file
           if Assigned(OnFile) and
              not OnFile(OnFileOpaque, @ent^.d_name, entlen) then
             continue // e.g. no MatchAnyP()
           else if (not IncludeHiddenFiles) and
                   (AnsiChar(ent^.d_name[0]) = '.') then
             continue;
-        DT_DIR:
+        DT_DIR:     // directory
           begin
             if (AnsiChar(ent^.d_name[0]) = '.') and
                ((not IncludeHiddenFiles) or
@@ -3010,7 +3189,7 @@ var
               continue; // simulate a FindFirst(mask) as in FindFilesRtl()
           end;
       else
-        continue; // not a real file (e.g. link, sysproc or blockdev)
+        continue; // not a real file (e.g. sysproc or blockdev)
       end;
       if n = 0 then // generous initial result capacity
         SetLength(result, 128)
@@ -3068,9 +3247,9 @@ end;
 
 {$ifdef OSBSDDARWIN}
 
-procedure OsErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean);
+procedure OsErrorShortVar(Code: cardinal; var Dest: ShortString; NoInt: boolean);
 begin
-  BsdErrorShort(Code, Dest, NoInt);
+  BsdErrorShortVar(Code, Dest, NoInt);
 end;
 
 function IsValidPid(pid: cardinal): boolean;
@@ -3103,6 +3282,20 @@ function _IsDebuggerPresent: boolean;
 begin
   // rough detection for FPC on BSD (not yet working because of EnumProcessName)
   result := PosEx('lazarus', LowerU(EnumProcessName(FpGetppid))) <> 0;
+end;
+
+procedure __Fill256FromOs(out e: THash256Rec);
+begin
+  // no FillSystemRandom() to avoid endless recursive calls in XorEntropy()
+  {$ifdef OSDARWIN} // OSX has no clock_gettime() API but nanosec functions
+  e.d0 := mach_absolute_time;
+  e.d2 := mach_continuous_time;
+  {$else}
+  clock_gettime(CLOCK_REALTIME_FAST, @e.l);  // fast libc call
+  if SizeOf(e.h) >= SizeOf(TTimeSpec) then   // paranoid compile-time check
+    clock_gettime(CLOCK_MONOTONIC_FAST, @e.h);
+  {$endif OSDARWIN}
+  crcblocks(@e, @SystemEntropy, SizeOf(e) div SizeOf(TBlock128)); // obfuscate
 end;
 
 function GetParentProcess(PID: cardinal): cardinal;
@@ -3204,7 +3397,7 @@ begin
 end;
 
 type
-  // emulate sysinfo() Linux syscall on BSD/Mac
+  // emulate sysinfo() Linux syscall on BSD/Mac for RetrieveSysInfoText()
   TSysInfo = packed record
     uptime: cardinal;                    // Seconds since boot
     loads: array[0 .. 2] of cardinal;    // 1, 5, and 15 minute load averages
@@ -3443,9 +3636,9 @@ end;
 
 {$else} // Linux (and Android) specific code
 
-procedure OsErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean);
+procedure OsErrorShortVar(Code: cardinal; var Dest: ShortString; NoInt: boolean);
 begin
-  LinuxErrorShort(Code, Dest, NoInt);
+  LinuxErrorShortVar(Code, Dest, NoInt);
 end;
 
 procedure FindNameValue(p: PUtf8Char; const up: ShortString; var res: RawUtf8);
@@ -3556,6 +3749,9 @@ begin
   FileClose(h);
 end;
 
+var
+  StartupObfuscate: PHash128;
+
 function LoadProcFile(fn: PAnsiChar; var dest: TBuffer4K): PtrInt;
 var
   h: THandle;
@@ -3572,6 +3768,8 @@ begin
   else
     result := 0; // don't return length = -1 on reading error
   FileClose(h);
+  if StartupObfuscate <> nil then // obfuscate SystemEntropy.Startup
+    crc32c128(StartupObfuscate, @dest, result);
 end;
 
 procedure LoadProcFileTrimed(fn: PAnsiChar; var result: RawUtf8);
@@ -3592,7 +3790,7 @@ begin
         (p[l - 1] <= ' ') do // trim right
     dec(l);
   if IsDefaultString(p, l) then
-    l := 0; // e.g. on ProxMox containers or VMs
+    l := 0; // 'Default string' e.g. on ProxMox containers or VMs
   FastSetString(result, p, l);
 end;
 
@@ -3755,6 +3953,23 @@ begin
   result := (UserTime + KernelTime) <> 0;
 end;
 
+procedure __Fill256FromOs(out e: THash256Rec);
+var
+  si: TSysInfo;
+begin
+  // no FillSystemRandom() to avoid endless recursive calls in XorEntropy()
+  {$ifdef HASGETRANDOM}
+  // try to get whole 256-bit from OS crypto-PRNG in 1 syscall - kernel >= 3.17
+  if not LinuxGetRandom(@e, SizeOf(e)) then
+  {$endif HASGETRANDOM}
+  begin
+    clock_gettime(CLOCK_MONOTONIC_FAST, @e.l); // fast VDSO call as fallback
+    crcblock(@e.l, @SystemEntropy.LiveFeed);   // obfuscate
+  end;
+  SysInfo(@si); // this very fast syscall won't hurt
+  DefaultHasher128(@e.h, @si, SizeOf(si)); // maybe AesNiHash128
+end;
+
 function GetMemoryInfo(out info: TMemoryInfo; withalloc: boolean): boolean;
 var
   tmp: TBuffer4K;
@@ -3817,7 +4032,10 @@ begin
   {$ifdef HASGETRANDOM}
   // eventually XOR with 512-bit getrandom syscall if available
   if LinuxGetRandom(@tmp, SizeOf(e)) then
-    XorMemory(@e, @tmp, SizeOf(e))
+  begin
+    XorMemory(@e, @tmp, SizeOf(e));
+    FillZero(PHash512(@tmp)^);
+  end
   else
   {$endif HASGETRANDOM}
     // read-only 122-bit random UUID text '6fd5a44b-35f4-4ad4-a9b9-6b9be13e1fe9'
@@ -3881,17 +4099,20 @@ end;
 
 procedure TestOnceDebuggerTty;
 var
-  term: RawUtf8;
+  env: RawUtf8;
 begin
   include(_F0, fIsDebuggerTested);
-  if _IsDebuggerPresent then // actual syscall
+  if _IsDebuggerPresent then // search TRACERPID: in /proc/self/status
+  begin
     include(_F0, fIsDebuggerPresent);
-  if (not (fIsDebuggerPresent in _F0)) and
-     (IsATTY(StdOut) = 1) and
-     GetSystemEnv('TERM', term) and
-     (IdemPChars(term, 'XTERM'#0'SCREEN'#0'TMUX'#0'RXVT'#0 +
-       'LINUX'#0'CYGWIN'#0) >= 0) then
-    include(_F0, fStdOutIsTTY);
+    exit; // no color in Lazarus console windows
+  end;
+  if GetSystemEnv('NO_COLOR', 8) = nil then // see https://no-color.org
+    if (IsATTY(StdOut) = 1) and
+       GetSystemEnv('TERM', env) and
+       (IdemPChars(env, 'XTERM'#0'SCREEN'#0'TMUX'#0'RXVT'#0 +
+         'LINUX'#0'CYGWIN'#0'ANSI'#0'VT100'#0) >= 0) then
+      include(_F0, fStdOutHasColors);
 end;
 
 function IsDebuggerPresent: boolean;
@@ -4041,34 +4262,6 @@ begin
   result := true;
 end; { TODO : use a diff approach for TProcessInfo.PerSystem on Linux? }
 
-procedure __Fill256FromOs(out e: THash256Rec);
-var
-  si: TSysInfo;  // Linuxism, but properly emulated by thit unit on Mac/BSD
-begin
-  {$ifdef HASGETRANDOM}
-  // try to get whole 256-bit from OS crypto-PRNG in 1 syscall
-  if LinuxGetRandom(@e, SizeOf(e)) then
-    exit;
-  {$endif HASGETRANDOM}
-  // no FillSystemRandom() to avoid endless recursive calls in XorEntropy()
-  {$ifdef OSDARWIN} // OSX has no clock_gettime() API
-  e.d0 := mach_absolute_time   * 2654435761;
-  e.d1 := mach_continuous_time * 3266489917;
-  {$else}
-  if SizeOf(TTimeSpec) <= SizeOf(e) then // paranoid (max 128-bit) -> no-op
-    clock_gettime(CLOCK_MONOTONIC_FAST, @e); // fast VDSO call
-  {$endif OSDARWIN}
-  crcblock(@e.l, @SystemEntropy.LiveFeed); // obfuscate
-  RetrieveSysInfo(si); // at least uptime + cpu load + free mem on all OS
-  DefaultHasher128(@e.h, @si, SizeOf(si)); // maybe AesNiHash128
-  {$ifndef CPUINTEL}
-  if SystemEntropy.LiveFeed.c0 = 0 then       // may happen on BSD and MAC ARM
-    crcblocks(@SystemEntropy.LiveFeed, @e, 2) // put something here
-  else
-  {$endif CPUINTEL}
-    crcblock(@e.h, @SystemEntropy.Startup);  // obfuscate
-end;
-
 const
   // FillSystemRandom() retrieves 256 bytes max (2048-bit) from the OS API
   // - "man urandom" Usage states that 256-bit makes sense for /dev/urandom - as
@@ -4078,15 +4271,14 @@ const
   // - "man getrandom" states that the Linux syscall can always return 256 bytes
   MAXFROMOS = 256;
 
-function FillSystemRandom(Buffer: PByteArray; Len: integer;
-  AllowBlocking: boolean): boolean;
+function FillSystemRandom(Buffer: PByteArray; Len: integer; AllowBlocking: boolean): boolean;
 var
   rd, dev: integer;
 begin
   result := false;
   if Len <= 0 then
     exit;
-  // retrieve up to MAXFROMOS=256 bytes max
+  // retrieve up to MAXFROMOS=256 bytes max - as required by "man urandom"
   rd := MinPtrInt(Len, MAXFROMOS);
   {$ifdef HASGETRANDOM} // a single syscall to rule them all on Linux
   result := LinuxGetRandom(Buffer, rd);
@@ -4208,6 +4400,14 @@ end;
 
 {$ifdef OSBSDDARWIN}
 
+(*procedure WrDeb(const t: ShortString; const p; l: PtrInt); // internal use below
+var
+  tmp: RawUtf8;
+begin
+  ToHumanHex(tmp, @p, l);
+  {$I-}writeln(t, ' = ',tmp);{$I+}
+end;*)
+
 const
   MNT_WAIT = 1;
 
@@ -4293,96 +4493,132 @@ end;
 
 {$endif OSBSDDARWIN}
 
-{$ifdef OSBSDDARWIN}
-  {$define USEMPROTECT}
-{$else}
-  {$ifdef OSANDROID}
-    {$define USEMPROTECT}
-  {$endif OSANDROID}
-{$endif OSBSDDARWIN}
-
-{$ifdef USEMPROTECT}
-function mprotect(Addr: PtrUInt; Len: size_t; Prot: integer): integer;
-  cdecl external clib name 'mprotect';
-{$endif USEMPROTECT}
-
-function SynMProtect(addr: PtrUInt; size: size_t; prot: integer): integer;
-begin
-  result := -1;
-  {$ifdef UNIX}
-    {$ifdef USEMPROTECT}
-    result := mprotect(addr, size, prot);
-    {$else}
-    if Do_SysCall(syscall_nr_mprotect, TSysParam(addr), size, prot) >= 0 then
-      result := 0;
-    {$endif USEMPROTECT}
-  {$endif UNIX}
-end;
-
+// BSD/MacOS and Android: default safe/slow RX -> RW -> RX pattern
 {$ifdef OSLINUX}
-var
-  Patched: TPtrUIntDynArray;
-  PatchedCount: integer;
-
-procedure PatchCodeProtectBack;
-var
-  i: PtrInt;
-begin
-  for i := 0 to PatchedCount - 1 do
-    SynMProtect(Patched[i], SystemInfo.dwPageSize, PROT_READ or PROT_EXEC);
-  PatchedCount := 0;
-end;
-{$else}
-procedure PatchCodeProtectBack;
-begin // nothing to do on Android/BSD/Darwin: not tested yet
-end;
+  // Linux allow direct RX -> RWX and keep list of unprotected pages
+  {$define USEPATCHRWX}
 {$endif OSLINUX}
 
-procedure PatchCode(Old, New: pointer; Size: PtrInt; Backup: pointer;
-  LeaveUnprotected: boolean);
+function mprotect(Addr: PtrUInt; Len: size_t; Prot: integer): integer;
+  cdecl external clib name 'mprotect';
+
+function PatchHardened(Old, New: pointer; Size: PtrInt; Backup: pointer): boolean;
 var
-  OsPageSize, PageSize, AlignedAddr: PtrUInt;
-  i: PtrInt;
-  ProtectedResult, ProtectedMemory: boolean;
+  siz, adr, restore: PtrUInt;
 begin
-  if Size <= 0 then
+  result := false;
+  if Size = 0 then
     exit;
-  if Backup <> nil then
-    for i := 0 to Size - 1 do // do not use Move() here
-      PByteArray(Backup)^[i] := PByteArray(Old)^[i];
-  OsPageSize := SystemInfo.dwPageSize;
-  PageSize := OsPageSize;
-  AlignedAddr := (PtrUInt(Old) div OsPageSize) * OsPageSize;
-  while PtrUInt(Old) + PtrUInt(Size) >= AlignedAddr + PageSize do
-    inc(PageSize, OsPageSize);
-  {$ifdef OSLINUX}
-  if LeaveUnprotected and
-     (PageSize = OsPageSize) and
-     PtrUIntScanExists(pointer(Patched), PatchedCount, AlignedAddr) then
+  restore := PROT_READ or PROT_EXEC; // from RedirectCode()
+  if Size < 0 then
   begin
-    MoveByOne(New, Old, Size); // do not use Move() here
+    restore := PROT_READ; // from PatchPointer(VMT)
+    Size := -Size;
+  end;
+  if Backup <> nil then
+    MoveByOne(Old, Backup, Size); // do not use Move() here
+  siz := SystemInfo.dwPageSize;
+  adr := (PtrUInt(Old) div siz) * siz;
+  while PtrUInt(Old) + PtrUInt(Size) > adr + siz do
+    inc(siz, SystemInfo.dwPageSize);
+  OSSafe.Lock;
+  try
+    if mprotect(adr, siz, PROT_READ or PROT_WRITE) <> 0 then // RW
+      exit;
+    // no try..finally since could be part of the RTL
+    MoveByOne(New, Old, Size);
+    if mprotect(adr, siz, restore) <> 0 then // back to RX (code) / R (data)
+      exit; // process execution is likely to break anyway
+  finally
+    OSSafe.UnLock;
+  end;
+  result := CompareMem(Old, New, Size);
+end;
+
+{$ifdef USEPATCHRWX} // maintain RX/R -> RWX/RW lists of unprotected pages
+var // we tried 64KB pages: slightly faster but GPF (overlap 4KB boundaries)
+  PatchedCode, PatchedVmt: TPtrUIntDynArray;
+  PatchedCodeCount, PatchedVmtCount: integer;
+  PatchedHardened: boolean; // RWX disabled e.g. by SELinux/container policy
+
+function PatchProcess(Old, New: pointer; Size: PtrInt; Backup: pointer): boolean;
+var
+  siz, adr, bytes: PtrUInt;
+begin
+  result := false;
+  if Size = 0 then
+    exit;
+  if PatchedHardened then // won't try any more - but is likely to fail
+  begin
+    result := PatchHardened(Old, New, Size, Backup); // e.g. SELinux
     exit;
   end;
-  {$endif OSLINUX}
-  ProtectedResult := SynMProtect(
-    AlignedAddr, PageSize, PROT_READ or PROT_WRITE or PROT_EXEC) = 0;
-  ProtectedMemory := not ProtectedResult;
-  if ProtectedMemory then
-    ProtectedResult := SynMProtect(
-      AlignedAddr, PageSize, PROT_READ or PROT_WRITE) = 0;
-  if ProtectedResult then
-    try
-      MoveByOne(New, Old, Size);// do not use Move() here
-      if LeaveUnprotected then
-        {$ifdef OSLINUX}
-        AddPtrUInt(Patched, PatchedCount, AlignedAddr)
-        {$endif OSLINUX}
-      else if ProtectedMemory then
-        SynMProtect(AlignedAddr, PageSize, PROT_READ or PROT_EXEC);
-    except
-      // we ignore any exception here - it should work anyway
-    end;
+  bytes := abs(Size);
+  siz := SystemInfo.dwPageSize;
+  adr := (PtrUInt(Old) div siz) * siz;
+  OSSafe.Lock;
+  try
+    repeat
+      if Size < 0 then // from PatchPointer(VMT)
+      begin
+        if not PtrUIntScanExists(pointer(PatchedVmt), PatchedVmtCount, adr) then
+          if mprotect(adr, siz, PROT_READ or PROT_WRITE) = 0 then
+            AddPtrUInt(PatchedVmt, PatchedVmtCount, adr) // mark set to RW
+          else
+            PatchedHardened := true;
+      end // Size > 0 from RedirectCode()
+      else if not PtrUIntScanExists(pointer(PatchedCode), PatchedCodeCount, adr) then
+          if mprotect(adr, siz, PROT_READ or PROT_WRITE or PROT_EXEC) = 0 then
+            AddPtrUInt(PatchedCode, PatchedCodeCount, adr) // mark set to RWX
+          else
+            PatchedHardened := true;
+      if PatchedHardened then
+      begin
+        result := PatchHardened(Old, New, Size, Backup);
+        exit;
+      end;
+      inc(adr, siz); // need another page ?
+    until adr >= PtrUInt(Old) + bytes;
+    // if we reached here, all the pages are in RW or RWX state
+    if Backup <> nil then
+      MoveByOne(Old, Backup, bytes); // do not use Move() here
+    MoveByOne(New, Old, bytes);
+  finally
+    OSSafe.UnLock;
+  end;
+  result := CompareMem(Old, New, bytes);
 end;
+
+procedure PatchCodeProtectBack;
+var
+  i: PtrInt;
+begin
+  if PatchedCodeCount = 0 then
+    exit;
+  OSSafe.Lock;
+  try
+    QuickSortPtrInt(pointer(PatchedCode), 0, PatchedCodeCount - 1);
+    for i := 0 to PatchedCodeCount - 1 do
+      mprotect(PatchedCode[i], SystemInfo.dwPageSize, PROT_READ or PROT_EXEC);
+    PatchedCodeCount := 0;
+  finally
+    OSSafe.UnLock;
+  end;
+end; // mprotect(PatchedVmt[]) triggers some GPF but RW is not unsafe by design
+
+{$else} // BSD and Android require RX -> RW -> RX
+
+function PatchProcess(Old, New: pointer; Size: PtrInt; Backup: pointer): boolean;
+begin
+  result := PatchHardened(Old, New, Size, Backup);
+end;
+
+procedure PatchCodeProtectBack;
+begin // nothing to do on Android/BSD/Darwin
+end;
+
+{$endif USEPATCHRWX}
+
 
 // on most platforms, Compute_FAKEVMT is run once with all JITted stubs
 // on i386, it needs ArgsSizeInStack adjustement, but only 24 bytes per method
@@ -4483,7 +4719,7 @@ begin
     flags := PROT_READ OR PROT_EXEC
   else
     flags := PROT_READ or PROT_WRITE;
-  if SynMProtect(aligned, pagesize shl 1, flags) < 0 then
+  if mprotect(aligned, pagesize shl 1, flags) < 0 then
      raise EOSException.Create('ReserveExecutableMemoryPageAccess: mprotect fail');
 end;
 
@@ -5154,23 +5390,17 @@ begin
   FastAssignNew(result);
 end;
 
-{$ifdef CPU32}
-const getpagesize = 4096; // ARM32/i386 have no getpagesize in clib :(
-{$else}
-// we used to hardcode this to 4096 on Android, but Android 15 uses 16KB
-function getpagesize: integer;
-  cdecl external clib name 'getpagesize';
-{$endif CPU32}
+const
+  get_nprocs = 1; // at least one core
 
 {$endif OSANDROID}
 
 {$ifdef OSLINUX}
 
-function getpagesize: integer;
-  cdecl external clib name 'getpagesize';
-
 function get_nprocs: integer; // fallback on limited /proc/cpuinfo content
   cdecl external clib name 'get_nprocs';
+// note: get_nprocs = sysconf(_SC_NPROCESSORS_ONLN) with the glibc
+//       and both do read /sys/devices/system/cpu/online = '0..19'
 
 procedure SetLinuxDistrib(const release: RawUtf8);
 var
@@ -5210,6 +5440,19 @@ function gettimeofday_c(tp: ptimeval; tzp: ptimezone): cint;
 begin
   // it is much faster to not use the Linux syscall but the libc vDSO call
   result := gettimeofday(tp, tzp);
+end;
+
+function fpc_time(var tloc: TTime): TTime; external name 'FPC_SYSC_TIME';
+
+function fptime_c(tloc : pTime_t): Time_t; // = 'FPC_SYSC_TIME'
+var
+  r: TTimeSpec;
+begin
+  // it is much faster to not use the Linux syscall but the libc vDSO call
+  clock_gettime(CLOCK_REALTIME_FAST, @r);
+  result := r.tv_sec;
+  if tloc <> nil then
+    tloc^ := result;
 end;
 {$endif NOPATCHRTL}
 
@@ -5269,13 +5512,206 @@ end;
 
 {$endif OSLINUX}
 
+procedure TrimDualSpaces(var s: RawUtf8); forward;
+
 {$ifdef OSLINUXANDROID}
 
 var
-  __BiosInfoText: RawUtf8;
-  __BiosInfoHardwareFromCpuInfo: RawUtf8;
+  _BiosInfoText, _BiosInfoHardwareFromCpuInfo, _CpuInfoFeatures: RawUtf8;
+  _CpuCores, _CpuSockets: cardinal;
+  _CpuSocketsMask: TCpuSets;
 
-procedure TrimDualSpaces(var s: RawUtf8); forward;
+{$ifdef FPC}
+function CpuThreads: cardinal;
+var
+  tmp: TCpuSet; // up to 1024 cores - no need to fill with zero first
+begin
+  // very fast syscall to retrieve the current number of active cores
+  result := Do_SysCall(syscall_nr_sched_getaffinity, 0, SizeOf(tmp), PtrUInt(@tmp));
+  if integer(result) > 0 then
+    // syscall returned the number of set bytes
+    result := GetBitsCount(tmp, result shl 3) // may use SSE4.2 popcnt
+  else
+    // on syscall failure, fallback to /proc/cpuinfo or get_nprocs
+    result := SystemInfo.dwNumberOfProcessors;
+end;
+{$else}
+function CpuThreads: cardinal; // static fallback for Delphi for Linux
+begin
+  result := SystemInfo.dwNumberOfProcessors; // from /proc/cpuinfo or get_nprocs
+end;
+{$endif FPC}
+
+function ReadCpuInfo: PUtf8Char; // read slow /proc/cpuinfo and return modname
+var
+  modname, modnum, beg, cache, cpuinfo: PUtf8Char;
+  procid, phyid, phyndx, cacheshr, threads: integer;
+  phy: TIntegerDynArray;
+  {$ifdef CPUARM3264}
+  act, aci: TIntegerDynArray;
+  temparm: ShortString;
+  i: PtrInt;
+  {$endif CPUARM3264}
+begin
+  CpuInfoLinux := StringFromFileNoSize('/proc/cpuinfo'); // too big for LoadProcFile
+  modname := nil;
+  modnum := nil;
+  cache := nil;
+  _CpuSockets := 0;
+  procid := -1;
+  cpuinfo := pointer(CpuInfoLinux);
+  while cpuinfo <> nil do
+  begin
+    beg := cpuinfo;
+    cpuinfo := GotoNextLine(cpuinfo);
+    case IdemPChars(beg, 'PROCESSOR'#0'MODEL NAME'#0'MODEL'#0'FEATURES'#0'FLAGS'#0 +
+      'HARDWARE'#0'SERIAL'#0'CACHE SIZE'#0'CPU CORES'#0'PHYSICAL ID'#0) of
+    0:
+      if beg^ <> 'P' then
+      begin
+        // loop over all "processor : 0 .. 1 .. 2" lines to count the CPUs
+        inc(SystemInfo.dwNumberOfProcessors);
+        procid := ParseInt(beg);
+        if procid >= integer(SystemInfo.dwNumberOfProcessors) then
+          procid := -1; // paranoid
+      end
+      else if modname = nil then
+        modname := ParseLine(beg); // Processor : ARMv7
+    1:
+      if modname = nil then
+        modname := ParseLine(beg);
+    2:
+      if modnum = nil then
+        modnum := ParseLine(beg);
+    3, 4:
+      if _CpuInfoFeatures = '' then
+        _CpuInfoFeatures := ParseLine(beg);
+    5:
+      if _BiosInfoHardwareFromCpuInfo = '' then
+        _BiosInfoHardwareFromCpuInfo := ParseLine(beg);
+    6:
+      if _Smbios[sbiSerial] = '' then
+        _Smbios[sbiSerial] := LowerU(TrimU(ParseLine(beg)));
+    7:
+      if cache = nil then
+        cache := ParseLine(beg);
+    8:
+      if _CpuCores = 0 then
+      begin
+        threads := ParseInt(beg);
+        if threads > 0 then
+          _CpuCores := threads;
+      end;
+    9:
+      begin
+        phyid := ParseInt(beg); // in practice, may be 0,3,... and not 0,1,...
+        if phyid < 0 then
+          continue;
+        phyndx := IntegerScanIndex(pointer(phy), _CpuSockets, phyid);
+        if phyndx < 0 then
+        begin
+          AddInteger(phy, integer(_CpuSockets), phyid);
+          SetLength(_CpuSocketsMask, _CpuSockets);
+          phyndx := _CpuSockets - 1;
+        end;
+        if (procid >= 0) and
+           (procid < SizeOf(TCpuSet) shl 3) then
+          SetBitPtr(@_CpuSocketsMask[phyndx], procid);
+      end;
+    {$ifdef CPUARM3264}
+    else if IdemPChar(beg, 'CPU IMPLEMENTER') then
+      ParseHex32Add(beg, aci)
+    else if IdemPChar(beg, 'CPU PART') then
+      ParseHex32Add(beg, act);
+    {$endif CPUARM3264}
+    end;
+  end;
+  {$ifdef CPUARM3264}
+  if act <> nil then // decode CPU part/implementer hexadecimal numbers
+  begin
+    temparm[0] := #0;
+    for i := 0 to high(aci) do
+      ArmCpuImplementerNameAppend(ArmCpuImplementer(aci[i]), aci[i], temparm);
+    FastSetString(CpuArmImplementer, @temparm[1], ord(temparm[0]) - 1);
+    for i := 0 to high(act) do
+      ArmCpuTypeNameAppend(ArmCpuType(act[i]), act[i], temparm);
+    FastSetString(CpuArmModel, @temparm[1], ord(temparm[0]) - 1);
+    modname := pointer(CpuArmModel); // more detailed
+  end;
+  if CpuFeatures = [] then // fallback to /proc/cpuinfo "Features:" text
+  begin
+    if PosEx(' aes', _CpuInfoFeatures) >= 0 then
+      include(CpuFeatures, ahcAes);
+    if PosEx(' pmull', _CpuInfoFeatures) >= 0 then
+      include(CpuFeatures, ahcPmull);
+    if PosEx(' sha1', _CpuInfoFeatures) >= 0 then
+      include(CpuFeatures, ahcSha1);
+    if PosEx(' sha2', _CpuInfoFeatures) >= 0 then
+      include(CpuFeatures, ahcSha2);
+    if PosEx(' crc32', _CpuInfoFeatures) >= 0 then
+      include(CpuFeatures, ahcCrc32);
+  end;
+  {$endif CPUARM3264}
+  if (cache <> nil) and
+     {$ifdef ASMINTEL} (IntelCpuCacheCount = 0) and {$endif}
+     (CpuCache[3].Size = 0) then // if not already from CPUID
+  begin
+    CpuCache[3].Size := _GetNextCardinal(PAnsiChar(cache));
+    while cache^ = ' ' do
+      inc(cache);
+    case cache^ of
+      'k', 'K':
+        cacheshr := 10;
+      'm', 'M':
+        cacheshr := 20;
+      'g', 'G':
+        cacheshr := 30;
+    else
+      cacheshr := 0;
+    end;
+    CpuCache[3].Size := CpuCache[3].Size shl cacheshr;
+    CpuCache[3].LineSize := 64;
+  end;
+  if SystemInfo.dwNumberOfProcessors = 0 then // e.g. QEMU limited /proc/cpuinfo
+    SystemInfo.dwNumberOfProcessors := get_nprocs; // fallback once to libc
+  if SystemInfo.dwNumberOfProcessors = 0 then
+    SystemInfo.dwNumberOfProcessors := 1; // paranoid
+  if _CpuSockets = 0 then
+    _CpuSockets := 1;
+  if _CpuCores = 0 then
+    _CpuCores := SystemInfo.dwNumberOfProcessors;
+  if modname = nil then
+    modname := modnum;
+  result := modname;
+end;
+
+function CpuCores: cardinal;
+begin
+  if _CpuCores = 0 then
+    ReadCpuInfo;
+  result := _CpuCores;
+end;
+
+function CpuSockets: cardinal;
+begin
+  if _CpuSockets = 0 then
+    ReadCpuInfo;
+  result := _CpuSockets;
+end;
+
+function CpuSocketsMask: TCpuSets;
+begin
+  if _CpuSockets = 0 then
+    ReadCpuInfo;
+  result := _CpuSocketsMask;
+end;
+
+function CpuInfoFeatures: RawUtf8;
+begin
+  if _CpuSockets = 0 then
+    ReadCpuInfo;
+  result := _CpuInfoFeatures;
+end;
 
 procedure SetBiosInfoText(var txt: RawUtf8);
 {$ifdef OSLINUX}
@@ -5300,11 +5736,13 @@ begin
               GetSystemProperty('ro.product.name'), ' ',
               GetSystemProperty('ro.product.device')]), txt);
   {$endif OSLINUX}
-  if __BiosInfoHardwareFromCpuInfo <> '' then // e.g. 'Hardware : BCM2709' on RPi3
+  if _CpuSockets = 0 then
+    ReadCpuInfo; // populate _BiosInfoHardwareFromCpuInfo
+  if _BiosInfoHardwareFromCpuInfo <> '' then // e.g. 'Hardware : BCM2709' on RPi3
     if txt = '' then
-      txt := __BiosInfoHardwareFromCpuInfo
+      txt := _BiosInfoHardwareFromCpuInfo
     else
-      txt := Join([txt, ' (', __BiosInfoHardwareFromCpuInfo, ')'])
+      txt := Join([txt, ' (', _BiosInfoHardwareFromCpuInfo, ')'])
   else if txt = '' then
     {$ifdef CPUARM3264}
     if CpuArmModel <> '' then
@@ -5317,10 +5755,19 @@ end;
 
 function BiosInfoText: RawUtf8;
 begin
-  if __BiosInfoText = '' then
-    SetBiosInfoText(__BiosInfoText);
-  result := __BiosInfoText;
+  if _BiosInfoText = '' then
+    SetBiosInfoText(_BiosInfoText);
+  result := _BiosInfoText;
 end;
+
+const // from auxvec.h - note: AT_*_CACHESIZE only for riscv/powerpc
+  AT_PAGESZ        = 6;
+  AT_UID           = 11;
+  AT_GID           = 13;
+  AT_PLATFORM      = 15;
+  AT_CLKTCK        = 17;
+  AT_RANDOM        = 25;
+  AT_EXECFN        = 31;
 
 {$endif OSLINUXANDROID}
 
@@ -5380,27 +5827,20 @@ procedure crc32blocksarm64(crc128, data128: PBlock128; count: integer); external
 procedure InitializeSpecificUnit;
 var
   P: PAnsiChar;
-  modname, modnum, beg: PUtf8Char;
+  modname: PUtf8Char;
   uts: UtsName;
   {$ifndef NODIRECTTHREADMANAGER}
   tm: TThreadManager;
   {$endif NODIRECTTHREADMANAGER}
   {$ifndef OSDARWIN}
-  {$ifdef CPUARM3264}
-  act, aci: TIntegerDynArray;
-  temparm: ShortString;
-  i: PtrInt;
-  {$endif CPUARM3264}
   tpfail: integer;
   tp: array[0 .. 1{$ifdef OSLINUX} + 2{$endif}] of TTimeSpec;
   {$endif OSDARWIN}
   {$ifdef OSBSDDARWIN}
+  beg: PUtf8Char;
   temp1, temp2: ShortString;
   {$else}
-  cache, cpuinfo: PUtf8Char;
   release: RawUtf8;
-  procid, phyid, phyndx, cacheshr, threads: integer;
-  phy: TIntegerDynArray;
   auxv: PPtrUIntArray;
   {$ifdef OSLINUX}
   dist: RawUtf8;
@@ -5421,7 +5861,7 @@ begin
          (crc32carm64(0, @uts, SizeOf(uts)) = crc32cfast(0, @uts, SizeOf(uts))) then
       begin
         crc32c          := @crc32carm64;
-        DefaultHasher   := @crc32carm64;
+        DefaultHasher   := @crc32carm64; // no murmur-like finalizer on ARMv8 yet
         InterningHasher := @crc32carm64;
         crc32cby4       := @crc32cby4arm64;
         crcblock        := @crc32blockarm64;
@@ -5436,7 +5876,7 @@ begin
   {$endif CPUARM3264}
   // retrieve Kernel and Hardware information
   StdOut := StdOutputHandle;
-  modnum := nil;
+  modname := nil;
   {$ifdef OSBSDDARWIN}
   // pure FreeBSD NetBSD MacOS branch
   SystemInfo.dwPageSize := fpsysctlhwint(HW_PAGESIZE);
@@ -5447,8 +5887,6 @@ begin
   if PosChar(beg, ' ') = nil then // e.g. from a Parallels VM
     beg := fpsysctlhwstr(HW_MODEL, temp1);
   modname := fpsysctlbynamestr('machdep.cpu.brand_string', temp2);
-  {$else}
-  modname := nil;
   {$endif OSDARWIN}
   FastSetString(BiosInfoText, beg, StrLen(beg));
   if CpuThreads = 0 then
@@ -5463,20 +5901,12 @@ begin
   CpuCache[2].Size     := fpsysctlhwint(HW_L2CACHESIZE);
   CpuCache[3].LineSize := fpsysctlhwint(HW_CACHELINE);
   CpuCache[3].Size     := fpsysctlhwint(HW_L3CACHESIZE);
-  CpuCacheSize := CpuCache[3].Size;
-  if CpuCacheSize = 0 then
-    CpuCacheSize := CpuCache[2].Size;
-  if CpuCacheSize = 0 then
-    CpuCacheSize := CpuCache[1].Size;
-  if CpuCacheSize <> 0 then
-    _fmt('L1=%s L2=%s L3=%s', [KBNoSpace(CpuCache[1].Size),
-      KBNoSpace(CpuCache[2].Size), KBNoSpace(CpuCache[3].Size)], CpuCacheText);
   SystemMemorySize := fpsysctlhwint(HW_MEMSIZE);
   {$else}
   SystemMemorySize := fpsysctlhwint(HW_PHYSMEM);
   {$endif OSDARWIN}
   {$else}
-  modname := nil;
+  StartupObfuscate := @SystemEntropy.Startup; // for LoadProcFile()
   {$ifdef OSANDROID}
   // pure ANDROID branch
   release := GetSystemProperty('ro.build.version.release');
@@ -5533,140 +5963,54 @@ begin
         OS_KIND := osRpm; // seems RPM-based
   end;
   {$endif OSANDROID}
-  OS_DISTRI := LinuxDistribution(OS_KIND);
-  cache := nil;
-  CpuThreads := 0;
-  CpuInfoLinux := StringFromFileNoSize('/proc/cpuinfo'); // too big for LoadProcFile
-  crc32c128(@SystemEntropy.Startup, pointer(CpuInfoLinux), length(CpuInfoLinux));
-  procid := -1;
-  cpuinfo := pointer(CpuInfoLinux);
-  while cpuinfo <> nil do
-  begin
-    beg := cpuinfo;
-    cpuinfo := GotoNextLine(cpuinfo);
-    case IdemPChars(beg, 'PROCESSOR'#0'MODEL NAME'#0'MODEL'#0'FEATURES'#0'FLAGS'#0 +
-      'HARDWARE'#0'SERIAL'#0'CACHE SIZE'#0'CPU CORES'#0'PHYSICAL ID'#0) of
-    0:
-      if beg^ <> 'P' then
-      begin
-        // loop over all "processor : 0 .. 1 .. 2" lines to count the CPUs
-        inc(CpuThreads);
-        procid := ParseInt(beg);
-        if procid >= integer(CpuThreads) then
-          procid := -1; // paranoid
-      end
-      else if modname = nil then
-        modname := ParseLine(beg); // Processor : ARMv7
-    1:
-      if modname = nil then
-        modname := ParseLine(beg);
-    2:
-      if modnum = nil then
-        modnum := ParseLine(beg);
-    3, 4:
-      if CpuInfoFeatures = '' then
-        CpuInfoFeatures := ParseLine(beg);
-    5:
-      if __BiosInfoHardwareFromCpuInfo = '' then
-        __BiosInfoHardwareFromCpuInfo := ParseLine(beg);
-    6:
-      if _Smbios[sbiSerial] = '' then
-        _Smbios[sbiSerial] := LowerU(TrimU(ParseLine(beg)));
-    7:
-      if cache = nil then
-        cache := ParseLine(beg);
-    8:
-      if CpuCores = 0 then
-      begin
-        threads := ParseInt(beg);
-        if threads > 0 then
-          CpuCores := threads;
-      end;
-    9:
-      begin
-        phyid := ParseInt(beg); // in practice, may be 0,3,... and not 0,1,...
-        if phyid < 0 then
-          continue;
-        phyndx := IntegerScanIndex(pointer(phy), CpuSockets, phyid);
-        if phyndx < 0 then
-        begin
-          AddInteger(phy, integer(CpuSockets), phyid);
-          SetLength(CpuSocketsMask, CpuSockets);
-          phyndx := CpuSockets - 1;
-        end;
-        if (procid >= 0) and
-           (procid < SizeOf(TCpuSet) shl 3) then
-          SetBitPtr(@CpuSocketsMask[phyndx], procid);
-      end;
-    {$ifdef CPUARM3264}
-    else if IdemPChar(beg, 'CPU IMPLEMENTER') then
-      ParseHex32Add(beg, aci)
-    else if IdemPChar(beg, 'CPU PART') then
-      ParseHex32Add(beg, act);
-    {$endif CPUARM3264}
-    end;
-  end;
-  {$ifdef CPUARM3264}
-  if act <> nil then // decode CPU part/implementer hexadecimal numbers
-  begin
-    temparm[0] := #0;
-    for i := 0 to high(aci) do
-      ArmCpuImplementerNameAppend(ArmCpuImplementer(aci[i]), aci[i], temparm);
-    FastSetString(CpuArmImplementer, @temparm[1], ord(temparm[0]) - 1);
-    for i := 0 to high(act) do
-      ArmCpuTypeNameAppend(ArmCpuType(act[i]), act[i], temparm);
-    FastSetString(CpuArmModel, @temparm[1], ord(temparm[0]) - 1);
-    modname := pointer(CpuArmModel); // more detailed
-  end;
-  if CpuFeatures = [] then // fallback to /proc/cpuinfo "Features:" text
-  begin
-    if PosEx(' aes', CpuInfoFeatures) >= 0 then
-      include(CpuFeatures, ahcAes);
-    if PosEx(' pmull', CpuInfoFeatures) >= 0 then
-      include(CpuFeatures, ahcPmull);
-    if PosEx(' sha1', CpuInfoFeatures) >= 0 then
-      include(CpuFeatures, ahcSha1);
-    if PosEx(' sha2', CpuInfoFeatures) >= 0 then
-      include(CpuFeatures, ahcSha2);
-    if PosEx(' crc32', CpuInfoFeatures) >= 0 then
-      include(CpuFeatures, ahcCrc32);
-  end;
-  {$endif CPUARM3264}
-  if cache <> nil then
-  begin
-    TrimU(cache, CpuCacheText);
-    CpuCacheSize := _GetNextCardinal(PAnsiChar(cache));
-    while cache^ = ' ' do
-      inc(cache);
-    case cache^ of
-      'k', 'K':
-        cacheshr := 10;
-      'm', 'M':
-        cacheshr := 20;
-      'g', 'G':
-        cacheshr := 30;
-    else
-      cacheshr := 0;
-    end;
-    CpuCacheSize := CpuCacheSize shl cacheshr;
-  end;
+  // OSLINUXANDROID branch
   SystemInfo.release := release;
-  SystemInfo.dwPageSize := getpagesize; // call libc API on Linux/Android
-  {$endif OSBSDDARWIN}
-  if CpuCacheSize <> 0 then
+  OS_DISTRI := LinuxDistribution(OS_KIND);
+  auxv := pointer(envp); // read auxiliary vectors
+  if auxv <> nil then
   begin
-    _fmt('[%s]', [KBNoSpace(CpuCacheSize)], CpuInfoText);
-    {$ifdef CPUINTEL}
-    with CpuCache[3] do // rough guess without /sys/devices/system/cpu/* lookup
-      if Count = 0 then
-      begin
-        Count := 1;
-        Size := CpuCacheSize;
+    while auxv[0] <> 0 do
+      auxv := @auxv[1];
+    auxv := @auxv[1]; // set by kernel's ELF binary loader after all env PPAnsiChar
+    P := pointer(auxv);
+    while auxv[0] <> 0 do
+    begin
+      case auxv[0] of
+        AT_RANDOM: // 16 random bytes (for stack canaries) since kernel 2.6.29
+          with SystemEntropy do // see https://lwn.net/Articles/519085/
+          begin
+            LiveFeed := PHash128Rec(auxv[1])^; // great initial source from Kernel
+            XorMemory(Startup, PHash128Rec(auxv[1])^); // won't hurt
+          end;
+        AT_PAGESZ:
+          SystemInfo.dwPageSize := auxv[1];
+        AT_UID:
+          PosixUid := auxv[1];
+        AT_GID:
+          PosixGid := auxv[1];
+        AT_PLATFORM:
+          SystemInfo.platform := pointer(auxv[1]);
+        AT_EXECFN:
+          SystemInfo.execfn := pointer(auxv[1]);
+        AT_CLKTCK:
+          SystemInfo.clktck := auxv[1];
       end;
-    {$endif CPUINTEL}
+      auxv := @auxv[2];
+    end;
+    crc32c128(@SystemEntropy.Startup, P, PAnsiChar(auxv) - P); // all auxv info
   end;
-  if CpuSockets = 0 then
-    CpuSockets := 1;
+  {$ifdef ASMINTEL} // Intel/AMD CPUID could avoid reading /proc/cpuinfo
+  if IntelCpuCacheCount <> 0 then
+    SystemInfo.dwNumberOfProcessors := CpuThreads; // sched_getaffinity syscall
+  {$endif ASMINTEL}
+  if SystemInfo.dwNumberOfProcessors = 0 then
+  begin
+    modname := ReadCpuInfo; // need to read /proc/cpuinfo
+    crc32c128(@SystemEntropy.Startup, pointer(CpuInfoLinux), length(CpuInfoLinux));
+  end;
+  {$endif OSBSDDARWIN}
+  if modname <> nil then
+    FastSetString(CpuInfoText, modname, StrLen(modname));
   if fpuname(uts) < 0 then
     FillChar(uts, SizeOf(uts), 0);
   crc32c128(@SystemEntropy.Startup, @uts, SizeOf(uts));
@@ -5675,8 +6019,10 @@ begin
   SystemInfo.uts.version  := uts.Version;
   SystemInfo.uts.nodename := uts.NodeName;
   OSVersionText := Join([SystemInfo.uts.sysname, ' ', SystemInfo.uts.release]);
+  {$ifdef OSLINUXANDROID}
   if SystemInfo.release <> '' then
     OSVersionText := Join([SystemInfo.release, ' - ', OSVersionText]);
+  {$endif OSLINUXANDROID}
   P := @uts.release[0];
   KernelRevision := _GetNextCardinal(P) shl 16 +
                     _GetNextCardinal(P) shl 8 +
@@ -5685,25 +6031,23 @@ begin
   MoveByOne(@KernelRevision, @OSVersion32.utsrelease, 3); // 24-bit
   {$ifdef OSANDROID}
   OSVersionText := Join(['Android (', OSVersionText, ')']);
-  {$else}
-  {$ifdef OSLINUX}
-  if CpuThreads = 0 then // e.g. QEMU limited /proc/cpuinfo
-    CpuThreads := get_nprocs;
-  {$endif OSLINUX}
   {$endif OSANDROID}
-  if CpuThreads = 0 then
-    CpuThreads := 1;
-  if CpuCores = 0 then
-    CpuCores := CpuThreads;
-  SystemInfo.dwNumberOfProcessors := CpuThreads; // Windowism
-  if modname = nil then
-    modname := modnum;
-  if modname = nil then
-    CpuInfoText := _fmt('%d x generic ' + CPU_ARCH_TEXT + ' cpu %s',
-      [CpuThreads, CpuInfoText])
-  else
-    CpuInfoText := _fmt('%d x %s %s (' + CPU_ARCH_TEXT + ')',
-      [CpuThreads, modname, CpuInfoText]);
+  if SystemInfo.dwNumberOfProcessors = 0 then
+    SystemInfo.dwNumberOfProcessors := 1; // at least one CPU
+  if SystemInfo.dwPageSize = 0 then
+    SystemInfo.dwPageSize := 4096; // paranoid - the libc uses AT_PAGESZ also
+  {$ifdef CPUX64}
+  {$ifdef OSLINUX}
+  {$ifndef NOPATCHRTL}
+  // redirect some syscall FPC RTL functions to faster vDSO libc variant
+  {$ifndef FPC_USE_LIBC}
+  RedirectCode(@Linux.clock_gettime, @clock_gettime_c);
+  RedirectCode(@fpgettimeofday, @gettimeofday_c);
+  RedirectCode(@fpc_time, @fptime_c);
+  {$endif FPC_USE_LIBC}
+  {$endif NOPATCHRTL}
+  {$endif OSLINUX}
+  {$endif CPUX64}
   // initialize supported APIs
   TimeZoneLocalBias := -GetLocalTimeOffset; // = Tzseconds div 60
   _Fill256FromOs    := @__Fill256FromOs;
@@ -5772,11 +6116,11 @@ begin
   else if clock_gettime(CLOCK_UPTIME, @tp[3]) <> 0 then
     tpfail := tpfail or 8;
   {$endif OSLINUX}
-  crc32c128(@SystemEntropy.Startup, @tp, SizeOf(tp)); // tp[0..n] in nanoseconds
   // CpuCache, Executable.Hash, CpuFeatures will be added in main mormot.core.os
   if tpfail <> 0 then
     ConsoleErrorWrite(_fmt('clock_gettime(%d) failed on %s - errno=%d',
       [tpfail, OSVersionText, fpgeterrno])); // process is likely to fail anyway
+  crc32c128(@SystemEntropy.Startup, @tp, SizeOf(tp)); // tp[0..n] in nanoseconds
   // direct access to the pthread library if possible (Linux only)
   {$ifdef OSPTHREADSLIB}
   // mutex_lock() is blocking when dlopen run from a .so: cthreads uses both
@@ -5799,41 +6143,7 @@ begin
     {$endif HAS_PTHREADSETAFFINITY}
   end;
   {$endif OSPTHREADSLIB}
-  {$ifdef CPUX64}
-  {$ifdef OSLINUX}
-  {$ifndef NOPATCHRTL}
-  // redirect some syscall FPC RTL functions to faster vDSO libc variant
-  {$ifndef FPC_USE_LIBC}
-  RedirectCode(@Linux.clock_gettime, @clock_gettime_c);
-  // will avoid syscall e.g. for events timeout in cthreads.pp
-  RedirectCode(@fpgettimeofday, @gettimeofday_c);
-  {$endif FPC_USE_LIBC}
-  {$endif NOPATCHRTL}
-  {$endif OSLINUX}
-  {$endif CPUX64}
   {$endif OSDARWIN}
-  {$ifdef OSLINUXANDROID}
-  // add entropy from auxiliary vectors - https://lwn.net/Articles/519085/
-  auxv := pointer(envp);
-  if auxv <> nil then
-  begin
-    while auxv[0] <> 0 do
-      auxv := @auxv[1];
-    auxv := @auxv[1]; // set by kernel's ELF binary loader after all env PPAnsiChar
-    P := pointer(auxv);
-    while auxv[0] <> 0 do
-    begin
-      if auxv[0] = 25 then  // AT_RANDOM: 16 random bytes (used for stacks canary)
-        with SystemEntropy do // should be available from 2.6.29 on glibc
-        begin
-          LiveFeed := PHash128Rec(auxv[1])^; // great initial source from Kernel
-          XorMemory(Startup, PHash128Rec(auxv[1])^); // won't hurt
-        end;
-      auxv := @auxv[2];
-    end;
-    crc32c128(@SystemEntropy.Startup, P, PAnsiChar(auxv) - P); // all auxv info
-  end;
-  {$endif OSLINUXANDROID}
   // CpuCache, Executable.Hash, CpuFeatures will be added in main mormot.core.os
 end;
 

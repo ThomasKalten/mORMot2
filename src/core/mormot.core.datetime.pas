@@ -37,13 +37,13 @@ uses
 /// convert a size to a human readable value
 // - append EB, PB, TB, GB, MB, KB or B symbol with or without preceding space
 // - for EB, PB, TB, GB, MB and KB, add one fractional digit
-function KB(bytes: Int64; nospace: boolean): TShort16; overload;
+function KB(bytes: Int64; nospace: boolean): TShort15; overload;
   {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
 
 /// convert a string size to a human readable value
 // - append EB, PB, TB, GB, MB, KB or B symbol
 // - for EB, PB, TB, GB, MB and KB, add one fractional digit
-function KB(const buffer: RawByteString): TShort16; overload;
+function KB(const buffer: RawByteString): TShort15; overload;
   {$ifdef FPC_OR_UNICODE}inline;{$endif}
 
 /// convert a size to a human readable value
@@ -53,42 +53,42 @@ procedure KBU(bytes: Int64; var result: RawUtf8);
 
 /// convert a count to a human readable value power-of-two metric value
 // - append E, P, T, G, M, K symbol, with one fractional digit
-procedure K(value: Int64; out result: TShort16); overload;
+procedure KVar(value: Int64; var result: ShortString);
 
 /// convert a count to a human readable value power-of-two metric value
 // - append E, P, T, G, M, K symbol, with one fractional digit
-function K(value: Int64): TShort16; overload;
+function K(value: Int64): TShort15; 
   {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
 
 /// convert a seconds elapsed time into a human readable value
 // - append 's', 'm', 'h' and 'd' symbol for the given value range,
 // with two fractional digits
-function SecToString(S: QWord): TShort16;
+function SecToString(S: QWord): TShort15;
   {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
 
 /// convert a milliseconds elapsed time into a human readable value
 // - append 'ms', 's', 'm', 'h' and 'd' symbol for the given value range,
 // with two fractional digits
-function MilliSecToString(MS: QWord): TShort16;
+function MilliSecToString(MS: QWord): TShort15;
   {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
 
 /// convert a micro seconds elapsed time into a human readable value
 // - append 'us', 'ms', 's', 'm', 'h' and 'd' symbol for the given value range,
 // with two fractional digits
-function MicroSecToString(Micro: QWord): TShort16; overload;
+function MicroSecToString(Micro: QWord): TShort15; 
   {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
 
 /// compute elapsed time into a human readable value, from a Start value
 // - will get current QueryPerformanceMicroSeconds() and compute against Start
 // - append 'us', 'ms', 's', 'm', 'h' and 'd' symbol for the given value range,
 // with two fractional digits
-function MicroSecFrom(Start: QWord): TShort16;
+function MicroSecFrom(Start: QWord): TShort15;
   {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
 
 /// convert a micro seconds elapsed time into a human readable value
 // - append 'us', 'ms', 's', 'm', 'h' and 'd' symbol for the given value range,
 // with two fractional digits
-procedure MicroSecToString(Micro: QWord; out result: TShort16); overload;
+procedure MicroSecToStringVar(Micro: QWord; var result: ShortString); 
 
 /// convert a micro seconds elapsed time into a human readable value
 // - append 'us', 'ms', 's', 'm', 'h' and 'd' symbol for the given value range,
@@ -98,7 +98,7 @@ function MicroSecToText(Micro: QWord): RawUtf8;
 /// convert a nano seconds elapsed time into a human readable value
 // - append 'ns', 'us', 'ms', 's', 'm', 'h' and 'd' symbol for the given value
 // range, with two fractional digits
-procedure NanoSecToString(Nano: QWord; out result: TShort16);
+procedure NanoSecToString(Nano: QWord; var result: ShortString);
 
 /// convert "valueunit" values into x or x.xx text with up to 2 digits
 // - supplied value should be the actual unit value * 100
@@ -229,7 +229,7 @@ function DateTimeToIso8601(D: TDateTime; Expanded: boolean; FirstChar: AnsiChar 
 procedure DateTimeToIso8601Var(D: TDateTime; Expanded, WithMS: boolean;
   FirstChar, QuotedChar: AnsiChar; var Result: RawUtf8);
 
-/// raw basic Date/Time conversion into ISO-8601 shortstring
+/// raw basic Date/Time conversion into ISO-8601 ShortString
 function DateTimeToIso8601Short(D: TDateTime; Expanded: boolean = true;
   WithMS: boolean = false; FirstChar: AnsiChar = 'T';
   QuotedChar: AnsiChar = #0): TShort31;
@@ -498,7 +498,7 @@ type
   PSynDate = ^TSynDate;
 
   /// a cross-platform and cross-compiler TSystemTime 128-bit structure
-  // - FPC's TSystemTime in datih.inc does NOT match Windows TSystemTime fields!
+  // - on POSIX TSystemTime definition for Delphi or FPC do NOT match Windows'
   // - also used to store a Date/Time in TSynTimeZone internal structures, or
   // for fast conversion from TDateTime to its ready-to-display members
   // - DayOfWeek field is not handled by most methods by default, but could be
@@ -644,7 +644,7 @@ type
     /// convert the stored date and time into a timestamped local file name
     // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits,
     // expecting a date > 1999 (a current date would be fine)
-    procedure ToFileShort(out result: TShort16);
+    procedure ToFileShort(var result: ShortString);
     /// convert the stored date and time into e.g. '19 Mar 2025, 13:56:52'
     procedure ToHuman(var Text: RawUtf8);
     /// fill the DayOfWeek field from the stored Year/Month/Day
@@ -741,6 +741,10 @@ function DateTimeMSToString(HH, MM, SS, MS, Y, M, D: cardinal; Expanded: boolean
 // using TSynTimeZone.LocalToUtc, or tz should be properly set
 function DateTimeToHttpDate(dt: TDateTime; const tz: RawUtf8 = 'GMT'): RawUtf8; overload;
 
+/// convert some date/time to the "HTTP-date" format as defined by RFC 7231
+function DateTimeToHttpDateShort(dt: TDateTime; const tz: RawUtf8 = 'UTC'): TShort31;
+  {$ifdef HASINLINE} inline; {$endif}
+
 /// convert some "HTTP-date" format as defined by RFC 7231 into date/time
 // - wrapper around TSynSystemTime.FromHttpDate() conversion algorithm
 function HttpDateToDateTime(const httpdate: RawUtf8; var datetime: TDateTime;
@@ -767,7 +771,7 @@ type
 
 /// returns the current UTC timestamp as the full 'Date' HTTP header line
 // - e.g. as 'Date: Tue, 15 Nov 1994 12:45:26 GMT'#13#10
-// - returns as a 40-bytes shortstring to avoid a memory allocation by caller
+// - returns as a 40-bytes ShortString to avoid a memory allocation by caller
 // - use an internal cache for every second refresh
 function HttpDateNowUtc(Tix64: Int64 = 0): THttpDateNowUtc;
 
@@ -778,17 +782,17 @@ procedure UnixMSTimeUtcToHttpDate(UnixMSTime: TUnixMSTime; var Text: TShort31);
 /// convert some TDateTime to a small text layout, perfect e.g. for naming a local file
 // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits, expecting
 // a date > 1999 (a current date would be fine)
-function DateTimeToFileShort(const DateTime: TDateTime): TShort16;
+function DateTimeToFileShort(const DateTime: TDateTime): TShort15;
   {$ifdef FPC_OR_UNICODE} inline;{$endif} // Delphi 2007 is buggy as hell
 
 /// convert some TDateTime to a small text layout, perfect e.g. for naming a local file
 // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits, expecting
 // a date > 1999 (a current date would be fine)
-procedure DateTimeToFileShortVar(const DateTime: TDateTime; out result: TShort16);
+procedure DateTimeToFileShortVar(const DateTime: TDateTime; var result: ShortString);
 
 /// get the current time a small text layout, perfect e.g. for naming a file
 // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits
-function NowToFileShort(localtime: boolean = false): TShort16;
+function NowToFileShort(localtime: boolean = false): TShort15;
 
 /// get the current year/month a small text layout
 // - use 'YYYYMM' format, perfect e.g. for naming a per-month metrics file
@@ -863,13 +867,13 @@ function UnixTimeToString(const UnixTime: TUnixTime; Expanded: boolean = true;
 // a small text layout, perfect e.g. for naming a local file
 // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits, expecting
 // a date > 1999 (a current date would be fine)
-procedure UnixTimeToFileShort(const UnixTime: TUnixTime; out result: TShort16); overload;
+procedure UnixTimeToFileShortVar(const UnixTime: TUnixTime; var result: ShortString);
 
 /// convert some second-based c-encoded time (from Unix epoch 1/1/1970) to
 // a small text layout, perfect e.g. for naming a local file
 // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits, expecting
 // a date > 1999 (a current date would be fine)
-function UnixTimeToFileShort(const UnixTime: TUnixTime): TShort16; overload;
+function UnixTimeToFileShort(const UnixTime: TUnixTime): TShort15; 
   {$ifdef FPC_OR_UNICODE} inline;{$endif} // Delphi 2007 is buggy as hell
 
 /// convert some second-based c-encoded time to the ISO 8601 text layout, either
@@ -904,7 +908,7 @@ function UnixMSTimeToString(const UnixMSTime: TUnixMSTime; Expanded: boolean = t
 // naming a local file
 // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits, expecting
 // a date > 1999 (a current date would be fine)
-function UnixMSTimeToFileShort(const UnixMSTime: TUnixMSTime): TShort16;
+function UnixMSTimeToFileShort(const UnixMSTime: TUnixMSTime): TShort15;
   {$ifdef FPC_OR_UNICODE} inline;{$endif} // Delphi 2007 is buggy as hell
 
 /// convert some millisecond-based c-encoded time to the ISO 8601 text layout,
@@ -1275,13 +1279,13 @@ Uses Mormot.core.posix.delphi;
 
 { ************ Size and Elapsed Time to Text Conversion }
 
-function KB(bytes: Int64; nospace: boolean): TShort16;
+function KB(bytes: Int64; nospace: boolean): TShort15;
 begin
   result[0] := #0;
   AppendKb(bytes, result, not nospace);
 end;
 
-function KB(const buffer: RawByteString): TShort16;
+function KB(const buffer: RawByteString): TShort15;
 begin
   result[0] := #0;
   AppendKb(length(buffer), result, {withspace=}true);
@@ -1289,24 +1293,25 @@ end;
 
 procedure KBU(bytes: Int64; var result: RawUtf8);
 var
-  tmp: TShort16;
+  tmp: TShort15;
 begin
   tmp[0] := #0;
   AppendKb(bytes, tmp, {withspace=}true);
   FastSetString(result, @tmp[1], ord(tmp[0]));
 end;
 
-procedure K(value: Int64; out result: TShort16);
+procedure KVar(value: Int64; var result: ShortString);
 begin
   result[0] := #0;
   AppendKb(value, result, {withspace=}false);
-  if result[0] <> #0 then
+  if (result[0] <> #0) and
+     (result[ord(result[0])] = 'B') then
     dec(result[0]); // just trim last 'B' ;)
 end;
 
-function K(value: Int64): TShort16;
+function K(value: Int64): TShort15;
 begin
-  K(Value, result);
+  KVar(Value, result);
 end;
 
 function IntToThousandString(Value: PtrInt; const Sep: ShortString): TShort31;
@@ -1325,27 +1330,27 @@ begin
     insert('-', result, 1); // seldom called
 end;
 
-function SecToString(S: QWord): TShort16;
+function SecToString(S: QWord): TShort15;
 begin
-  MicroSecToString(S * MicroSecsPerSec, result);
+  MicroSecToStringVar(S * MicroSecsPerSec, result);
 end;
 
-function MilliSecToString(MS: QWord): TShort16;
+function MilliSecToString(MS: QWord): TShort15;
 begin
-  MicroSecToString(MS * MicroSecsPerMilliSec, result);
+  MicroSecToStringVar(MS * MicroSecsPerMilliSec, result);
 end;
 
-function MicroSecToString(Micro: QWord): TShort16;
+function MicroSecToString(Micro: QWord): TShort15;
 begin
-  MicroSecToString(Micro, result);
+  MicroSecToStringVar(Micro, result);
 end;
 
-function MicroSecFrom(Start: QWord): TShort16;
+function MicroSecFrom(Start: QWord): TShort15;
 var
   stop: Int64;
 begin
   QueryPerformanceMicroSeconds(stop);
-  MicroSecToString(stop - Int64(Start), result);
+  MicroSecToStringVar(stop - Int64(Start), result);
 end;
 
 procedure AppendShortBy100(value: cardinal; const valueunit: ShortString;
@@ -1355,6 +1360,8 @@ var
 begin
   if value < 100 then
   begin
+    if ord(result[0]) + 4 > high(result) then
+      exit;
     PCardinal(PAnsiChar(@result) + ord(result[0]) + 1)^ :=
       ord('0') + ord('.') shl 8 + cardinal(TwoDigitLookupW[value]) shl 16;
     inc(result[0], 4);
@@ -1365,8 +1372,8 @@ begin
     AppendShortCardinal(d100.d, result);
     if d100.m <> 0 then
     begin
-      AppendShortChar('.', @result);
-      AppendShortTwoChars(TwoDigitLookupW[d100.m], @result);
+      AppendShortCharSafe('.', result);
+      AppendShortTwoCharsSafe(TwoDigitLookupW[d100.m], result);
     end;
   end;
   AppendShort(valueunit, result)
@@ -1380,10 +1387,10 @@ begin
   d := value div 60;
   AppendShortCardinal(d, result);
   AppendShort(u, result);
-  AppendShortTwoChars(TwoDigitLookupW[value - (d * 60)], @result);
+  AppendShortTwoCharsSafe(TwoDigitLookupW[value - (d * 60)], result);
 end;
 
-procedure MicroSecToString(Micro: QWord; out result: TShort16);
+procedure MicroSecToStringVar(Micro: QWord; var result: ShortString);
 begin
   result[0] := #0;
   if Int64(Micro) <= 0 then // warning: QWord=Int64 on pre-Unicode Delphi
@@ -1391,9 +1398,9 @@ begin
   else if Int64(Micro) < 1000 then
   begin
     AppendShortCardinal(Micro, result);
-    AppendShortTwoChars(ord('u') + ord('s') shl 8, @result);
+    AppendShortTwoCharsSafe(ord('u') + ord('s') shl 8, result);
   end
-  else if Micro < 1000000 then
+  else if Micro < MicroSecsPerSec then
     AppendShortBy100(
       {$ifdef CPU32} PCardinal(@Micro)^ {$else} Micro {$endif} div 10, 'ms', result)
   else if Micro < 60000000 then
@@ -1402,24 +1409,24 @@ begin
   else if Micro < QWord(3600000000) then
     AppendShortTime(
       {$ifdef CPU32} PCardinal(@Micro)^ {$else} Micro {$endif} div 1000000, 'm', result)
-  else if Micro < QWord(86400000000 * 2) then
+  else if Micro < QWord(MicroSecsPerDay * 2) then
     AppendShortTime(Micro div 60000000, 'h', result)
   else
   begin
-    AppendShortCardinal(Micro div QWord(86400000000), result);
-    AppendShortChar('d', @result);
+    AppendShortCardinal(Micro div MicroSecsPerDay, result);
+    AppendShortCharSafe('d', result);
   end;
 end;
 
 function MicroSecToText(Micro: QWord): RawUtf8;
 var
-  tmp: TShort16;
+  tmp: TShort15;
 begin
-  MicroSecToString(Micro, tmp);
+  MicroSecToStringVar(Micro, tmp);
   FastSetString(result, @tmp[1], ord(tmp[0]));
 end;
 
-procedure NanoSecToString(Nano: QWord; out result: TShort16);
+procedure NanoSecToString(Nano: QWord; var result: ShortString);
 begin
   result[0] := #0;
   if Int64(Nano) <= 0 then // warning: QWord=Int64 on pre-Unicode Delphi
@@ -1427,13 +1434,13 @@ begin
   else if Nano < 1000 then
   begin
     AppendShortCardinal(Nano, result);
-    AppendShortTwoChars(ord('n') + ord('s') shl 8, @result);
+    AppendShortTwoCharsSafe(ord('n') + ord('s') shl 8, result);
   end
   else if Nano < 1000000 then
     AppendShortBy100(
       {$ifdef CPU32} PCardinal(@Nano)^ {$else} Nano {$endif} div 10, 'us', result)
   else
-    MicroSecToString(Nano div NanoSecsPerMicroSec, result);
+    MicroSecToStringVar(Nano div NanoSecsPerMicroSec, result);
 end;
 
 
@@ -1949,7 +1956,7 @@ end;
 procedure DateTimeToIso8601Var(D: TDateTime; Expanded, WithMS: boolean;
   FirstChar, QuotedChar: AnsiChar; var Result: RawUtf8);
 var
-  tmp: array[0 .. 31] of AnsiChar;
+  tmp: TTemp32;
 begin
   // D=0 is handled in DateTimeToIso8601Text()
   FastSetString(result, @tmp,
@@ -1964,11 +1971,6 @@ begin
   else
     result[0] := AnsiChar(DateTimeToIso8601(
                 @result[1], D, Expanded, FirstChar, WithMS, QuotedChar));
-end;
-
-function _DoDateTimeToText(dt: TDateTime): RawUtf8;
-begin // faster version to be injected in mormot.core.os.pas instead of RTL
-  DateTimeToIso8601Var(dt, {expanded=}true, {withms=}false, ' ', #0, result);
 end;
 
 function DateToIso8601(Date: TDateTime; Expanded: boolean): RawUtf8;
@@ -2085,10 +2087,8 @@ begin
         Value := TVarData(V).VSingle;
       varCurrency:
         Value := TVarData(V).VCurrency;
-      {$ifdef OSWINDOWS}
-      varOleFileTime:
+      varOleFileTime: // may appear on POSIX e.g. for mormot.lib.win7zip
         Value := FileTimeToDateTime(PFileTime(@TVarData(V).VInt64)^);
-      {$endif OSWINDOWS}
       varString:
         begin
           Iso8601ToDateTimePUtf8CharVar(TVarData(V).VString,
@@ -2121,7 +2121,7 @@ const
     -5, -6, -6, -7, -7, -8, -8, -9, -9,
     -10, -10, -10, -10, -11, -12, -12);
 
-  HTML_MONTH_NAMES_32: array[0..11] of array[0..3] of AnsiChar = (
+  HTML_MONTH_NAMES_32: array[0..11] of TTemp4 = (
     'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
     'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC');
 
@@ -2822,9 +2822,11 @@ begin
      (zone <> 0) then
   begin
     // need to apply some time zone shift
+    dt := ToDateTime;
+    if zone <> 0 then
+      dt := dt - zone div MinsPerDay;
     if tolocaltime then
-      dec(zone, TimeZoneLocalBias);
-    dt := ToDateTime - zone div MinsPerDay;
+      dt := UtcToLocal(dt);
     v := abs(zone mod MinsPerDay);
     if not TryEncodeTime(v div 60, v mod 60, 0, 0, t) then
       exit;
@@ -3057,7 +3059,7 @@ begin
   date := PSynDate(@self)^; // first 4 fields do match
 end;
 
-procedure TSynSystemTime.ToFileShort(out result: TShort16);
+procedure TSynSystemTime.ToFileShort(var result: ShortString);
 var
   {$ifdef CPUX86NOTPIC}
   tab: TWordArray absolute TwoDigitLookupW;
@@ -3065,7 +3067,8 @@ var
   tab: PWordArray;
   {$endif CPUX86NOTPIC}
 begin
-  if IsZero then
+  if IsZero or
+     (high(result) < 12) then
   begin
     PWord(@result[0])^ := 1 + ord('0') shl 8;
     exit;
@@ -3257,6 +3260,19 @@ begin
   end;
 end;
 
+function DateTimeToHttpDateShort(dt: TDateTime; const tz: RawUtf8): TShort31;
+var
+  T: TSynSystemTime;
+begin
+  if dt = 0 then
+    result[0] := #0
+  else
+  begin
+    T.FromDateTime(dt);
+    T.ToHttpDateShort(result, tz);
+  end;
+end;
+
 function HttpDateToDateTime(const httpdate: RawUtf8; var datetime: TDateTime;
   tolocaltime: boolean): boolean;
 var
@@ -3362,12 +3378,12 @@ begin
   result := bits.Text(true, ' ');
 end;
 
-function DateTimeToFileShort(const DateTime: TDateTime): TShort16;
+function DateTimeToFileShort(const DateTime: TDateTime): TShort15;
 begin
   DateTimeToFileShortVar(DateTime, result);
 end;
 
-procedure DateTimeToFileShortVar(const DateTime: TDateTime; out result: TShort16);
+procedure DateTimeToFileShortVar(const DateTime: TDateTime; var result: ShortString);
 var
   T: TSynSystemTime;
 begin
@@ -3382,7 +3398,7 @@ begin
   end;
 end;
 
-function NowToFileShort(localtime: boolean): TShort16;
+function NowToFileShort(localtime: boolean): TShort15;
 var
   T: TSynSystemTime;
 begin
@@ -3477,7 +3493,7 @@ end;
 
 function DateTimeToUnixTime(const AValue: TDateTime): TUnixTime;
 begin
-  result := Round((AValue - UnixDateDelta) * SecsPerDay);
+  result := round((AValue - UnixDateDelta) * SecsPerDay);
 end;
 
 function UnixTimeToString(const UnixTime: TUnixTime; Expanded: boolean;
@@ -3488,7 +3504,7 @@ begin
     Expanded, false, FirstTimeChar, #0, result);
 end;
 
-procedure UnixTimeToFileShort(const UnixTime: TUnixTime; out result: TShort16);
+procedure UnixTimeToFileShortVar(const UnixTime: TUnixTime; var result: ShortString);
 begin
   // use 'YYMMDDHHMMSS' format
   if UnixTime <= 0 then
@@ -3497,14 +3513,14 @@ begin
     DateTimeToFileShortVar(UnixTime * SecsPerDate + UnixDateDelta, result);
 end;
 
-function UnixTimeToFileShort(const UnixTime: TUnixTime): TShort16;
+function UnixTimeToFileShort(const UnixTime: TUnixTime): TShort15;
 begin
-  UnixTimeToFileShort(UnixTime, result);
+  UnixTimeToFileShortVar(UnixTime, result);
 end;
 
-function UnixMSTimeToFileShort(const UnixMSTime: TUnixMSTime): TShort16;
+function UnixMSTimeToFileShort(const UnixMSTime: TUnixMSTime): TShort15;
 begin
-  UnixTimeToFileShort(UnixMSTime div MilliSecsPerSec, result);
+  UnixTimeToFileShortVar(UnixMSTime div MilliSecsPerSec, result);
 end;
 
 function UnixTimePeriodToString(const UnixTime: TUnixTime;
@@ -3544,7 +3560,7 @@ begin
   if AValue = 0 then
     result := 0
   else
-    result := Round((AValue - UnixDateDelta) * MilliSecsPerDay);
+    result := round((AValue - UnixDateDelta) * MilliSecsPerDay);
 end;
 
 function UnixMSTimeToString(const UnixMSTime: TUnixMSTime; Expanded: boolean;
@@ -3868,13 +3884,12 @@ end;
 
 procedure TTimeLogBits.SetText(var Dest: RawUtf8; Expanded: boolean; FirstTimeChar: AnsiChar);
 var
-  tmp: array[0..31] of AnsiChar;
+  tmp: TTemp32;
 begin
   if Value = 0 then
     FastAssignNew(Dest)
   else
-    FastSetString(Dest, @tmp,
-      FillText(@tmp, Expanded, FirstTimeChar) - PUtf8Char(@tmp));
+    FastSetString(Dest, @tmp, FillText(@tmp, Expanded, FirstTimeChar));
 end;
 
 function TTimeLogBits.FullText(Dest: PUtf8Char; Expanded: boolean;
@@ -3908,10 +3923,9 @@ end;
 function TTimeLogBits.FullText(Expanded: boolean;
   FirstTimeChar, QuotedChar: AnsiChar): RawUtf8;
 var
-  tmp: array[0..31] of AnsiChar;
+  tmp: TTemp32;
 begin
-  FastSetString(result, @tmp,
-    FullText(tmp{%H-}, Expanded, FirstTimeChar, QuotedChar) - PUtf8Char(@tmp));
+  FastSetString(result, @tmp, FullText(tmp{%H-}, Expanded, FirstTimeChar, QuotedChar));
 end;
 
 function TTimeLogBits.i18nText: string;
@@ -4106,7 +4120,7 @@ end;
 procedure TTextDateWriter.AddSpaced(Value: QWord; Width: PtrInt; SepChar: AnsiChar);
 var
   tmp: TTemp24;
-  alt: TShort16;
+  alt: TShort15;
   p: PAnsiChar;
   len: PtrInt;
 begin
@@ -4114,7 +4128,7 @@ begin
   len := @tmp[23] - p;
   if len > Width then
   begin
-    K(Value, alt); // truncate to xxxK or xxxM
+    KVar(Value, alt); // truncate to xxxK or xxxM
     p := @alt[1];
     len := ord(alt[0]);
   end;
@@ -4344,7 +4358,7 @@ label
 begin
   // fast decode 00.020.006 at the end of the line
   tab := @ConvertHexToBin;
-  B := tab[P[0]];   // 00
+  B := tab[P[0]];   // 00 seconds
   if B > 9 then
     goto err;
   result := B;
@@ -4352,7 +4366,7 @@ begin
   if B > 9 then
     goto err;
   result := result * 10 + B;
-  B := tab[P[3]]; // 020
+  B := tab[P[3]]; // 020 milliseconds
   if B > 9 then
     goto err;
   result := result * 10 + B;
@@ -4364,7 +4378,7 @@ begin
   if B > 9 then
     goto err;
   result := result * 10 + B;
-  B := tab[P[7]]; // 006
+  B := tab[P[7]]; // 006 microseconds
   if B > 9 then
     goto err;
   result := result * 10 + B;
@@ -4445,7 +4459,6 @@ begin
 end;
 
 
-
 procedure InitializeUnit;
 begin
   // as expected by ParseMonth() to call FindShortStringListNoTrim()
@@ -4455,7 +4468,6 @@ begin
   // some mormot.core.text wrappers are implemented by this unit
   _VariantToUtf8DateTimeIso8601 := DateTimeToIso8601TextVar;
   _Iso8601ToDateTime            := Iso8601ToDateTime;
-  DoDateTimeToText              := _DoDateTimeToText;
 end;
 
 

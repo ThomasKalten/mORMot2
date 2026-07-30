@@ -316,8 +316,11 @@ type
   THttpRequestStates = set of THttpRequestState;
 
   /// customize THttpRequestContext process
+  // - hroHeadersUnfiltered will store all headers in memory, even the most common
+  // - hroHeadersSanitize will ensure that no #0 appear in any header line
   THttpRequestOptions = set of (
-    hroHeadersUnfiltered);
+    hroHeadersUnfiltered,
+    hroHeadersSanitize);
 
   /// map the presence of some HTTP headers for THttpRequestContext.HeaderFlags
   // - separated from THttpRequestResponseFlags so that they would both be stored
@@ -381,6 +384,7 @@ type
       nointern: boolean);
     function ProcessParseLine(var st: TProcessParseLine): boolean;
       {$ifdef HASINLINE} inline; {$endif}
+    function DoProcessParseLine(var st: TProcessParseLine; Len: PtrInt): boolean;
     function ParseHttp(P: PUtf8Char): boolean;
       {$ifdef HASINLINE} inline; {$endif}
     procedure GetTrimmed(P, P2: PUtf8Char; L: PtrInt; var result: RawUtf8;
@@ -618,7 +622,8 @@ type
     // and HeaderFlags fields since HeaderGetValue() would return ''
     // - force HeadersUnFiltered=true to store all headers including the
     // connection-related fields, but increase memory and reduce performance
-    function GetHeader(HeadersUnFiltered: boolean = false): boolean;
+    function GetHeader(HeadersUnFiltered: boolean = false;
+      NoHttpReset: boolean = false): boolean;
     /// retrieve the HTTP body (after uncompression if necessary)
     // - into Content or DestStream
     procedure GetBody(DestStream: TStream = nil);
@@ -641,6 +646,20 @@ type
       {$ifdef HASINLINE} inline; {$endif}
   end;
 
+var
+  /// reject any HTTP header line which is > 8KB
+  MaxHttpHeaderLineSize: integer = 8 shl 10;
+
+  /// reject any HTTP "Content-Length: chunked" part bigger than 256 MB
+  // - often 8KB–128KB by default on Apache/nginx, sometimes up to a few MB
+  // - used by THttpSocket.GetBody and THttpRequestContext.ProcessRead
+  MaxHttpChunkSize: integer = 256 shl 20;
+
+  /// reject any Content: RawByteString bigger than 1 GB
+  // - for such huge payloads, please consider a TStream
+  // - used by THttpSocket.GetBody and THttpRequestContext.ProcessRead
+  // - could be lowered down on untrusted systems to avoid DoS attacks
+  MaxHttpInMemSize: Int64 = 1 shl 30;
 
 
 { ******************** Abstract Server-Side Types e.g. for Client-Server Protocol }
@@ -2329,9 +2348,8 @@ type
   // - Find() method allows to quickly retrieve any range of information for
   // a given time period and metric type
   // - supports up to 10,485,760 metrics per instance (see HTTPMETRICS_MAXCOUNT)
-  THttpMetrics = class(TSynPersistent)
+  THttpMetrics = class(TObjectLightLock)
   protected
-    fSafe: TLightLock;
     fCount: integer;
     fPeriodLastCount: integer;
     fState: TRawByteStringGroup; // avoid in-memory fragmentation
@@ -2438,9 +2456,6 @@ type
     // file content, as plain text or JSON
     property Metadata: RawUtf8
       read fMetadata write fMetadata;
-    /// access to the thread-safety NOT reentrant lock
-    property Safe: TLightLock
-      read fSafe write fSafe;
   published
     /// how many rows are currently in State[] memory buffer
     property Count: integer
@@ -3696,8 +3711,9 @@ function THttpRequestContext.ParseHttp(P: PUtf8Char): boolean;
 begin
   result := false;
   if (PCardinal(P)^ <> HTTP_32) or
-     (PCardinal(P + 4)^ and $ffffff <> ord('/') + ord('1') shl 8 + ord('.') shl 16) then
-    exit;
+     (PCardinal(P + 3)^ <> ord('P') + ord('/') shl 8 + ord('1') shl 16 +
+                           ord('.') shl 24) then
+    exit; // RFC 9112 requires 'HTTP/1.0' or 'HTTP/1.1'
   if P[7] <> '1' then
     include(ResponseFlags, rfHttp10);
   if not (hfConnectionClose in HeaderFlags) then
@@ -3708,7 +3724,7 @@ begin
 end;
 
 var
-  _GETVAR, _POSTVAR, _HEADVAR: RawUtf8;
+  _GETVAR, _POSTVAR, _HEADVAR: RawUtf8; // no memory alloc for most verbs
 
 function THttpRequestContext.ParseCommand: boolean;
 var
@@ -3731,57 +3747,54 @@ begin
       end;
     POST_32:
       begin
+        if P[4] <> ' ' then
+          exit;
         CommandMethod := _POSTVAR;
         inc(P, 5);
       end;
     HEAD_32:
       begin
+        if P[4] <> ' ' then
+          exit;
         CommandMethod := _HEADVAR;
         inc(P, 5);
       end;
   else
     begin
-      B := P;
-      while true do
-        if P^ = ' ' then
-          break
-        else if P^ = #0 then
-          exit
+      L := 0;
+      while P[L] in ['!' .. 'z'] do // allow rough RFC token but reject binary
+        if L > 32 then
+          exit // invalid input (method name should be short and uppercase)
         else
-          inc(P);
-      L := P - B;
-      if L > 10 then
-        exit; // clearly invalid input (method name should be short)
-      SetRawUtf8(CommandMethod, B, L, {nointern=}false);
-      inc(P);
+          inc(L);
+      if (L = 0) or // e.g. TLS handshake first byte is #22 so would make L=0
+         (P[L] <> ' ') then
+        exit; // found early #0 or invalid binary/content
+      SetRawUtf8(CommandMethod, P, L, {nointern=}false);
+      inc(P, L + 1);
     end;
   end;
-  // parse CommandUri and HTTP/1.x
-  B := P;
+  // extract CommandUri and check HTTP/1.x trailer
   if (PCardinal(P)^ = HTTP__32) and
-     (PCardinal(P + 4)^ and $ffffff = HTTP__24) then
+     (PCardinal(P + 3)^ = ord('p') + HTTP__24 shl 8) then // absolute-URI
   begin
-    // absolute-URI from https://datatracker.ietf.org/doc/html/rfc7230#section-5.3.2
-    P := PosChar(P + 7, '/'); // use fast SSE2 asm on x86_64
+    // e.g. 'GET http://www.example.org/pub/WWW/TheProject.html HTTP/1.1'
+    // see https://datatracker.ietf.org/doc/html/rfc7230#section-5.3.2
+    P := PosChar(P + 7, '/'); // may use SSE2
     if P = nil then
-      P := B // paranoid
-    else
-      B := P;
+      exit; // should point to '/pub/WWW/TheProject.html HTTP/1.1'
   end;
-  while true do
-    if P^ = ' ' then
-      break
-    else if P^ = #0 then
-      exit
-    else
-      inc(P);
+  B := P;
+  P := PosChar(P, ' '); // may use SSE2
+  if P = nil then
+    exit; // invalid early #0
   L := P - B;
-  result := ParseHttp(P + 1); // parse HTTP/1.x just after P^ = ' '
+  if (L = 0) or                // paranoid (malformatted content)
+     not ParseHttp(P + 1) then // parse HTTP/1.x just after P^ = ' '
+    exit;
   MoveFast(B^, pointer(CommandUri)^, L); // in-place extract URI from Command
-  if L = 0 then
-    FastAssignNew(CommandUri) // paranoid (malformatted content)
-  else
-    FakeLength(CommandUri, L);
+  FakeLength(CommandUri, L);             // reuse: no new memory allocation
+  result := true;
 end;
 
 function THttpRequestContext.ParseResponse(out RespStatus: integer): boolean;
@@ -3858,32 +3871,49 @@ begin
     FastSetString(res, P, PLen);
 end;
 
+function THttpRequestContext.DoProcessParseLine(var st: TProcessParseLine;
+  Len: PtrInt): boolean;
+var
+  P: PUtf8Char;
+begin
+  result := false;
+  if Len > MaxHttpHeaderLineSize then
+  begin
+    State := hrsErrorRejected;
+    exit;
+  end;
+  P := st.P;
+  P[Len] := #0;                // replace ending #13 by #0
+  if (P[Len + 1] <> #10) or    // HTTP requires #13#10 not #10
+     ((hroHeadersSanitize in Options) and
+      (StrLen(P) <> Len)) then
+  begin
+    State := hrsErrorRejected; // missing #10, or #0 within headers lines
+    exit;
+  end;
+  st.Line := P;
+  st.LineLen := Len;
+  inc(Len, 2);  // consume #13 (now #0) and #10 line delimiters
+  inc(st.P, Len);
+  dec(st.Len, Len);
+  result := true;
+  // now we have the next full line in st.Line/st.LineLen
+end;
+
 function THttpRequestContext.ProcessParseLine(var st: TProcessParseLine): boolean;
 var
   Len: PtrInt;
-  P: PUtf8Char;
 begin
   Len := ByteScanIndex(pointer(st.P), st.Len, 13); // fast SSE2 or FPC IndexByte
-  if PtrUInt(Len) < PtrUInt(st.Len) then // handle st.Len=0 and/or Len=-1
-  begin
-    P := st.P;
-    st.Line := P;
-    P[Len] := #0; // replace ending #13 by #0 - HTTP expects #13#10 not #10
-    st.LineLen := Len;
-    inc(Len, 2);  // if char after #13 is not #10, parsing will fail as expected
-    inc(st.P, Len);
-    dec(st.Len, Len);
-    result := true;
-    // now we have the next full line in st.Line/st.LineLen
-  end
-  else
-    result := false; // not enough input
+  result := (PtrUInt(Len) < PtrUInt(st.Len)) and // detect st.Len=0 and/or Len=-1
+            DoProcessParseLine(st, Len);         // enough input: sub-function
 end;
 
 function THttpRequestContext.ProcessRead(
   var st: TProcessParseLine; returnOnStateChange: boolean): boolean;
 var
   previous: THttpRequestState;
+  bytes: Int64;
 begin
   result := false; // not enough input
   if st.Len = 0 then
@@ -3892,13 +3922,16 @@ begin
   repeat
     case State of
       hrsGetCommand:
-        if ProcessParseLine(st) then
-        begin
-          FastSetString(CommandUri, st.Line, st.LineLen); // never interned
-          State := hrsGetHeaders;
-        end
+        if st.P^ in ['!' .. 'z'] then // expects e.g. 'GET /path HTTP/1.1'
+          if ProcessParseLine(st) then
+          begin
+            FastSetString(CommandUri, st.Line, st.LineLen); // never interned
+            State := hrsGetHeaders;
+          end
+          else
+            exit // not enough input or hrsErrorRejected
         else
-          exit; // not enough input
+          State := hrsErrorRejected; // reject e.g. TLS handshake = #22
       hrsGetHeaders:
         if ProcessParseLine(st) then
           if st.LineLen <> 0 then
@@ -3918,28 +3951,37 @@ begin
               // ContentLength<=0 and not chunked = no body
               State := hrsWaitProcessing
         else
-          exit; // not enough input
+          exit; // not enough input or hrsErrorRejected
       hrsGetBodyChunkedHexFirst,
       hrsGetBodyChunkedHexNext:
         if ProcessParseLine(st) then
         begin
           fContentLeft := ParseHex0x(PAnsiChar(st.Line), {noOx=}true);
           if fContentLeft <> 0 then
-          begin
-            if ContentStream = nil then
+            if fContentLeft > MaxHttpChunkSize then // allow up to 256 MB chunk
+              State := hrsErrorPayloadTooLarge
+            else
             begin
-              // reserve appended chunk size to Content memory buffer
-              SetLength(Content, length(Content) + fContentLeft);
-              fContentPos := @PByteArray(Content)[length(Content)];
-            end;
-            inc(ContentLength, fContentLeft);
-            State := hrsGetBodyChunkedData;
-          end
+              if ContentStream = nil then
+              begin
+                // reserve appended chunk size to Content memory buffer
+                bytes := length(Content) + fContentLeft;
+                if bytes > MaxHttpInMemSize then // 1GB in memory max
+                begin
+                  State := hrsErrorPayloadTooLarge; // avoid memory overflow
+                  break;
+                end;
+                SetLength(Content, bytes); // realloc to append new chunk
+                fContentPos := @PByteArray(Content)[length(Content)];
+              end;
+              inc(ContentLength, fContentLeft);
+              State := hrsGetBodyChunkedData;
+            end
           else
-            State := hrsGetBodyChunkedDataLastLine;
+            State := hrsGetBodyChunkedDataLastLine; // ends with last void chunk
         end
         else
-          exit; // not enough input
+          exit; // not enough input or hrsErrorRejected
       hrsGetBodyChunkedData:
         begin
           if st.Len < fContentLeft then
@@ -3982,7 +4024,7 @@ begin
           begin
             if Content = '' then // we need to allocate the result memory buffer
             begin
-              if ContentLength > 1 shl 30 then // 1 GB mem chunk is fair enough
+              if ContentLength > MaxHttpInMemSize then // 1GB in memory max
               begin
                 State := hrsErrorPayloadTooLarge; // avoid memory overflow
                 break;
@@ -4425,13 +4467,14 @@ begin
   R[0] := AnsiChar(L);
 end;
 
-function THttpSocket.GetHeader(HeadersUnFiltered: boolean): boolean;
+function THttpSocket.GetHeader(HeadersUnFiltered, NoHttpReset: boolean): boolean;
 var
   len: integer;
   line: TBuffer8K; // avoid most memory allocations - 8KB seems enough
 begin
   result := false;
-  HttpStateReset;
+  if not NoHttpReset then
+    HttpStateReset; // not needed from THttpServer
   repeat
     len := SockInReadLn(line, SizeOf(line)); // very efficient readln()
     if len <= 0 then // HTTP headers end with a void line
@@ -4457,8 +4500,8 @@ procedure THttpSocket.GetBody(DestStream: TStream);
 var
   chunk: RawUtf8;
   len: PtrInt;
-  remain: Int64;
-  chunksize: array[0..31] of AnsiChar; // 32 bits chunk length in hexa
+  bytes: Int64;
+  chunksize: TTemp32; // 32 bits chunk length in hexa
 begin
   include(fFlags, fBodyRetrieved);
   Http.Content := '';
@@ -4480,16 +4523,21 @@ begin
         SockRecvLn; // ignore next line (normally void)
         break;      // reached the end of input stream
       end;
+      if len > MaxHttpChunkSize then // allow up to 256 MB chunk
+        EHttpSocket.RaiseUtf8('%.GetBody: chunk size=% overflow', [self, len]);
       if DestStream <> nil then
       begin
         if length({%H-}chunk) < len then
-          SetString(chunk, nil, len + len shr 3); // +shr 3 to avoid realloc
+          FastSetString(chunk, nil, len + len shr 3); // +shr 3 to avoid realloc
         SockInRead(pointer(chunk), len);
         DestStream.WriteBuffer(pointer(chunk)^, len);
       end
       else
       begin
-        SetLength(Http.Content, Http.ContentLength + len); // space for this chunk
+        bytes := Http.ContentLength + len;
+        if bytes > MaxHttpInMemSize then // 1GB in memory max
+          EHttpSocket.RaiseUtf8('%.GetBody: chunked Content mem overflow', [self]);
+        SetLength(Http.Content, bytes); // space for this chunk
         SockInRead(@PByteArray(Http.Content)[Http.ContentLength], len); // append
       end;
       inc(Http.ContentLength, len);
@@ -4501,21 +4549,25 @@ begin
     if DestStream <> nil then
     begin
       len := 256 shl 10; // not chunked: use a 256 KB temp buffer
-      remain := Http.ContentLength;
-      if remain < len then
-        len := remain;
+      bytes := Http.ContentLength;
+      if bytes < len then
+        len := bytes;
       SetLength(chunk, len);
       repeat
-        if len > remain then
-          len := remain;
+        if len > bytes then
+          len := bytes;
         SockInRead(pointer(chunk), len);
         DestStream.WriteBuffer(pointer(chunk)^, len);
-        dec(remain, len);
-      until remain = 0;
+        dec(bytes, len);
+      until bytes = 0;
     end
     else
+    begin
+      if Http.ContentLength > MaxHttpInMemSize then // 1GB in memory max
+        EHttpSocket.RaiseUtf8('%.GetBody: Content mem overflow', [self]);
       SockInRead(FastSetString(RawUtf8(Http.Content), Http.ContentLength),
-                 Http.ContentLength) // not chuncked: direct Http.Content read
+                 Http.ContentLength); // not chuncked: direct Http.Content read
+    end
   else if (Http.ContentLength < 0) and // -1 means no Content-Length header
           (hfConnectionClose in Http.HeaderFlags) then
   begin
@@ -4523,11 +4575,15 @@ begin
     // mainly for HTTP/1.0: https://www.rfc-editor.org/rfc/rfc7230#section-3.3.3
     if Assigned(OnLog) then
       OnLog(sllTrace, 'GetBody deprecated loop', [], self);
-    repeat
-      chunk := SockReceiveString; // rough process
-      Append(RawUtf8(Http.Content), chunk);
-    until chunk = '';
+    // first consume any body bytes already buffered in SockIn
+    len := SockInPending(-1); // aTimeOutMS=-1 to check only the buffer
+    if len > 0 then
+      Http.Content := SockInRead(len, {UseOnlySockIn=}true);
     CloseSockIn; // we have hfConnectionClose anyway
+    // reads the raw socket directly until the socket is closed
+    while SockReceiveStringAppend(Http.Content) do
+      if length(Http.Content) > MaxHttpInMemSize then // 1GB in memory max
+        EHttpSocket.RaiseUtf8('%.GetBody: 1.0 Content mem overflow', [self]);
     Http.ContentLength := length(Http.Content); // update Content-Length
     if DestStream <> nil then
     begin
@@ -4564,13 +4620,12 @@ end;
 
 procedure THttpSocket.HeadersPrepare(const aRemoteIP: RawUtf8);
 begin
-  if (aRemoteIP <> '') and
-     not (hfHasRemoteIP in Http.HeaderFlags) then
-  begin
-    // Http.ParseHeaderFinalize did reserve 40 bytes for fast realloc
-    AppendLine(Http.Headers, ['RemoteIP: ', aRemoteIP]);
-    include(Http.HeaderFlags, hfHasRemoteIP);
-  end;
+  if (aRemoteIP = '') or
+     (hfHasRemoteIP in Http.HeaderFlags) then
+    exit;
+  // Http.ParseHeaderFinalize did reserve 40 bytes for fast realloc
+  AppendLine(Http.Headers, ['RemoteIP: ', aRemoteIP]);
+  include(Http.HeaderFlags, hfHasRemoteIP);
 end;
 
 function THttpSocket.HeaderGetValue(const aUpperName: RawUtf8): RawUtf8;

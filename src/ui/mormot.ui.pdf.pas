@@ -657,7 +657,7 @@ type
     fDestStreamPosition: integer;
     fAddGlyphFont: (fNone, fMain, fFallBack);
     fDoc: TPdfDocument;
-    fTmp: array[0..511] of AnsiChar;
+    fTmp: TTemp512;
     /// internal Ansi->Unicode conversion, using the CodePage used in Create()
     // - returned Dest.len is in WideChar count, not in bytes
     // - caller must release the returned memory via Dest.Done
@@ -3016,7 +3016,7 @@ type
       read fUseMetaFileTextPositioning write fUseMetaFileTextPositioning;
     /// defines how TMetaFile text clipping should be applied
     // - tcNeverClip has been reported to work better e.g. when app is running
-    // on Wine
+    // on Wine (wsWine in WindowsSpecs)
     property UseMetaFileTextClipping: TPdfCanvasRenderMetaFileTextClipping
       read fUseMetaFileTextClipping write fUseMetaFileTextClipping;
     /// the % limit below which Font Kerning is transformed into PDF Horizontal
@@ -3481,14 +3481,6 @@ begin
   result := ((r shr 8) or ((g shr 8) shl 8) or ((b shr 8) shl 16) or ((a shr 8) shl 24));
 end;
 
-procedure SwapBuffer(P: PWordArray; PLen: PtrInt);
-var
-  i: PtrInt;
-begin
-  for i := 0 to PLen - 1 do
-    P^[i] := bswap16(P^[i]);
-end;
-
 function GetTtfData(aDC: HDC; aTableName: PAnsiChar; var Ref: TWordDynArray): pointer;
 var
   L: cardinal;
@@ -3501,7 +3493,7 @@ begin
   if windows.GetFontData(aDC, PCardinal(aTableName)^, 0, pointer(Ref), L) = GDI_ERROR then
     exit;
   result := pointer(Ref);
-  SwapBuffer(result, L shr 1);
+  bswap16array(result, L shr 1);
 end;
 
 function EnumFontsProcW(var LogFont: TLogFontW; var TextMetric: TTextMetric;
@@ -4778,7 +4770,7 @@ end;
 
 function TPdfWrite.Add(Value, DigitCount: integer): TPdfWrite;
 var
-  t: array[0..15] of AnsiChar;
+  t: TTemp16;
   i64: array[0..1] of Int64 absolute t;
 begin
 //  assert(DigitCount<high(t));
@@ -4890,7 +4882,7 @@ begin
 end;
 
 const // should be local for better code generation
-  HexChars: array[0..15] of AnsiChar = '0123456789ABCDEF';
+  HexChars: TTemp16 = '0123456789ABCDEF';
   ESCAPENAME: TSynAnsicharSet = [
     #1..#31, '%', '(', ')', '<', '>', '[', ']', '{', '}', '/', '#', #127..#255];
 
@@ -6305,7 +6297,7 @@ type
 const
   // see http://www.4real.gr/technical-documents-ttf-subset.html and
   // https://developer.apple.com/fonts/TrueType-Reference-Manual/RM06/Chap6.html
-  TTF_SUBSET: array[0..9] of array[0..3] of AnsiChar = (
+  TTF_SUBSET: array[0..9] of TTemp4 = (
     'head', 'cvt ', 'fpgm', 'prep', 'hhea', 'maxp', 'hmtx', 'cmap', 'loca', 'glyf');
 
 procedure ReduceTTF(out ttf: PdfString; SubSetData: pointer; SubSetSize: integer);
@@ -7770,9 +7762,9 @@ begin
       if Rec^.offset and 1 <> 0 then
       begin // fix GetTtfData() wrong SwapBuffer()
         dec(PByte(PW));
-        SwapBuffer(PW, L + 1); // restore big-endian original unaligned buffer
+        bswap16array(PW, L + 1); // restore big-endian original unaligned buffer
         inc(PByte(PW));
-        SwapBuffer(PW, L);   // convert from big-endian at correct odd offset
+        bswap16array(PW, L);     // convert from big-endian at correct odd offset
       end;
       RawUnicodeToUtf8(PW, L, aFontName);
       result := TrueTypeFontName(aFontName, AStyle); // adjust name and style

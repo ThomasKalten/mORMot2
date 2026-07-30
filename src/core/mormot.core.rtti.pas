@@ -280,7 +280,7 @@ const
 
 {$endif FPC}
 
-  /// maps string/text types in TRttiKind RTTI enumerates, excluding shortstring
+  /// maps string/text types in TRttiKind RTTI enumerates, excluding ShortString
   rkStringTypes =
     [rkLString,
      {$ifdef FPC}
@@ -1606,6 +1606,10 @@ function SetValueObject(Instance: TObject; const Path: RawUtf8;
 // - check nested TRttiCustom.Props and TRttiCustom.ValueIterateCount
 function IsObjectDefaultOrVoid(Value: TObject): boolean;
 
+/// returns TRUE on a nil record instance or if all its properties are default/0
+// - check nested TRttiCustom.Props so our RTTI properties, not binary level
+function IsRecordDefaultOrVoid(Value: pointer; Info: PRttiInfo): boolean;
+
 /// will reset all the object properties to their default
 // - strings will be set to '', numbers to 0
 // - if FreeAndNilNestedObjects is the default FALSE, will recursively reset
@@ -1888,13 +1892,13 @@ procedure VariantDynArrayClear(var Value: TVariantDynArray);
 
 /// low-level finalization of a dynamic array of any kind
 // - faster than RTL Finalize() or setting nil, when you know ElemInfo
+// - rkClass would make ObjClear() on every item
 // - see also TRttiInfo.Clear if you want to finalize any type
 procedure FastDynArrayClear(Value: PPointer; ElemInfo: PRttiInfo);
 
-/// low-level finalization of all dynamic array items of any kind
+/// low-level finalization of all dynamic array items of ElemTypeInfo <> nil
 // - as called by FastDynArrayClear(), after dec(RefCnt) reached 0
-procedure FastFinalizeArray(Value: PPointer; ElemTypeInfo: PRttiInfo;
-  Count: integer);
+procedure FastFinalizeArray(Value: PPointer; ElemInfo: PRttiInfo; Count: PtrInt);
 
 /// clear the managed fields of a record content
 // - won't reset all values to zero, only managed fields - see RecordZero()
@@ -1904,7 +1908,7 @@ procedure FastFinalizeArray(Value: PPointer; ElemTypeInfo: PRttiInfo;
 function FastRecordClear(Value: pointer; Info: PRttiInfo): PtrInt;
 
 /// efficient finalization of successive record items from a (dynamic) array
-procedure RecordClearSeveral(v: PAnsiChar; info: PRttiInfo; n: integer);
+procedure RecordClearSeveral(v: PAnsiChar; info: PRttiInfo; n: PtrInt);
 
 /// efficient finalization of successive RawUtf8 items from a (dynamic) array
 procedure StringClearSeveral(v: PPointer; n: PtrInt);
@@ -2176,6 +2180,7 @@ const
 
   // some other constants used for fast pattern recognition
   _ID16     = ord('I') + ord('D') shl 8;
+  _OF16     = ord('O') + ord('F') shl 8;
   _ROW24    = ord('R') + ord('O') shl 8 + ord('W') shl 16;
   _ROWI32   = _ROW24 + ord('I') shl 24;
   SQUOT_16  = ord('''') + ord('''') shl 8;
@@ -2543,6 +2548,8 @@ type
     /// retrieve all List[] items as text
     procedure AsText(out Result: RawUtf8; IncludePropType: boolean;
       const Prefix, Suffix: RawUtf8);
+    /// check if Data is nil or all List[] properties are void
+    function IsVoid(Data: PAnsiChar): boolean;
     /// finalize and fill with zero all properties of this class instance
     // - it will individually fill the properties, not the whole memory
     // as TRttiCustom.FinalizeAndClear would on a record
@@ -2890,9 +2897,8 @@ type
     fHashInfo: array of TRttiCustomListPairs;
     // store PRttiInfo/TRttiCustom pairs by Name - protected by RegisterSafe
     fHashName: array of TPointerDynArray;
-    fLastName: TRttiCustom; // speedup search by name e.g. from a loop
-    // used to release memory used by registered customizations
-    fInstances: array of TRttiCustom;
+    fLastHashName: TRttiCustom; // speedup search by name e.g. from a loop
+    fInstances: array of TRttiCustom; // of Count length - released in Destroy
     fGlobalClass: TRttiCustomClass;
     fOwnedRtti: array of TRttiCustom; // for SetPropsFromText(NoRegister=true)
     function GetByClass(ObjectClass: TClass): TRttiCustom;
@@ -2904,7 +2910,7 @@ type
     procedure SetGlobalClass(RttiClass: TRttiCustomClass); // ensure Count=0
   public
     /// how many TRttiCustom instances have been registered
-    Count: integer;
+    Count: PtrInt;
     /// a global lock shared for high-level RTTI registration process
     // - is used e.g. to protect DoRegister() or TRttiCustom.PrivateSlot
     // - should be a reentrant lock, even if seldom called
@@ -5341,7 +5347,7 @@ begin
         tmp := nil;
         GetUnicodeStrProp(Instance, UnicodeString(tmp));
         RawUnicodeToUtf8(tmp, length(UnicodeString(tmp)), Value);
-        UnicodeString(tmp) := '';
+        FastAssignNew(tmp); // works also with UnicodeString
       end;
     {$endif HASVARUSTRING}
   else
@@ -5400,7 +5406,7 @@ begin
         Utf8DecodeToUnicodeString(pointer(Value), length(Value), UnicodeString(u));
         SetUnicodeStrProp(Instance, UnicodeString(u));
       finally
-        UnicodeString(u) := '';
+        FastAssignNew(u); // works also with UnicodeString
       end;
     {$endif HASVARUSTRING}
   else
@@ -6023,25 +6029,23 @@ end;
 function IsObjectDefaultOrVoid(Value: TObject): boolean;
 var
   rc: TRttiCustom;
-  p: PRttiCustomProp;
-  i: integer;
 begin
   result := Value = nil;
   if result then
     exit;
-  // check e.g. TObjectList.Count or TCollection.Count > 0
   rc := Rtti.RegisterClass(Value);
   if (rc.ValueRtlClass <> vcNone) and
      (rc.ValueIterateCount(@Value) > 0) then
-    exit;
-  // a class instance is void if all its published properties are void
-  p := pointer(rc.Props.List);
-  for i := 1 to rc.Props.Count do
-    if p^.ValueIsVoid(Value) then
-      inc(p)
-    else
-      exit;
-  result := true;
+    exit; // e.g. TObjectList.Count or TCollection.Count > 0 = not void
+  result := rc.Props.IsVoid(pointer(Value)); // check object properties
+end;
+
+function IsRecordDefaultOrVoid(Value: pointer; Info: PRttiInfo): boolean;
+var
+  rc: TRttiCustom;
+begin
+  rc := Rtti.RegisterType(Info);
+  result := (rc <> nil) and rc.Props.IsVoid(Value); // check record fields
 end;
 
 function SetValueFromExecutableCommandLine(var Value; ValueInfo: PRttiInfo;
@@ -6776,7 +6780,7 @@ begin
             IsRawUtf8(Info^.DynArrayItemType);
 end;
 
-procedure RecordClearSeveral(v: PAnsiChar; info: PRttiInfo; n: integer);
+procedure RecordClearSeveral(v: PAnsiChar; info: PRttiInfo; n: PtrInt);
 var
   fields: TRttiRecordManagedFields;
   f: PRttiRecordField;
@@ -6824,40 +6828,46 @@ begin
   until n = 0;
 end;
 
-procedure FastFinalizeArray(Value: PPointer; ElemTypeInfo: PRttiInfo;
-  Count: integer);
+procedure FastFinalizeArray(Value: PPointer; ElemInfo: PRttiInfo; Count: PtrInt);
 var
   fin: TRttiFinalizer;
 begin
-  // caller ensured ElemTypeInfo<>nil and Count>0
-  case ElemTypeInfo^.Kind of
-    {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
-    rkRecord:
-      // retrieve ElemTypeInfo.RecordManagedFields once
-      RecordClearSeveral(pointer(Value), ElemTypeInfo, Count);
-    {$ifdef FPC}
-    rkLStringOld,
-    {$endif FPC}
-    {$ifdef HASVARUSTRING}
-    rkUString,
-    {$endif HASVARUSTRING}
-    rkLString:
-      // optimized loop for AnsiString / UnicodeString (PStrRec header)
-      StringClearSeveral(pointer(Value), Count);
-    rkVariant:
-      // from mormot.core.variants - supporting custom variants
-      // or at least from mormot.core.base calling inlined VarClear()
-      VariantClearSeveral(pointer(Value), Count);
-    else
-      begin // other managed types, e.g. IInterface or nested dynamic arrays
-        fin := RTTI_FINALIZE[ElemTypeInfo^.Kind];
-        if Assigned(fin) then  // e.g. rkWString, rkArray, rkDynArray
-          repeat
-            inc(PByte(Value), fin(PByte(Value), ElemTypeInfo));
-            dec(Count);
-          until Count = 0;
-      end;
-  end;
+  if Count > 0 then
+    case ElemInfo^.Kind of // caller ensured ElemInfo<>nil
+      {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
+      rkRecord:
+        // retrieve ElemInfo.RecordManagedFields once
+        RecordClearSeveral(pointer(Value), ElemInfo, Count);
+      {$ifdef OSPOSIX}
+      rkWString,  // WideString = UnicodeString have PStrRec on POSIX
+      {$endif OSPOSIX}
+      {$ifdef FPC}
+      rkLStringOld,
+      {$endif FPC}
+      {$ifdef HASVARUSTRING}
+      rkUString,
+      {$endif HASVARUSTRING}
+      rkLString:
+        // optimized loop for AnsiString / UnicodeString (PStrRec header)
+        StringClearSeveral(pointer(Value), Count);
+      rkVariant:
+        // from mormot.core.variants - supporting custom variants
+        // or at least from mormot.core.base calling inlined VarClear()
+        VariantClearSeveral(pointer(Value), Count);
+      rkClass:
+        // like RTTI_FINALIZE[rkClass] = _ObjClear
+        RawObjectsClear(pointer(Value), Count);
+      else
+        begin
+          // other managed types, e.g. IInterface or nested dynamic arrays
+          fin := RTTI_FINALIZE[ElemInfo^.Kind];
+          if Assigned(fin) then  // e.g. rkWString, rkArray, rkDynArray
+            repeat
+              inc(PByte(Value), fin(Value, ElemInfo));
+              dec(Count);
+            until Count = 0;
+        end;
+    end;
 end;
 
 procedure FastDynArrayClear(Value: PPointer; ElemInfo: PRttiInfo);
@@ -7306,7 +7316,7 @@ var
   W: PWordArray;
 begin
   SharedRandom.FillShort31(tmp);
-  SetString(V^, PWideChar(nil), ord(tmp[0]));
+  FastSetWideString(V^, PWideChar(nil), ord(tmp[0]));
   W := pointer(V^);
   for i := 1 to ord(tmp[0]) do
     W[i - 1] := cardinal(PByteArray(@tmp)[i]);
@@ -7659,43 +7669,13 @@ end;
 
 { ************** RTTI Value Types used for JSON Parsing }
 
-function ParserTypeToTypeInfo(pt: TRttiParserType;
-  pct: TRttiParserComplexType): PRttiInfo;
-begin
-  result := PTC_INFO[pct];
-  if result = nil then
-    result := PT_INFO[pt];
-end;
-
-const
-  _TypeNames: PAnsiChar = // fast brute force search in L1 cache
-    #7'RawUtf8'#5'array'#6'record'#5'TDate'#5'TGuid'#6'PtrInt'#7'PtrUInt' +
-    {$ifdef FPC} #6'string'#7'integer'#8'cardinal' {$else}
-                 #7'longint'#8'longword' {$endif} + #9'TFileName' +
-    #7'RawBlob'#7'SpiUtf8'#4'byte'#4'word'#7'boolean'#9'TDateTime'#6'double' +
-    #5'Int64'#7'variant' +
-    {$ifdef UNICODE} #13'UnicodeString' {$else} #10'AnsiString' {$endif};
-  _TypeParser: array[0 .. 20 {$ifdef FPC} + 1 {$endif} ] of TRttiParserType = (
-    ptNone, ptRawUtf8, ptArray, ptRecord, ptDateTime, ptGuid,
-    {$ifdef CPU64} ptInt64, ptQWord, {$else} ptInteger, ptCardinal, {$endif}
-    {$ifdef FPC} ptString, {$endif} ptInteger, ptCardinal, ptString,
-    ptRawByteString, ptRawUtf8, ptByte, ptWord, ptBoolean, ptDateTime, ptDouble,
-    ptInt64, ptVariant, ptString);
-
-function KnownTypeName(Name: PUtf8Char; NameLen: PtrInt): TRttiParserType;
-  {$ifdef HASINLINE}inline;{$endif}
-begin // weak/alias type definitions have no TypeInfo() with their usual name
-  result := _TypeParser[FindShortStringListNoTrim(@_TypeNames[0],
-              pred(high(_TypeParser)), Name, NameLen) + 1];
-end;
-
-// called internally by TRttiCustom.Create - can't use Rtti.RegisterType()
+// called internally by TRttiCustom.Create/FromRtti - can't use Rtti.RegisterType()
 function GuessTypeInfoToStandardParserType(Info: PRttiInfo;
   Complex: PRttiParserComplexType): TRttiParserType;
 var
   ndx: PtrInt;
   cp: integer;
-begin                                            
+begin
   result := ptNone;
   if Complex <> nil then
     Complex^ := pctNone;
@@ -7720,125 +7700,129 @@ begin
       exit;
     end;
   end;
-  // array/record keywords, integer/cardinal FPC types, T*ID pattern
-  result := KnownTypeName(@Info^.RawName[1], ord(Info^.RawName[0]));
-  if result = ptNone then
-    case Info^.Kind of // fallback to the closed known type, using RTTI
-    {$ifdef FPC}
-      rkLStringOld,
-    {$endif FPC}
-      rkLString: // PT_INFO[ptRawUtf8/ptRawJson] have been found above
-        begin
-          cp := Info^.AnsiStringCodePage;
-          if cp = CP_UTF8 then
-            result := ptRawUtf8
-          else if cp = CP_WINANSI then
-            result := ptWinAnsi
-          else if cp >= CP_RAWBLOB then
-            result := ptRawByteString
-          {$ifndef UNICODE}
-          else if (cp = CP_ACP) or
-                  (cp = Unicode_CodePage) then
-            result := ptString
-          {$endif UNICODE}
-          else
-            result := ptRawUtf8; // fallback to UTF-8 string
-        end;
-      rkWString:
-        result := ptWideString;
-    {$ifdef HASVARUSTRING}
-      rkUString:
-        result := ptUnicodeString;
-    {$endif HASVARUSTRING}
-    {$ifdef FPC_OR_UNICODE}
-      {$ifdef UNICODE}
-      rkProcedure,
-      {$endif UNICODE}
-      rkClassRef,
-      rkPointer:
-        result := ptPtrInt;
-    {$endif FPC_OR_UNICODE}
-      rkVariant:
-        result := ptVariant;
-      rkArray:
-        result := ptArray;
-      rkDynArray:
-        result := ptDynArray;
-      {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
-      rkRecord:
-        result := ptRecord;
-      rkChar:
-        result := ptByte;
-      rkWChar:
-        result := ptWord;
-      rkMethod:
-        result := {$ifdef CPU64} ptHash128 {$else} ptInt64 {$endif}; // 2*pointer
-      rkInterface:
-        result := ptInterface;
-      rkInteger:
-        case Info^.RttiOrd of
-          roSByte,
-          roUByte:
-            result := ptByte;
-          roSWord,
-          roUWord:
-            result := ptWord;
-          roSLong:
-            result := ptInteger;
-          roULong:
-            result := ptCardinal;
-        {$ifdef FPC_NEWRTTI}
-          roSQWord:
-            result := ptInt64;
-          roUQWord:
-            result := ptQWord;
-        {$endif FPC_NEWRTTI}
-        end;
-      rkInt64:
-        if (Complex <> nil) and
-           (Info^.RawName[1] = 'T') and
-           (PCardinal(@Info^.RawName[ord(Info^.RawName[0]) - 1])^ and $dfdf = _ID16) then
-        begin
-          result := ptOrm;
-          Complex^ := pctSpecificClassID; // T...ID pattern in name
-        end
-      {$ifdef ISDELPHI}
-        else if Info^.IsQWord then
-          result := ptQWord
-      {$endif ISDELPHI}
-        else // PT_INFO[ptOrm/ptTimeLog/ptUnixTime] have been found above
-          result := ptInt64;
-    {$ifdef FPC}
-      rkQWord:
-        result := ptQWord;
-      rkBool:
-        result := ptBoolean;
-    {$endif FPC}
-      rkEnumeration:
-      {$ifdef ISDELPHI}
-        if Info^.IsBoolean then
-          result := ptBoolean
+  result := ptNone;
+  // use RTTI to check for any sub-type, including T*ID pattern
+  case Info^.Kind of
+  {$ifdef FPC}
+    rkLStringOld,
+  {$endif FPC}
+    rkLString: // PT_INFO[ptRawUtf8/ptRawJson] have been found above
+      begin
+        cp := Info^.AnsiStringCodePage;
+        if cp = CP_UTF8 then
+          result := ptRawUtf8
+        else if cp = CP_WINANSI then
+          result := ptWinAnsi
+        else if cp >= CP_RAWBLOB then
+          result := ptRawByteString
+        {$ifndef UNICODE}
+        else if (cp = CP_ACP) or
+                (cp = Unicode_CodePage) then
+          result := ptString
+        {$endif UNICODE}
         else
-      {$endif ISDELPHI}
-          result := ptEnumeration;
-      rkSet:
-        result := ptSet;
-      rkClass:
-        result := ptClass;
-      rkFloat:
-        case Info^.RttiFloat of
-          rfSingle:
-            result := ptSingle;
-          rfDouble:
-            // TDateTime/TDateTimeMS/TDate have been found above
+          result := ptRawUtf8; // fallback to UTF-8 string
+      end;
+    rkWString:
+      result := ptWideString;
+  {$ifdef HASVARUSTRING}
+    rkUString:
+      result := ptUnicodeString;
+  {$endif HASVARUSTRING}
+  {$ifdef FPC_OR_UNICODE}
+    {$ifdef UNICODE}
+    rkProcedure,
+    {$endif UNICODE}
+    rkClassRef,
+    rkPointer:
+      result := ptPtrInt;
+  {$endif FPC_OR_UNICODE}
+    rkVariant:
+      result := ptVariant;
+    rkArray:
+      result := ptArray;
+    rkDynArray:
+      result := ptDynArray;
+    {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
+    rkRecord:
+      result := ptRecord;
+    rkChar:
+      result := ptByte;
+    rkWChar:
+      result := ptWord;
+    rkMethod:
+      result := {$ifdef CPU64} ptHash128 {$else} ptInt64 {$endif}; // 2*pointer
+    rkInterface:
+      result := ptInterface;
+    rkInteger:
+      case Info^.RttiOrd of
+        roSByte,
+        roUByte:
+          result := ptByte;
+        roSWord,
+        roUWord:
+          result := ptWord;
+        roSLong:
+          result := ptInteger;
+        roULong:
+          result := ptCardinal;
+      {$ifdef FPC_NEWRTTI}
+        roSQWord:
+          result := ptInt64;
+        roUQWord:
+          result := ptQWord;
+      {$endif FPC_NEWRTTI}
+      end;
+    rkInt64:
+      if (Complex <> nil) and
+         (Info^.RawName[1] = 'T') and
+         (PCardinal(@Info^.RawName[ord(Info^.RawName[0]) - 1])^ and $dfdf = _ID16) then
+      begin
+        result := ptOrm;
+        Complex^ := pctSpecificClassID; // T...ID pattern in name
+      end
+    {$ifdef ISDELPHI}
+      else if Info^.IsQWord then
+        result := ptQWord
+    {$endif ISDELPHI}
+      else // ptOrm/ptTimeLog/ptUnixTime have been found above from PT_INFO[]
+        result := ptInt64;
+  {$ifdef FPC}
+    rkQWord:
+      result := ptQWord;
+    rkBool:
+      result := ptBoolean;
+  {$endif FPC}
+    rkEnumeration:
+    {$ifdef ISDELPHI}
+      if Info^.IsBoolean then
+        result := ptBoolean
+      else
+    {$endif ISDELPHI}
+        result := ptEnumeration;
+    rkSet:
+      result := ptSet;
+    rkClass:
+      result := ptClass;
+    rkFloat:
+      case Info^.RttiFloat of
+        rfSingle:
+          result := ptSingle;
+        rfDouble:
+          if Info = TypeInfo(TDate) then
+            // TDateTime/TDateTimeMS have been found above from PT_INFO[]
+            result := ptDateTime
+          else
             result := ptDouble;
-          rfCurr:
-            result := ptCurrency;
-          rfExtended:
-            result := ptExtended;
-          // rfComp: not implemented yet
-        end;
-    end;
+        rfCurr:
+          result := ptCurrency;
+        rfExtended:
+          result := ptExtended;
+        // rfComp: not implemented yet
+      end;
+    // rkSString have no ptShortString support yet
+  end;
+  // if PT_INFO[] and RTTI are not enough, KnownParserType() won't help more
 end;
 
 function ItemSizeToDynArrayKind(size: integer): TRttiParserType;
@@ -8890,6 +8874,23 @@ begin
   end;
 end;
 
+function TRttiCustomProps.IsVoid(Data: PAnsiChar): boolean;
+var
+  p: PRttiCustomProp;
+  i: integer;
+begin
+  p := pointer(List);
+  result := (p = nil) or (Data = nil);
+  if result then
+    exit;
+  for i := 1 to Count do
+    if p^.ValueIsVoid(Data) then
+      inc(p)
+    else
+      exit;
+  result := true;
+end;
+
 procedure TRttiCustomProps.FinalizeAndClearPublishedProperties(Instance: TObject);
 var
   pp: PRttiCustomProp;
@@ -9032,7 +9033,7 @@ begin
   // set vmtAutoTable slot for efficient Find(TClass) - to be done asap
   vmt := pointer(PAnsiChar(aClass) + vmtAutoTable);
   if vmt^ = nil then
-    PatchCodePtrUInt(pointer(vmt), PtrUInt(self));
+    PatchPointer(pointer(vmt), PtrUInt(self));
   if vmt^ <> self then
     ERttiException.RaiseUtf8(
       '%.SetValueClass(%): vmtAutoTable set to %', [self, aClass, vmt^]);
@@ -9054,6 +9055,14 @@ begin
   if fCache.ValueRtlClass = vcException then
     // manual registration of the Exception.Message property
     fProps.InternalAdd(TypeInfo(string), EHook(nil).MessageOffset, 'Message');
+end;
+
+function ParserTypeToTypeInfo(pt: TRttiParserType;
+  pct: TRttiParserComplexType): PRttiInfo;
+begin
+  result := PTC_INFO[pct];
+  if result = nil then
+    result := PT_INFO[pt];
 end;
 
 procedure TRttiCustom.FromRtti(aInfo: PRttiInfo);
@@ -9368,7 +9377,7 @@ begin
 end;
 
 function TRttiCustom.ValueFullHash(const Elem): cardinal;
-begin
+begin // may use AesNiHash32/hashsse42/crc32carm64/xxhash32
   result := DefaultHasher(PtrUInt(self), @Elem, fCache.ItemSize);
 end;
 
@@ -9707,9 +9716,9 @@ var
   propcount: integer;
   noreg: boolean;
   propname, typname, atypname: RawUtf8;
-  aname: PUtf8Char;
+  endname: PUtf8Char;
   ee: TRttiCustomFromTextExpectedEnd;
-  alen, i: PtrInt;
+  l, i: PtrInt;
   pt, apt: TRttiParserType;
   c, ac, nested: TRttiCustom;
   cp: PRttiCustomProp;
@@ -9776,11 +9785,27 @@ begin
       c := Rtti.RegisterTypeFromName(typname, @pt);
       if c = nil then
       case pt of
-        ptArray: // array of ...
+        ptArray: // 'array of ##' or 'TArray<##>'
           begin
-            if PCardinal(P)^ and $ffdfdf = ord('O') + ord('F') shl 8 + 32 shl 16 then
+            if (P^ = '<') and
+               PropNameEquals(typname, 'TArray') then
             begin
-              // array of ....   or   array of record ... end
+              // try generic syntax TArray<##>
+              inc(P);
+              if GetNextFieldProp(P, atypname) and
+                 (P^ = '>') then
+              begin
+                // normalize as array of known types
+                inc(P);
+                ac := Rtti.RegisterTypeFromName(atypname);
+                if ac = nil then
+                  ERttiException.RaiseUtf8('Unknown %: TArray<%>', [propname, atypname]);
+               Join(['[', ac.Name, ']'], typname);
+              end;
+            end
+            else if PCardinal(P)^ and $ffdfdf = (_OF16 + 32 shl 16) then
+            begin
+              // 'array of ##' or 'array of record ... end'
               typname := '';
               P := GotoNextNotSpace(P + 3);
               if not GetNextFieldProp(P, atypname) then
@@ -9807,46 +9832,26 @@ begin
         ptRecord: // record ... end
           ee := eeEndKeyWord;
         ptNone:
-          // unknown type name -> try from TArray<*>/T*DynArray/T*s patterns
+          // unknown type name -> try from T*DynArray/T*s patterns
           begin
-            if PropNameEquals(typname, 'TArray') and
-               (P^ = '<') then
-            begin
-              // try generic syntax TArray<##>
-              inc(P);
-              if GetNextFieldProp(P, atypname) and
-                 (P^ = '>') then
-              begin
-                // normalize as array of KnownType
-                inc(P);
-                ac := Rtti.RegisterTypeFromName(atypname);
-                if ac = nil then
-                  ERttiException.RaiseUtf8('Unknown %: TArray<%>', [propname, atypname]);
-               Join(['[', ac.Name, ']'], typname);
-              end;
-            end
+            l := length(typname);
+            endname := PUtf8Char(pointer(typname)) + l;
+            if (l > 10) and // e.g. TWordDynArray
+               (IdemPropName('DynArray', endname - 8, 8) or
+                IdemPropName('ObjArray', endname - 8, 8)) then
+              dec(l, 8)
+            else if (l > 3) and
+                    (endname[-1] in ['s', 'S']) then // e.g. TBytes
+              dec(l)
             else
+              l := 0;
+            if l > 0 then
             begin
-              // try T##DynArray/T##s patterns
-              aname := pointer(typname);
-              alen := length(typname);
-              if (alen > 10) and // e.g. TWordDynArray
-                 (IdemPropName('DynArray', aname + alen - 8, 8) or
-                  IdemPropName('ObjArray', aname + alen - 8, 8)) then
-                dec(alen, 8)
-              else if (alen > 3) and
-                      (aname[aLen - 1] in ['s', 'S']) then // e.g. TBytes
-                dec(alen)
-              else
-                alen := 0;
-              if alen > 0 then
-              begin
-                // try TIntegerDynArray/TIntegers -> integer
-                ac := Rtti.RegisterTypeFromName(@PByteArray(typname)[1], alen - 1);
-                if ac = nil then
-                  // try TMyTypeObjArray/TMyTypes -> TMyType
-                  ac := Rtti.RegisterTypeFromName(pointer(typname), alen);
-              end;
+              // try TIntegerDynArray/TIntegers -> integer
+              ac := Rtti.RegisterTypeFromName(@PByteArray(typname)[1], l - 1);
+              if ac = nil then
+                // try TMyTypeObjArray/TMyTypes -> TMyType
+                ac := Rtti.RegisterTypeFromName(pointer(typname), l);
             end;
             if ac = nil then
               ERttiException.RaiseUtf8('Unknown type %: %', [propname, typname]);
@@ -10037,12 +10042,24 @@ begin
   result := nil; // not found
 end;
 
+function RttiPointerMix(c: PtrUInt): PtrUInt;
+  {$ifdef HASINLINE}inline;{$endif}
+begin
+  c := c shr 4; // RTTI pointers are likely to be 16 bytes aligned and narrow
+  c := c xor (c shr 8);                          // mix within unit
+  result := (c xor (c shr 16)) and HASHINFO_MAX; // mix between units
+  // h := xxHash32Mixup(PtrUInt(Info)) and HASHINFO_MAX; is slower
+  // Knuth's magic number had more collision (even more with KNUTH_HASHPTR_MUL)
+  // h := cardinal(Info * KNUTH_HASH32_MUL) shr (32 - HASHINFO_BITS);
+  // h := crc32cBy4(0, Info) and HASHINFO_MAX; // slower, not better
+end;
+
 function TRttiCustomList.FindType(Info: PRttiInfo): TRttiCustom;
 var
   k: PRttiCustomListPairs;
   h: PtrUInt;
   p: PPointerArray; // ^TPointerDynArray
-begin
+begin // vmtAuto: 8894966/31321/1265 NOPATCHVMT: 10137568/312233/14624
   {$ifndef NOPATCHVMT}
   if Info^.Kind <> rkClass then
   begin
@@ -10052,17 +10069,14 @@ begin
     // try latest found RTTI for this slot of type definition (very effective)
     result := k^.LastInfo;
     if (result <> nil) and
-       (result.Info = Info) then // happens e.g. 12,612,097 times during tests
+       (result.Info = Info) then // happens 99.6% (96% NOPATCH) during tests
       exit;
-    // O(1) hash of the PRttiInfo pointer using inlined xxHash32 shuffle stage
-    h := xxHash32Mixup(PtrUInt(Info)) and HASHINFO_MAX;
-    // Knuth's magic number had more collision (even more with KNUTH_HASHPTR_MUL)
-    // h := cardinal(Info * KNUTH_HASH32_MUL) shr (32 - RTTIHASH_BITS);
-    // h := crc32cBy4(0, Info) and RTTICUSTOMTYPEINFOMAX; // slower, not better
+    // O(1) hash of the PRttiInfo pointer using RTTI-specific hashing
+    h := RttiPointerMix(PtrUInt(Info));
     // try latest found RTTI for this hash slot
     result := k^.LastHash[h];
     if (result <> nil) and
-       (result.Info = Info) then // happens e.g. 1280 times during tests
+       (result.Info = Info) then // happens e.g. 0.35% (3% NOPATCH) during tests
     begin
       k^.LastInfo := result; // for faster lookup next time
       exit; // avoid most ReadLock/ReadUnLock and LockedFind() search
@@ -10073,7 +10087,7 @@ begin
     if p <> nil then
       result := LockedFind(p, @p[PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF], Info);
     k^.Safe.UnLock;
-    if result <> nil then // happens e.g. 864 times during tests
+    if result <> nil then // happens e.g. 0.01% 82us (0.14% 494us NOPATCH)
     begin
       k^.LastInfo := result;   // aligned pointers are atomically accessed
       k^.LastHash[h] := result;
@@ -10107,10 +10121,10 @@ label
 begin
   pe := @p[PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF];
   repeat
-    nfo := p[0];
+    nfo := p[0]; // PRttiInfo/TRttiCustom pairs
     if ord(nfo^.RawName[0]) <> l then
     begin
-no:   p := @p[2]; // PRttiInfo/TRttiCustom p
+no:   p := @p[2];
       if PUtf8Char(p) >= pe then
         break;
       continue;
@@ -10156,11 +10170,13 @@ var
   p: PPointerArray;
 begin // seldom called: from RegisterFromText() or ORM model initialization
   result := nil;
+  // quickly reject e.g. '' or 'TArray$1$crcA5831B1D'
   if (Name = nil) or
-     (NameLen <= 0) then
+     (NameLen <= 0) or
+     (ByteScanIndex(pointer(Name), NameLen, ord('$')) >= 0) then
     exit;
   // try latest found name e.g. calling from JsonRetrieveObjectRttiCustom()
-  result := fLastName; // accessing an aligned pointer is expected to be atomic
+  result := fLastHashName; // accessing aligned pointer is expected to be atomic
   if (result <> nil) and
      (PStrLen(PAnsiChar(pointer(result.Name)) - _STRLEN)^ = NameLen) and
      IdemPropNameUSameLenNotNull(pointer(result.Name), Name, NameLen) then
@@ -10169,12 +10185,12 @@ begin // seldom called: from RegisterFromText() or ORM model initialization
   result := nil;
   p := @fHashName[RttiHashName(pointer(Name), NameLen)];
   RegisterSafe.Lock;
-  p := p^[0]; // read TPointerDynArray within the lock
+  p := p^[0]; // read TPointerDynArray slot within the lock
   if p <> nil then
     result := LockedFindNameInPairs(p, Name, NameLen);
   RegisterSafe.UnLock;
   if result <> nil then
-    fLastName := result;
+    fLastHashName := result;
 end;
 
 function TRttiCustomList.FindName(Name: PUtf8Char; NameLen: PtrInt; Kind: TRttiKind): TRttiCustom;
@@ -10190,46 +10206,40 @@ begin
   result := FindName(@Name[1], ord(Name[0]));
 end;
 
-function FindNameInArray(Pairs, PEnd: PPointerArray; ElemInfo: PRttiInfo): TRttiCustom;
-  {$ifdef HASINLINE} inline; {$endif}
-begin
-  repeat
-    result := Pairs[1]; // PRttiInfo/TRttiCustom pairs
-    if (result.ArrayRtti <> nil) and
-       (result.ArrayRtti.Info = ElemInfo) then
-      exit;
-    Pairs := @Pairs[2];
-  until Pairs = PEnd;
-  result := nil;
-end;
-
 function TRttiCustomList.FindByArrayRtti(ElemInfo: PRttiInfo): TRttiCustom;
 var
-  n: integer;
+  i, n: PtrInt;
   k: PRttiCustomListPairs;
-  p: PPointer; // TPointerDynArray
+  hash: PPointerDynArray;
+  pp: PRttiCustom;
 begin
+  result := nil;
   if ElemInfo = nil then
-  begin
-    result := nil;
     exit;
-  end;
-  k := @fHashInfo[RK_TOSLOT[rkDynArray]];
+  k := @fHashInfo[RK_TOSLOT[rkDynArray]]; // only rkDynArray in this slot
   k^.Safe.Lock;
-  p := @k^.HashInfo;
-  n := length(k^.HashInfo);
-  repeat
-    result := p^;
-    if result <> nil then
+  hash := @k^.HashInfo;
+  for i := 0 to high(k^.HashInfo) do // search whole slot
+  begin
+    pp := pointer(hash^);
+    if pp <> nil then
     begin
-      result := FindNameInArray(@PPointerArray(result)[1],
-        @PPointerArray(result)[PDALen(PAnsiChar(result) - _DALEN)^ + _DAOFF], ElemInfo);
-      if result <> nil then
-        break;
+      n := (PDALen(PAnsiChar(pp) - _DALEN)^ + _DAOFF) shr 1;
+      inc(pp); // PRttiInfo/TRttiCustom pairs so pp^ = TRttiCustom
+      repeat
+        if (pp^.ArrayRtti <> nil) and
+           (pp^.ArrayRtti.Info = ElemInfo) then
+        begin
+          result := pp^; // found matching dynamic array type
+          k^.Safe.UnLock;
+          exit;
+        end;
+        inc(pp, 2); // next pair
+        dec(n);
+      until n = 0;
     end;
-    inc(p);
-    dec(n);
-  until n = 0;
+    inc(hash);
+  end;
   k^.Safe.UnLock;
 end;
 
@@ -10242,15 +10252,12 @@ begin
   end;
   RegisterSafe.Lock;
   try
-    result := FindType(Info);  // search again (within RegisterSafe context)
-    if result <> nil then
-      exit; // already registered in the background
-    // initialize a new TRttiCustom/TRttiJson instance for this type
-    result := GlobalClass.Create;
-    // register ASAP to avoid endless recursion in FromRtti
-    AddToPairs(result, Info);
-    // now we can parse and process the RTTI
-    result.FromRtti(Info);
+    result := FindType(Info);
+    if result <> nil then // unlikely race condition but better safe than sorry
+      exit;
+    result := GlobalClass.Create;  // initialize a new TRttiCustom/TRttiJson
+    AddToPairs(result, Info); // register ASAP avoids endless FromRtti recursion
+    result.FromRtti(Info);    // now we can parse and process the RTTI
   finally
     RegisterSafe.UnLock;
   end;
@@ -10344,16 +10351,14 @@ begin
   k := @fHashInfo[RK_TOSLOT[Info^.Kind]];
   k^.Safe.Lock; // needed when resizing k^.HashInfo[]
   try
-    AddPair(k^.HashInfo[xxHash32Mixup(PtrUInt(Info)) and HASHINFO_MAX], Instance, Info);
-    {$ifdef FPC} // FPC extended RTTI generates no name for nested plain records
-    if Info^.RawName[0] <> #0 then
-    {$endif FPC}
-    ObjArrayAddCount(fInstances, Instance, Count); // to release memory
+    AddPair(k^.HashInfo[RttiPointerMix(PtrUInt(Info))], Instance, Info);
+    ObjArrayAdd(fInstances, Instance); // to be released in Destroy
+    inc(Count);
     inc(Counts[Info^.Kind]); // Instance.Kind is not available from DoRegister
   finally
     k^.Safe.UnLock;
   end;
-  if (Info^.RawName[0] <> #0) and
+  if (Info^.RawName[0] <> #0) and // e.g. FPC extended RTTI of nested records
      (PosExChar('$', Instance.Name) = 0) then // e.g. 'TArray$1$crcA5831B1D'
     AddPair(fHashName[RttiHashName(@Info.RawName[1], ord(Info.RawName[0]))], Instance, Info);
 end;
@@ -10396,6 +10401,29 @@ begin
     RegisterType(Info[i]);
 end;
 
+const
+  _TypeNames: PAnsiChar = // fast brute force search in L1 cache
+    #7'RawUtf8'#5'array'#6'TArray'#6'record'#5'TGuid'#6'PtrInt'#7'PtrUInt' +
+    #6'string'#7'integer'#8'cardinal'#7'longint'#8'longword'#9'TFileName' +
+    #7'RawBlob'#13'RawByteString'#7'SpiUtf8'#4'byte'#4'word'#7'boolean' +
+    #9'TDateTime'#11'TDateTimeMS'#5'TDate'#6'double'#8'currency'#6'single' +
+    #5'Int64'#5'QWord'#7'variant' +
+    {$ifdef UNICODE} #13'UnicodeString' {$else} #10'AnsiString' {$endif};
+  _TypeParser: array[0 .. 29] of TRttiParserType = (
+    ptNone, ptRawUtf8, ptArray, ptArray, ptRecord, ptGuid,
+    {$ifdef CPU64} ptInt64, ptQWord, {$else} ptInteger, ptCardinal, {$endif}
+    ptString, ptInteger, ptCardinal, ptInteger, ptCardinal, ptString,
+    ptRawByteString, ptRawByteString, ptRawUtf8, ptByte, ptWord, ptBoolean,
+    ptDateTime, ptDateTimeMS, ptDateTime, ptDouble, ptCurrency, ptSingle,
+    ptInt64, ptQWord, ptVariant, ptString);
+
+function KnownParserType(Name: PUtf8Char; NameLen: PtrInt): TRttiParserType;
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  result := _TypeParser[FindShortStringListNoTrim(@_TypeNames[0],
+    pred(high(_TypeParser)), Name, NameLen) + 1]; // most used simple types
+end;
+
 function TRttiCustomList.RegisterTypeFromName(Name: PUtf8Char; NameLen: PtrInt;
   ParserType: PRttiParserType): TRttiCustom;
 var
@@ -10403,27 +10431,28 @@ var
   i: PtrInt;
 begin
   result := nil;
-  if ParserType <> nil then
-    ParserType^ := ptNone;
-  if (Name = nil) or
-     (NameLen <= 0) then
-    exit;
-  repeat
-    i := ByteScanIndex(pointer(Name), NameLen, ord('.'));
-    if i < 0 then
-      break;
-    inc(i); // truncate 'unitname.typename' into 'typename'
-    inc(Name, i);
-    dec(NameLen, i);
-  until false;
-  pt := KnownTypeName(Name, NameLen); // most used simple types
-  if pt <> ptNone then
-    result := PT_RTTI[pt] // 'array' returns nil as expected
-  else
+  pt := ptNone;
+  if (Name <> nil) and
+     (NameLen > 0) then
   begin
-    result := FindName(Name, NameLen); // search in fHashName[]
-    if result <> nil then
-      pt := result.Parser;
+    repeat
+      i := ByteScanIndex(pointer(Name), NameLen, ord('.'));
+      if i < 0 then
+        break;
+      inc(i); // truncate 'unit.name.typename' into 'typename'
+      inc(Name, i);
+      dec(NameLen, i);
+    until false;
+    if Name[0] <> '[' then
+      pt := KnownParserType(Name, NameLen);
+    if pt <> ptNone then
+      result := PT_RTTI[pt] // 'array' returns nil with ptArray as expected
+    else
+    begin
+      result := FindName(Name, NameLen); // search in global fHashName[]
+      if result <> nil then
+        pt := result.Parser;
+    end;
   end;
   if ParserType <> nil then
     ParserType^ := pt;
@@ -11115,7 +11144,6 @@ begin
   DoubleToCurrency(Value, P);
 end;
 
-
 procedure InitializeUnit;
 begin
   RTTI_FROM_ORD[roSByte]         := @FromRttiOrdSByte;
@@ -11290,12 +11318,12 @@ begin
   {$ifdef FPC_CPUX64}
   RedirectRtl;
   {$endif FPC_CPUX64}
+  PatchCodeProtectBack; // restore back all RWX sections to the original RX
 end;
 
 
 initialization
   InitializeUnit;
-
 
 end.
 

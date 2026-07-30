@@ -464,6 +464,7 @@ type
   // - hsoHeadersUnfiltered will store all headers, not only relevant (i.e.
   // include raw Content-Length, Content-Type and Content-Encoding entries)
   // - hsoHeadersInterning triggers TRawUtf8Interning to reduce memory usage
+  // - hsoHeadersSanitize will search and reject any #0 in headers lines
   // - hsoNoStats will disable low-level statistic counters
   // - hsoNoXPoweredHeader excludes 'X-Powered-By: mORMot 2 synopse.info' header
   // - hsoCreateSuspended won't start the server thread immediately
@@ -494,6 +495,7 @@ type
   THttpServerOption = (
     hsoHeadersUnfiltered,
     hsoHeadersInterning,
+    hsoHeadersSanitize,
     hsoNoXPoweredHeader,
     hsoNoStats,
     hsoCreateSuspended,
@@ -1437,15 +1439,22 @@ function ToText(res: THttpServerSocketGetRequestResult): PShortString; overload;
 function ToText(state: THttpServerExecuteState): PShortString; overload;
 
 /// create an ephemeral socket-based HTTP Server, for a single request
-// - typical usage is for Single-Sign On credential entering
-// - raise an Exception on binding error
-// - returns false on timeout
+// - typical usage is for Single-Sign On credential entering, or for testing
+// - you can set aResponseContentType = STATICFILE_CONTENT_TYPE to serve a file
+// - raise an Exception on binding error, and returns false on timeout
 // - returns true on success, with encoded parameters as aParams - and the
 // received URL/Method/Content values as aParams.U['url'/'method'/'content']
 function EphemeralHttpServer(const aPort: RawUtf8; out aParams: TDocVariantData;
   aTimeOutSecs: integer = 60; aLogClass: TSynLogClass = nil;
   const aResponse: RawUtf8 = 'You can close this window.';
-  aMethods: TUriMethods = [mGET, mPOST]; aOptions: THttpServerOptions = []): boolean;
+  aMethods: TUriMethods = [mGET, mHEAD, mPOST]; aOptions: THttpServerOptions = [];
+  const aResponseContentType: RawUtf8 = ''): boolean; overload;
+
+/// create an ephemeral socket-based HTTP Server instance with a fixed response
+// - typical usage is for testing
+function EphemeralHttpServer(aLogClass: TSynLogClass; const aResponse: RawUtf8;
+  aMethods: TUriMethods = [mGET, mHEAD]; aOptions: THttpServerOptions = [];
+  const aResponseContentType: RawUtf8 = ''): THttpServer; overload;
 
 
 
@@ -2045,17 +2054,19 @@ procedure MsgToShort(const msg: THttpPeerCacheMessage; var result: ShortString);
 /// hash a normalized URL and the "Etag:" or "Last-Modified:" headers
 // - could be used to identify a HTTP resource as a binary hash on a given server
 // - aHeaders could be supplied as nil so that only the URI resource is hashed
+// - aUpCaseUri=true would force aUri to be hashed as uppercase
 // - returns 0 if aUrl/aHeaders have not enough information
 // - returns the number of hash bytes written to aDigest.Bin
-function HttpRequestHash(aAlgo: THashAlgo; const aUri: TUri;
-  aHeaders: PUtf8Char; out aDigest: THashDigest): integer;
+function HttpRequestHash(aAlgo: THashAlgo; const aUri: TUri; aHeaders: PUtf8Char;
+  out aDigest: THashDigest; aUpCaseUri: boolean = false): integer;
 
 /// hash an URL and the "Etag:" or "Last-Modified:" headers into 32 ascii chars
 // - aHeaders could be supplied as nil so that only the URI resource is hashed
+// - aUpCaseUri=true would force aUri to be hashed as uppercase
 // - using SHA-256 and lowercase Base-32 encoding, so perfect for a file name
 // - with Base-32, 32 chars means 160-bit or 20 bytes into aDig^ binary hash
 function HttpRequestHashBase32(const aUri: TUri; aName: PShort32 = nil;
-  aHeaders: PUtf8Char = nil; aDig: PHash160 = nil): boolean;
+  aHeaders: PUtf8Char = nil; aDig: PHash160 = nil; aUpCaseUri: boolean = false): boolean;
 
 
 {$ifdef USEWININET}
@@ -2720,7 +2731,7 @@ begin
                 [NetLastErrorMsg], self);
               break;
             end;
-            if CompareBuf(UDP_SHUTDOWN, fFrame, len) <> 0 then // from Destroy
+            if not EqualBuf(UDP_SHUTDOWN, fFrame, len) then // from Destroy
             begin
               inc(fReceived);
               OnFrameReceived(len, remote); // new request
@@ -3542,7 +3553,7 @@ begin
   if fHttpApiRequest = nil then
     result := ''
   else
-    SetString(result, fHttpApiRequest^.CookedUrl.pFullUrl,
+    FastSynUnicode(result, fHttpApiRequest^.CookedUrl.pFullUrl,
       fHttpApiRequest^.CookedUrl.FullUrlLength shr 1); // length in bytes
 end;
 
@@ -3792,6 +3803,8 @@ begin
   fDefaultRequestOptions := [];
   if hsoHeadersUnfiltered in fOptions then
     include(fDefaultRequestOptions, hroHeadersUnfiltered);
+  if hsoHeadersSanitize in fOptions then
+    include(fDefaultRequestOptions, hroHeadersSanitize);
 end;
 
 procedure THttpServerGeneric.SetOptions(opt: THttpServerOptions);
@@ -4030,9 +4043,6 @@ begin
   FastSetRawByteString(result, @PRIVKEY_PFX, SizeOf(PRIVKEY_PFX));
 end;
 
-var
-  SelfSignedCert: array[TCryptAsymAlgo] of ICryptCert; // one generated per algo
-
 procedure InitNetTlsContextSelfSignedServer(var TLS: TNetTlsContext;
   Algo: TCryptAsymAlgo; UsePreComputed: boolean);
 begin
@@ -4047,14 +4057,14 @@ begin
     exit;
   end;
   // generate a reusable per-algo ICryptCert instance (RSA-2048 can take time)
-  if SelfSignedCert[Algo] = nil then
-    SelfSignedCert[Algo] := CryptCertOpenSsl[Algo].Generate(
+  if CryptCertOpenSslSelfSigned[Algo] = nil then
+    CryptCertOpenSslSelfSigned[Algo] := CryptCertOpenSsl[Algo].Generate(
       CU_TLS_SERVER, '127.0.0.1', nil, 3650);
   //writeln(BinToSource('PRIVKEY_PFX', '', // force SHA1-3DES p12Legacy format
   //  SelfSignedCert[Algo].Save(cccCertWithPrivateKey, '3des=pass', ccfBinary)));
   // no temporary file needed: we just provide the shared OpenSSL handles
-  TLS.CertificateRaw := SelfSignedCert[Algo].Handle;           // PX509
-  TLS.PrivateKeyRaw  := SelfSignedCert[Algo].PrivateKeyHandle; // PEVP_PKEY
+  TLS.CertificateRaw := CryptCertOpenSslSelfSigned[Algo].Handle;           // PX509
+  TLS.PrivateKeyRaw  := CryptCertOpenSslSelfSigned[Algo].PrivateKeyHandle; // PEVP_PKEY
 end;
 
 const
@@ -4745,8 +4755,8 @@ begin
     l.Log(sllTrace, 'Destroy: final connection', self);
     if Sock.SocketLayer <> nlUnix then
       Sock.Close; // shutdown TCP/UDP socket to unlock Accept() in Execute
-    if NewSocket(Sock.Server, Sock.Port, Sock.SocketLayer,
-       {dobind=}false, 10, 10, 10, 0, dummy) = nrOK then
+    if NewSocket(Sock.Server, Sock.Port, Sock.SocketLayer, {dobind=}false,
+         10, 10, 10, {retry=}0, dummy) = nrOK then
       // Windows TCP/UDP socket may not release Accept() until something happen
       dummy.ShutdownAndClose({rdwr=}false);
     if Sock.SockIsDefined then
@@ -5245,13 +5255,13 @@ end;
 function THttpServerSocket.GetRequest(withBody: boolean;
   headerMaxTix: Int64): THttpServerSocketGetRequestResult;
 var
-  P, B: PUtf8Char;
   status, tix32, max: cardinal;
   startTix, pendingMaxTix, tix: Int64;
   pending: integer;
-  http10: boolean;
 begin
   try
+    if Http.CommandUri <> '' then
+      Http.Reset;
     // abort now with no exception if socket is obviously broken
     result := grClosed;
     // use SockIn with 1KB buffer if not already initialized: 2x faster
@@ -5312,34 +5322,19 @@ begin
       {$endif OSWINDOWS}
     until false;
     // 1st line is command: 'GET /path HTTP/1.1' e.g.
-    SockRecvLn(Http.CommandResp);
-    P := pointer(Http.CommandResp);
-    if P = nil then
-      exit; // connection is likely to be broken or closed
-    GetNextItem(P, ' ', Http.CommandMethod);           // 'GET'
-    if (PCardinal(P)^ = HTTP__32) and                  // 'http'
-       (PCardinal(P + 4)^ and $ffffff = HTTP__24) then // '://'
-    begin
-      // absolute-URI from https://datatracker.ietf.org/doc/html/rfc7230#section-5.3.2
-      B := P;
-      P := PosChar(P + 7, '/'); // use fast SSE2 asm on x86_64
-      if P = nil then
-        P := B; // paranoid
-    end;
-    GetNextItem(P, ' ', Http.CommandUri);    // '/path'
+    SockRecvLn(Http.CommandUri);
+    if Http.CommandUri = '' then
+      exit; // likely to be a broken or closed connection
     result := grRejected;
-    if (P = nil) or
-       (PCardinal(P)^ <> HTTP_32) or
-       (Http.CommandMethod = '') then
-      exit;
-    http10 := P[7] = '0';
+    if not Http.ParseCommand then
+      exit; // reject invalid command - e.g. if TLS was involved
     fKeepAliveClient := ((fServer = nil) or
                          (fServer.fServerKeepAliveTimeOut > 0)) and
-                        not http10;
-    Http.Content := '';
+                        not (rfHttp10 in Http.ResponseFlags);
     // get and parse HTTP request header
     if not GetHeader((fServer <> nil) and
-                     (hsoHeadersUnfiltered in fServer.Options)) then
+                     (hsoHeadersUnfiltered in fServer.Options),
+                     {NoHttpReset=}true) then
     begin
       SockSendFlush('HTTP/1.0 400 Bad Request'#13#10 +
         'Content-Length: 16'#13#10#13#10'Rejected Headers');
@@ -5391,7 +5386,7 @@ begin
       // support optional Basic/Digest authentication
       fRequestFlags := HTTP_TLS_FLAGS[TLS.Enabled] +
                        HTTP_UPG_FLAGS[hfConnectionUpgrade in Http.HeaderFlags] +
-                       HTTP_10_FLAGS[http10];
+                       HTTP_10_FLAGS[rfHttp10 in Http.ResponseFlags];
       if (hfHasAuthorization in Http.HeaderFlags) and
          (fServer.fAuthorize <> hraNone) then
       begin
@@ -5681,30 +5676,31 @@ end;
 type
   THttpServerEphemeral = class(THttpServer)
   protected
-    fResponse: RawUtf8;
+    fResponse, fResponseContentType: RawUtf8;
     fParams: PDocVariantData;
     fMethod: TUriMethods;
     fDone: TSynEvent;
     fReceived: TSynEvent;
   public
-    constructor Create(const aPort, aResponse: RawUtf8; aParams: PDocVariantData;
-      aLogClass: TSynLogClass; aMethod: TUriMethods; aOptions: THttpServerOptions); reintroduce;
+    constructor Create(const aPort, aResponse, aResponseContentType: RawUtf8;
+      aParams: PDocVariantData; aLogClass: TSynLogClass; aMethod: TUriMethods;
+      aOptions: THttpServerOptions; aThreadPool: integer); reintroduce;
     destructor Destroy; override;
     function Request(Ctxt: THttpServerRequestAbstract): cardinal; override;
     procedure OnResponded(var Context: TOnHttpServerAfterResponseContext);
   end;
 
-constructor THttpServerEphemeral.Create(const aPort, aResponse: RawUtf8;
-  aParams: PDocVariantData; aLogClass: TSynLogClass; aMethod: TUriMethods;
-  aOptions: THttpServerOptions);
+constructor THttpServerEphemeral.Create(const aPort, aResponse,
+  aResponseContentType: RawUtf8; aParams: PDocVariantData; aLogClass: TSynLogClass;
+  aMethod: TUriMethods; aOptions: THttpServerOptions; aThreadPool: integer);
 begin
   fResponse := aResponse;
+  fResponseContentType := aResponseContentType;
   fParams := aParams;
   fMethod := aMethod;
   fOnAfterResponse := OnResponded;
   fReceived := TSynEvent.Create;
-  inherited Create(
-    aPort, nil, nil, 'ephemeral', {threadpool=}-1, 0, aOptions, aLogClass);
+  inherited Create(aPort, nil, nil, 'ephemeral', aThreadPool, 0, aOptions, aLogClass);
 end;
 
 destructor THttpServerEphemeral.Destroy;
@@ -5722,6 +5718,8 @@ begin
   begin
     if fParams <> nil then
       THttpServerRequest(Ctxt).ToDocVariant(fParams^);
+    if fResponseContentType <> '' then
+      Ctxt.OutContentType := fResponseContentType;
     Ctxt.OutContent := fResponse;
     result := HTTP_SUCCESS;
   end
@@ -5737,13 +5735,14 @@ end;
 
 function EphemeralHttpServer(const aPort: RawUtf8; out aParams: TDocVariantData;
   aTimeOutSecs: integer; aLogClass: TSynLogClass; const aResponse: RawUtf8;
-  aMethods: TUriMethods; aOptions: THttpServerOptions): boolean;
+  aMethods: TUriMethods; aOptions: THttpServerOptions;
+  const aResponseContentType: RawUtf8): boolean;
 var
   server: THttpServerEphemeral;
 begin
   aParams.Clear;
-  server := THttpServerEphemeral.Create(
-    aPort, aResponse, @aParams, aLogClass, aMethods, aOptions);
+  server := THttpServerEphemeral.Create(aPort, aResponse, aResponseContentType,
+    @aParams, aLogClass, aMethods, aOptions, {threadpool=}-1);
   try
     result := server.fReceived.WaitForSafe(aTimeOutSecs * MilliSecsPerSec);
     if aLogClass <> nil then
@@ -5754,6 +5753,14 @@ begin
   finally
     server.Free;
   end;
+end;
+
+function EphemeralHttpServer(aLogClass: TSynLogClass; const aResponse: RawUtf8;
+  aMethods: TUriMethods; aOptions: THttpServerOptions;
+  const aResponseContentType: RawUtf8): THttpServer;
+begin
+  result := THttpServerEphemeral.Create('0', aResponse, aResponseContentType,
+    nil, aLogClass, aMethods, aOptions, {threadpool=}2);
 end;
 
 
@@ -6240,7 +6247,7 @@ var
       QueryPerformanceMicroSeconds(stop);
       dec(stop, fOwner.fBroadcastStart);
       if stop > 0 then
-        MicroSecToString(stop, us);
+        MicroSecToStringVar(stop, us);
     end;
     fOwner.fLog.Add.Log(sllTrace, 'OnFrameReceived: % % %',
       [remote.IP4Short, txt, us], self);
@@ -6885,8 +6892,8 @@ var
     if not result then
       // TStreamRedirect requires full rewind for full content re-hash
       if outStreamInitialPos = 0 then
-        result := OutStream.Seek(0, soBeginning) = 0; // will call ReHash
-      // TODO: fix range support - TStreamRedirect.Seek() Rehash after Append()
+        result := OutStream.Seek(0, soBeginning) = 0; // will call ResetHash
+      // TODO: fix range support - TStreamRedirect.Seek/ResetHash after Append()
   end;
 
 begin
@@ -7602,22 +7609,22 @@ end;
 procedure THttpPeerCache.DirectFileNameBackgroundGet(Sender: TObject);
 var
   cs: THttpClientSocketPeerCache absolute Sender;
-  res: integer;
+  status: integer;
   endsize: Int64;
 begin
   // remote HTTP/HTTPS GET request executed in its own TLoggedWorkThread thread
   try
     try
       // make the actual blocking GET request in this background thread
-      res := cs.Request(cs.RemoteUri, 'GET', 30000, cs.RemoteHeaders, '', '',
+      status := cs.Request(cs.RemoteUri, 'GET', 30000, cs.RemoteHeaders, '', '',
         {AsRetry=}false, {instream=}nil, {outstream=}cs.DestStream);
       if fSettings = nil then
         exit; // shutdown
-      if not (res in HTTP_GET_OK) then
-        EHttpPeerCache.RaiseUtf8('GET % failed as %', [cs.RemoteUri, res]);
+      if not (status in HTTP_GET_OK) then
+        EHttpPeerCache.RaiseUtf8('GET % failed as %', [cs.RemoteUri, status]);
       endsize := cs.ExpectedHashOrRaiseEHttpPeerCache;
       fLog.Add.Log(sllTrace, 'DirectFileNameBackgroundGet(%)=% size=%',
-        [cs.DestFileName, res, endsize], self);
+        [cs.DestFileName, status, endsize], self);
     except
       on E: Exception do
         cs.AbortDownload(self, E);
@@ -7798,13 +7805,12 @@ begin
   AppendShortUuid(msg.Uuid, result);
 end;
 
-function HttpRequestHash(aAlgo: THashAlgo; const aUri: TUri;
-  aHeaders: PUtf8Char; out aDigest: THashDigest): integer;
+function HttpRequestHash(aAlgo: THashAlgo; const aUri: TUri; aHeaders: PUtf8Char;
+  out aDigest: THashDigest; aUpCaseUri: boolean): integer;
 var
   hasher: TSynHasher;
   h: PUtf8Char;
-  hl: PtrInt; // not integer
-  up: TByteToAnsiChar; // normalize server name
+  l: PtrInt; // not integer
 begin
   result := 0;
   aDigest.Algo := aAlgo;
@@ -7813,37 +7819,41 @@ begin
     exit;
   hasher.Update(HTTPS_TEXT[aUri.Https]); // hash normalized URI
   hasher.Update(@aAlgo, 1); // separator
-  hasher.Update(@up, UpperCopy255(@up, aUri.Server) - PAnsiChar(@up));
+  hasher.UpdateUpper(pointer(aUri.Server), length(aUri.Server));
   hasher.Update(@aAlgo, 1);
   hasher.Update(aUri.Port);
   hasher.Update(@aAlgo, 1);
-  hasher.Update(pointer(aUri.Address), UriTruncAnchorLen(aUri.Address));
+  l := UriTruncAnchorLen(aUri.Address);
+  if aUpCaseUri then
+    hasher.UpdateUpper(pointer(aUri.Address), l) // normalize
+  else
+    hasher.Update(pointer(aUri.Address), l);
   if aHeaders <> nil then
   begin
     hasher.Update(@aAlgo, 1);
-    h := FindNameValuePointer(aHeaders, 'ETAG: ', hl); // ETAG + URI are genuine
+    h := FindNameValuePointer(aHeaders, 'ETAG: ', l); // ETAG + URI are genuine
     if h = nil then
     begin
       // fallback to file date and full size
-      h := FindNameValuePointer(aHeaders, 'LAST-MODIFIED: ', hl);
+      h := FindNameValuePointer(aHeaders, 'LAST-MODIFIED: ', l);
       if h = nil then
         exit;
-      hasher.Update(h, hl);
-      h := HttpRequestLength(aHeaders, @hl);
+      hasher.Update(h, l);
+      h := HttpRequestLength(aHeaders, @l);
       if h = nil then
         exit;
     end;
-    hasher.Update(h, hl);
+    hasher.Update(h, l);
   end;
   result := hasher.Final(aDigest.Bin, {noinit=}true);
 end;
 
 function HttpRequestHashBase32(const aUri: TUri; aName: PShort32;
-  aHeaders: PUtf8Char; aDig: PHash160): boolean;
+  aHeaders: PUtf8Char; aDig: PHash160; aUpCaseUri: boolean): boolean;
 var
   dig: THashDigest;
 begin // SizeOf(aDig^)=20 bytes=160-bit as 32 chars of case-insensitive base-32
-  result := HttpRequestHash(hfSHA256, aUri, aHeaders, dig) = SizeOf(THash256);
+  result := HttpRequestHash(hfSHA256, aUri, aHeaders, dig, aUpCaseUri) = SizeOf(THash256);
   if not result then
     FillZero(dig.Bin.b160);
   if aName <> nil then
@@ -9505,7 +9515,7 @@ begin
         while ((ch - p.pRawValue) < p.RawValueLength) and
               not (ch^ in [',']) do
           inc(ch);
-        FastSetString(protoname, chB, ch - chB);
+        FastSetString(protoname, chB, ch);
         for i := 0 to Length(protos) - 1 do
           if protos[i].name = protoname then
           begin

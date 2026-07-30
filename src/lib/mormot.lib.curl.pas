@@ -1212,7 +1212,7 @@ function CurlDisableGlobalShare: TCurlShareResult;
 /// just execute a request using libcurl and return the raw data
 // - could be used e.g. for a TFTP or FTP occasional client request
 function CurlPerform(const uri: RawUtf8; out data: RawByteString;
-  timeoutMs: integer = 1000; responseCode: PInteger = nil;
+  timeoutMs: integer = 5000; responseCode: PInteger = nil;
   tftpBlockSize: integer = 512): TCurlResult;
 
 
@@ -1538,11 +1538,11 @@ begin
     {$else}
 
     curl := TLibCurl.Create;
-    curl.TryLoadResolve([
     {$ifdef OSWINDOWS}
-      // first try the libcurl.dll in the local executable folder
-      Executable.ProgramFilePath + dllname,
+    // search library in the local executable folder
+    curl.TryFromExecutableFolder := True;
     {$endif OSWINDOWS}
+    curl.TryLoadResolve([
       // search standard library in path
       dllname
     {$ifdef OSDARWIN}

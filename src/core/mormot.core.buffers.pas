@@ -192,6 +192,9 @@ type
 function FromVarBlob(Data: PByte): TValueResult;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// append an integer as a 32-bit variable-length enncoded into TSynTempAdder
+// - return a pointer to the destination, prepared for about 60 more bytes
+function AddVarUInt32(var Adder: TSynTempAdder; Value: PtrUInt): PByte;
 
 
 { ************ TAlgoCompress Compression/Decompression Classes }
@@ -213,7 +216,7 @@ type
   TAlgoCompress = class
   protected
     fAlgoID: byte;
-    fAlgoHasForcedFormat: boolean;
+    fAlgoHasForcedFormat: boolean; // e.g. AlgoGZ forces .gz layout
     fAlgoFileExt: TFileName;
     procedure EnsureAlgoHasNoForcedFormat(const caller: ShortString);
   public
@@ -446,7 +449,7 @@ type
     /// returns the algorithm name, from its classname
     // - e.g. TAlgoSynLZ->'synlz' TAlgoLizard->'lizard' nil->'none'
     // TAlgoDeflateFast->'deflatefast'
-    function AlgoName: TShort16;
+    function AlgoName: TShort15;
   end;
 
   /// implement our fast SynLZ compression as a TAlgoCompress class
@@ -793,6 +796,12 @@ type
     /// returns the current position, and move ahead the specified bytes
     function NextSafe(out Data: pointer; DataLen: PtrInt): boolean;
       {$ifdef HASINLINE}inline;{$endif}
+    /// read the next #0 terminated text into a ShortString
+    procedure NextAsciiz(var s: ShortString); overload;
+      {$ifdef FPC}inline;{$endif} // Delphi can't inline var ShortString :(
+    /// fast ignore the next #0 terminated text
+    procedure NextAsciiz; overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// copy data from the current position, and move ahead the specified bytes
     procedure Copy(Dest: pointer; DataLen: PtrInt);
       {$ifdef HASINLINE}inline;{$endif}
@@ -828,7 +837,7 @@ type
   EBufferException = class(ESynException);
 
   /// available kind of integer array storage, corresponding to the data layout
-  // of TBufferWriter
+  // of TBufferWriter.WriteVarUInt32Array
   // - wkUInt32 will write the content as "plain" 4 bytes binary (this is the
   // preferred way if the integers can be negative)
   // - wkVarUInt32 will write the content using our 32-bit variable-length integer
@@ -857,18 +866,19 @@ type
   // - use TFileBufferReader or TFastReader for decoding of the stored binary
   TBufferWriter = class(TSynPersistent)
   protected
-    fPos: PtrInt;
-    fBufLen, fBufLen16: PtrInt;
+    fPos, fBufLen, fBufLen16: PtrInt;
     fBuffer: PByteArray;
     fStream: TStream;
-    fTotalFlushed: Int64;
+    fTotalFlushed, fMaxFlushed: Int64;
     fBufferInternal: pointer;
-    fInternalStream: boolean;
+    fInternalStream, fIsRawByteStream: boolean;
     fTag: PtrInt;
     procedure InternalFlush;
     function GetTotalWritten: Int64;
       {$ifdef HASINLINE}inline;{$endif}
     procedure InternalWrite(Data: pointer; DataLen: PtrInt);
+      {$ifdef HASINLINE}inline;{$endif}
+    procedure RaiseMaxFlushed;
     procedure FlushAndWrite(Data: pointer; DataLen: PtrInt);
     procedure Setup(aStream: TStream; aBuf: pointer; aLen: integer);
       {$ifdef HASINLINE}inline;{$endif}
@@ -975,6 +985,7 @@ type
     // - could be decoded later on via TFastReader.ReadVarUInt32Array
     procedure WriteVarUInt32Array(const Values: TIntegerDynArray;
       ValuesCount: integer; DataLayout: TBufferWriterKind);
+      {$ifdef HASINLINE}inline;{$endif}
     /// append cardinal values (NONE must be negative!) using 32-bit
     // variable-length integer encoding or other specialized algorithms,
     // depending on the data layout
@@ -1016,14 +1027,14 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// write any pending data in the internal buffer to the stream
     // - after a Flush, it's possible to call FileSeek64(aFile,....)
-    // - returns the number of bytes written between two FLush method calls
+    // - returns the number of bytes written between two Flush method calls
     function Flush: Int64;
     /// write any pending data, then create a RawByteString from the content
     // - raise an exception if internal Stream is not a TRawByteStringStream
     function FlushTo: RawByteString;
     /// write any pending data, then create a TBytes array from the content
     // - raise an exception if the size exceeds 800MB (_DAMAXSIZE)
-    function FlushToBytes: TBytes;
+    function FlushToBytes(MaxBytesSize: PtrInt = _DAMAXSIZE): TBytes;
     /// write any pending data, then call algo.Compress() on the buffer
     // - if algo is left to its default nil, will use global AlgoSynLZ
     // - features direct compression from internal buffer, if stream was not used
@@ -1044,6 +1055,11 @@ type
     /// get the byte count written since last Flush
     property TotalWritten: Int64
       read GetTotalWritten;
+    /// maximum bytes count over which an exception will be raised
+    // - equals _STRMAXSIZE = 800 MB if Stream is a TRawByteStringStream
+    // - otherwise, equals 0 by default to disable this feature
+    property MaxFlushed: Int64
+      read fMaxFlushed write fMaxFlushed;
     /// simple property used to store some integer content
     property Tag: PtrInt
       read fTag write fTag;
@@ -1399,8 +1415,8 @@ function Base58ToBin(const base58: RawUtf8): RawByteString; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 const
-  b32encUpper: array[0..31] of AnsiChar = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-  b32encLower: array[0..31] of AnsiChar = 'abcdefghijklmnopqrstuvwxyz234567';
+  b32encUpper: TTemp32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  b32encLower: TTemp32 = 'abcdefghijklmnopqrstuvwxyz234567';
 
 /// compute the length resulting of Base32 encoding of a binary buffer
 // - RFC4648 Base32 is defined as upper alphanumeric without misleading 0O 1I 8B
@@ -1586,10 +1602,10 @@ function UrlEncode(const Text: RawUtf8): RawUtf8; overload;
 /// encode a string as URI parameter encoding, i.e. ' ' as '+'
 function UrlEncode(Text: PUtf8Char): RawUtf8; overload;
 
-/// append a string as URI parameter encoding, i.e. ' ' as '+'
+/// append a string as URI parameter encoding, i.e. ' ' as '+' to TTextWriter
 procedure UrlEncode(W: TTextWriter; Text: PUtf8Char; TextLen: PtrInt); overload;
 
-/// append a string as URI parameter encoding, i.e. ' ' as '+'
+/// append a string as URI parameter encoding, i.e. ' ' as '+' to TTextWriter
 procedure UrlEncode(W: TTextWriter; const Text: RawUtf8); overload;
 
 /// encode a string as URI network name encoding, i.e. ' ' as %20
@@ -1600,13 +1616,16 @@ function UrlEncodeName(const Text: RawUtf8): RawUtf8; overload;
 // - only parameters - i.e. after '?' - should replace spaces by '+'
 function UrlEncodeName(Text: PUtf8Char): RawUtf8; overload;
 
-/// append a string as URI network name encoding, i.e. ' ' as %20
+/// append a string as URI network name encoding, i.e. ' ' as %20 to TTextWriter
 // - only parameters - i.e. after '?' - should replace spaces by '+'
 procedure UrlEncodeName(W: TTextWriter; Text: PUtf8Char; TextLen: PtrInt); overload;
 
-/// append a string as URI network name encoding, i.e. ' ' as %20
+/// append a string as URI network name encoding, i.e. ' ' as %20 to TTextWriter
 // - only parameters - i.e. after '?' - should replace spaces by '+'
 procedure UrlEncodeName(W: TTextWriter; const Text: RawUtf8); overload;
+
+/// append URI name (space2plus=48) or parameter (space2plus=32) to a TSynTempAdder
+procedure UrlEncodeAdder(var W: TSynTempAdder; Text: pointer; TextLen: PtrInt; space2plus: cardinal);
 
 type
   /// some options for UrlEncode()
@@ -1614,6 +1633,7 @@ type
     ueTrimLeadingQuestionMark,
     ueEncodeNames,
     ueStarNameIsCsv,
+    ueEqualNameIsDirect,
     ueSkipVoidString,
     ueSkipVoidValue);
 
@@ -2104,7 +2124,7 @@ function EscapeBuffer(s: PAnsiChar; slen: PtrInt; d: PAnsiChar; dmax: PtrInt): P
 
 type
   /// 512 bytes buffer to be allocated on stack when using LogEscape()
-  TLogEscape = array[0..511] of AnsiChar;
+  TLogEscape = TTemp512;
 
 /// fill TLogEscape stack buffer with the (hexadecimal) chars of the input binary
 // - up to 512 bytes will be escaped and appended to a local temp: TLogEscape
@@ -2469,10 +2489,9 @@ type
     fOwnStream: TStream;
   public
     /// initialize the source TStream and the internal buffer
-    // - will also rewind the aSource position to its beginning, and retrieve
-    // its size
-    constructor Create(aSource: TStream;
-      aBufSize: integer = 65536); reintroduce; overload;
+    // - will rewind the aSource position to its beginning, and retrieve its size
+    constructor Create(aSource: TStream; aBufSize: integer = 65536;
+      aOwnSource: boolean = false); reintroduce; overload;
     /// initialize a source file and the internal buffer
     constructor Create(const aSourceFileName: TFileName;
       aBufSize: integer = 65536); reintroduce; overload;
@@ -2482,7 +2501,34 @@ type
     function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
     /// will read up to Count bytes from the internal buffer or source TStream
     function Read(var Buffer; Count: Longint): Longint; override;
+    /// access to the associated source TStream instance
+    property Source: TStream
+      read fSource;
   end;
+
+  /// TStream which raise an exception when Write() reaches a given limit
+  // - Seek() or Read() on this class instance would raise an exception
+  // - Size and Position would follow the current Write() state
+  TLimitedStreamWriter = class(TStreamWithNoSeek)
+  protected
+    fLimit: Int64;
+    fDest: TStream;
+  public
+    /// initialize the source TStream and the internal size limit
+    // - supplied aDest should be void and will be owned by this instance
+    constructor Create(aDest: TStream; aLimit: Int64);
+    /// finalize this instance and its associated destination TStream
+    destructor Destroy; override;
+    /// overriden method which will ensure Size + Count < Limit
+    function Write(const Buffer; Count: Longint): Longint; override;
+    /// the maximum size in bytes allowed by this instance - 0 to disable
+    property Limit: Int64
+      read fLimit write fLimit;
+    /// access to the associated destination TStream instance
+    property Dest: TStream
+      read fDest;
+  end;
+
 
 /// compute the crc32c checksum of a given file
 // - this function maps the THashFile signature
@@ -3015,7 +3061,7 @@ begin
           c := p^;
           c := c shl 28;
           inc(p);
-          result := result and $fffffff or integer(c);
+          result := result and $0fffffff or integer(c);
         end;
       end;
     end;
@@ -3053,7 +3099,7 @@ begin
     exit;
   c := Source^ shl 28;
   inc(Source);
-  result := result and $fffffff or c;
+  result := result and $0fffffff or c;
 end;
 
 function ToVarInt64(Value: Int64; Dest: PByte): PByte;
@@ -3322,7 +3368,6 @@ begin
   result := Source;
 end;
 
-
 function ToVarString(const Value: RawUtf8; Dest: PByte): PByte;
 var
   Len: integer;
@@ -3438,6 +3483,15 @@ function FromVarBlob(Data: PByte): TValueResult;
 begin
   result.Len := FromVarUInt32(Data);
   result.Ptr := pointer(Data);
+end;
+
+function AddVarUInt32(var Adder: TSynTempAdder; Value: PtrUInt): PByte;
+var
+  p: PAnsiChar;
+begin
+  p := Adder.Prepare(64);
+  result := ToVarUInt32(Value, pointer(p));
+  inc(Adder.Store.added, PAnsiChar(result) - p);
 end;
 
 
@@ -3575,6 +3629,27 @@ begin
   end;
 end;
 
+procedure TFastReader.NextAsciiz(var s: ShortString);
+var
+  l: PtrInt;
+begin
+  l := ByteScanIndex(pointer(P), Last - P, 0);
+  if l < 0 then
+    ErrorOverflow;
+  SetString(s, P, l);
+  inc(P, l + 1);
+end;
+
+procedure TFastReader.NextAsciiz;
+var
+  l: PtrInt;
+begin
+  l := ByteScanIndex(pointer(P), Last - P, 0);
+  if l < 0 then
+    ErrorOverflow;
+  inc(P, l + 1);
+end;
+
 procedure TFastReader.Copy(Dest: pointer; DataLen: PtrInt);
 begin
   if P + DataLen > Last then
@@ -3659,7 +3734,7 @@ e:begin
   end;
   c := ord(P^) shl 28;
   inc(P);
-  result := result {%H-}and $fffffff or c;
+  result := result {%H-}and $0fffffff or c;
 end;
 
 procedure TFastReader.VarNextInt;
@@ -3740,7 +3815,7 @@ e:begin
   end;
   c := s^ shl 28;
   inc(s);
-  result := result {%H-}and $fffffff or c;
+  result := result {%H-}and $0fffffff or c;
 f:P := pointer(s);
 end;
 
@@ -4334,6 +4409,10 @@ begin
   fBufLen16 := aLen - 16;
   fBuffer := aBuf;
   fStream := aStream;
+  if not aStream.InheritsFrom(TRawByteStringStream) then
+    exit;
+  fIsRawByteStream := true;
+  fMaxFlushed := _STRMAXSIZE; // 800MB seems fair enough for a RawByteString
 end;
 
 constructor TBufferWriter.Create(aStream: TStream; BufLen: integer);
@@ -4380,24 +4459,26 @@ begin
   inherited;
 end;
 
-procedure TBufferWriter.InternalFlush;
-begin
-  if fPos > 0 then
-  begin
-    InternalWrite(fBuffer, fPos);
-    fPos := 0;
-  end;
+procedure TBufferWriter.RaiseMaxFlushed;
+begin // Delphi strings have a 32-bit length so you should change your algorithm
+  EBufferException.RaiseUtf8('%.Write: % overflow (%)',
+    [self, fStream, KBNoSpace(fTotalFlushed)]);
 end;
 
 procedure TBufferWriter.InternalWrite(Data: pointer; DataLen: PtrInt);
 begin
   inc(fTotalFlushed, DataLen);
-  if fStream.InheritsFrom(TRawByteStringStream) and
-     (fTotalFlushed > _STRMAXSIZE) then
-    // Delphi strings have a 32-bit length so you should change your algorithm
-    EBufferException.RaiseUtf8('%.Write: % overflow (%)',
-      [self, fStream, KBNoSpace(fTotalFlushed)]);
+  if (fMaxFlushed > 0) and
+     (fTotalFlushed > fMaxFlushed) then
+    RaiseMaxFlushed;
   fStream.WriteBuffer(Data^, DataLen);
+end;
+
+procedure TBufferWriter.InternalFlush;
+begin
+  if fPos > 0 then
+    InternalWrite(fBuffer, fPos);
+  fPos := 0;
 end;
 
 function TBufferWriter.GetTotalWritten: Int64;
@@ -4417,25 +4498,10 @@ procedure TBufferWriter.CancelAll;
 begin
   fTotalFlushed := 0;
   fPos := 0;
-  if PClass(fStream)^ = TRawByteStringStream then
+  if fIsRawByteStream then
     TRawByteStringStream(fStream).Size := 0
   else
     fStream.Seek(0, soBeginning);
-end;
-
-procedure TBufferWriter.FlushAndWrite(Data: pointer; DataLen: PtrInt);
-begin
-  if DataLen < 0 then
-    exit;
-  if fPos > 0 then
-    InternalFlush;
-  if DataLen > fBufLen then
-    InternalWrite(Data, DataLen)
-  else
-  begin
-    MoveFast(Data^, fBuffer^[fPos], DataLen);
-    inc(fPos, DataLen);
-  end;
 end;
 
 procedure TBufferWriter.Write(Data: pointer; DataLen: PtrInt);
@@ -4450,6 +4516,21 @@ begin
   end
   else
     FlushAndWrite(Data, DataLen); // will also handle DataLen<0
+end;
+
+procedure TBufferWriter.FlushAndWrite(Data: pointer; DataLen: PtrInt);
+begin // called from inlined Write()
+  if DataLen < 0 then
+    exit;
+  if fPos > 0 then
+    InternalFlush;
+  if DataLen > fBufLen then
+    InternalWrite(Data, DataLen)
+  else
+  begin
+    MoveFast(Data^, fBuffer^[fPos], DataLen);
+    inc(fPos, DataLen);
+  end;
 end;
 
 procedure TBufferWriter.WriteN(Data: byte; Count: integer);
@@ -5057,13 +5138,13 @@ begin
   result := (fStream as TRawByteStringStream).DataString;
 end;
 
-function TBufferWriter.FlushToBytes: TBytes;
+function TBufferWriter.FlushToBytes(MaxBytesSize: PtrInt): TBytes;
 var
   siz: Int64;
 begin
   result := nil;
   siz := GetTotalWritten;
-  if siz > _DAMAXSIZE then
+  if siz > MaxBytesSize then
     EBufferException.RaiseUtf8('%.FlushToBytes: overflow (%)', [KB(siz)]);
   SetLength(result, siz);
   if fStream.Position = 0 then
@@ -5188,7 +5269,7 @@ begin
   result := Algo(Comp).DecompressHeader(pointer(Comp), length(Comp));
 end;
 
-function TAlgoCompress.AlgoName: TShort16;
+function TAlgoCompress.AlgoName: TShort15;
 var
   s: PShortString;
   i: integer;
@@ -5205,8 +5286,8 @@ begin
     end
     else
       result[0] := s^[0];
-    if result[0] > #16 then
-      result[0] := #16;
+    if result[0] > #15 then
+      result[0] := #15;
     for i := 1 to ord(result[0]) do
       result[i] := NormToLower[s^[i]];
   end;
@@ -6113,7 +6194,7 @@ procedure ResourceToRawByteString(const ResName: string; ResType: PChar;
 var
   res: TExecutableResource;
 begin
-  if res.Open(ResName, ResType, Instance) then
+  if res.Open(PChar(ResName), ResType, Instance) then
   begin
     FastSetRawByteString(buf, res.Buffer, res.Size);
     res.Close;
@@ -6125,7 +6206,7 @@ procedure ResourceSynLZToRawByteString(const ResName: string;
 var
   res: TExecutableResource;
 begin
-  if res.Open(ResName, PChar(10), Instance) then
+  if res.Open(PChar(ResName), PChar(10), Instance) then
   begin
     AlgoSynLZ.Decompress(res.Buffer, res.Size, buf);
     res.Close;
@@ -8056,13 +8137,23 @@ end;
 
 procedure _UrlEncodeW(W: TTextWriter; Text: pointer; TextLen: PtrInt; space2plus: cardinal);
 begin
-  if (Text = nil) or
-     (W = nil) then
+  if (W = nil) or
+     (Text = nil) then
     exit;
-  TextLen := TextLen * 3; // worse case would fit most of the time
-  if TextLen > W.BEnd - W.B then // need to compute exact length (seldom needed)
+  TextLen := TextLen * 3;        // worse case would fit most of the time
+  if TextLen > W.BEnd - W.B then // better compute exact length (seldom)
     TextLen := _UrlEncode_ComputeLen(Text, @TEXT_BYTES, space2plus);
   inc(W.B, _UrlEncode_Write(Text, W.AddPrepare(TextLen), @TEXT_BYTES, space2plus));
+end;
+
+procedure UrlEncodeAdder(var W: TSynTempAdder; Text: pointer; TextLen: PtrInt; space2plus: cardinal);
+begin
+  if Text = nil then
+    exit;
+  TextLen := TextLen * 3;               // worse case would fit most of the time
+  if TextLen > W.Capacity - W.Size then // better compute exact length (seldom)
+    TextLen := _UrlEncode_ComputeLen(Text, @TEXT_BYTES, space2plus);
+  inc(W.Store.Added, _UrlEncode_Write(Text, W.Prepare(TextLen), @TEXT_BYTES, space2plus));
 end;
 
 function UrlEncode(const Text: RawUtf8): RawUtf8;
@@ -8133,92 +8224,97 @@ var
   a, n: PtrInt;
   name, value, one: RawUtf8;
   p: PVarRec;
-  w: TTextWriter;
   csv: PUtf8Char;
-  flags: set of (possibleDirect, valueDirect, valueIsCsv, hasContent);
-  tmp: TTextWriterStackBuffer;
+  flags: set of (possibleDirect, valueDirect, valueIsCsv, valueRaw, hasContent);
+  w: TSynTempAdder;
 begin
   flags := [];
   if DefaultJsonWriter <> TTextWriter then
     include(flags, possibleDirect);
-  w := DefaultJsonWriter.CreateOwnedStream(tmp);
-  try
-    if PrefixFmt <> '' then
-      w.Add(PrefixFmt, PrefixArgs);
-    n := high(NameValuePairs);
-    if (n > 0) and
-       (n and 1 = 1) then // n should be = 1,3,5,7,..
-      for a := 0 to n shr 1 do
+  w.Init;
+  if PrefixFmt <> '' then
+    FormatAdder(w, PrefixFmt, PrefixArgs);
+  n := high(NameValuePairs);
+  if (n > 0) and
+     (n and 1 = 1) then // n should be = 1,3,5,7,..
+    for a := 0 to n shr 1 do
+    begin
+      p := @NameValuePairs[a * 2];
+      VarRecToUtf8(p, name);
+      if name = '' then
+        continue;
+      flags := flags - [valueDirect, valueIsCsv, valueRaw];
+      if (ueStarNameIsCsv in Options) and
+         (name[1] = '*') then // "explode"
       begin
-        p := @NameValuePairs[a * 2];
-        VarRecToUtf8(p, name);
-        if name = '' then
-          continue;
-        flags := flags - [valueDirect, valueIsCsv];
-        if (ueStarNameIsCsv in Options) and
-           (name[1] = '*') then
-        begin
-          include(flags, valueIsCsv);
-          delete(name, 1, 1);
-        end;
-        if not IsUrlValid(pointer(name)) then
-          if ueEncodeNames in Options then
-            name := UrlEncodeName(name)
-          else
-            continue; // just skip invalid names
-        inc(p);
-        if (possibleDirect in flags) and
-           (not (valueIsCsv in flags)) and
-           (byte(p^.VType) in vtNotString) then
-          include(flags, valuedirect);
-        if (ueSkipVoidValue in Options) and
-           VarRecIsVoid(p) then
-          continue // skip e.g. '' or 0
-        else if p^.VType = vtObject then // no VarRecToUtf8(vtObject)=ClassName
-          value := ObjectToJson(p^.VObject, [])
-        else if not (valueDirect in flags) then
-        begin
-          VarRecToUtf8(p, value);
-          if (ueSkipVoidString in Options) and
-             (value = '') then
-            continue; // skip ''
-        end;
-        if hasContent in flags then
-          w.AddDirect('&')
-        else
-        begin
-          include(flags, hasContent);
-          if not (ueTrimLeadingQuestionMark in Options) then
-            w.AddDirect('?');
-        end;
-        if valueIsCsv in flags then
-        begin
-          csv := pointer(value); // '*tag', 't1,"t2",t3'
-          repeat
-            GetNextItem(csv, ',', '"', one);
-            if (ueSkipVoidString in Options) and
-               (one = '') then
-              continue;
-            if not (valueIsCsv in flags) then
-              w.AddDirect('&'); // ? or & has been written before the first item
-            exclude(flags, valueIsCsv);
-            w.AddString(name); // 'tag=t1&tag=t2&tag=t3'
-            w.AddDirect('=');
-            _UrlEncodeW(w, pointer(one), length(one), 32);
-          until csv = nil;
-          continue;
-        end;
-        w.AddString(name);
-        w.AddDirect('=');
-        if valueDirect in flags then
-          w.AddVarRec(p) // direct vtNotString numbers writing
-        else
-          _UrlEncodeW(w, pointer(value), length(value), 32); // need UrlEncode()
+        include(flags, valueIsCsv);
+        delete(name, 1, 1);
+      end
+      else if (ueEqualNameIsDirect in Options) and
+              (name[1] = '=') then // "deepObject"
+      begin
+        include(flags, valueRaw);
+        delete(name, 1, 1);
       end;
-    w.SetText(result);
-  finally
-    w.Free;
-  end;
+      if not IsUrlValid(pointer(name)) then
+        if ueEncodeNames in Options then
+          name := UrlEncodeName(name)
+        else
+          continue; // just skip invalid names
+      inc(p);
+      if (possibleDirect in flags) and
+         (flags * [valueRaw, valueIsCsv] = []) and
+         (byte(p^.VType) in vtNotString) then
+        include(flags, valueDirect);
+      if (ueSkipVoidValue in Options) and
+         VarRecIsVoid(p) then
+        continue // skip e.g. '' or 0
+      else if p^.VType = vtObject then // no VarRecToUtf8(vtObject)=ClassName
+        value := ObjectToJson(p^.VObject, [])
+      else if flags * [valueRaw, valueDirect] = [] then
+      begin
+        VarRecToUtf8(p, value);
+        if (ueSkipVoidString in Options) and
+           (value = '') then
+          continue; // skip ''
+      end;
+      if hasContent in flags then
+        w.AddDirect('&')
+      else
+      begin
+        include(flags, hasContent);
+        if not (ueTrimLeadingQuestionMark in Options) then
+          w.AddDirect('?');
+      end;
+      if valueIsCsv in flags then
+      begin
+        csv := pointer(value); // '*tag', 't1,"t2",t3'
+        repeat
+          GetNextItem(csv, ',', '"', one);
+          if (ueSkipVoidString in Options) and
+             (one = '') then
+            continue;
+          if not (valueIsCsv in flags) then
+            w.AddDirect('&'); // ? or & has been written before the first item
+          exclude(flags, valueIsCsv);
+          w.Add(name); // 'tag=t1&tag=t2&tag=t3'
+          w.AddDirect('=');
+          UrlEncodeAdder(w, pointer(one), length(one), 32);
+        until csv = nil;
+        continue;
+      end else if valueRaw in flags then
+      begin
+        VarRecToAdder(w, p); // append already encoded deepObject URI parameters
+        continue;
+      end;
+      w.Add(name);
+      w.AddDirect('=');
+      if valueDirect in flags then
+        VarRecToAdder(w, p) // direct vtNotString numbers writing
+      else
+        UrlEncodeAdder(w, pointer(value), length(value), 32); // need encoding
+    end;
+  w.Done(result);
 end;
 
 function IsUrlValid(P: PUtf8Char): boolean;
@@ -9072,7 +9168,12 @@ begin
        ord('i') + ord('c') shl 8 + ord('a') shl 16 + ord('t') shl 24) or
      (PCardinalArray(ContentType)[2] or $00202020 <>
        ord('i') + ord('o') shl 8 + ord('n') shl 16 + ord('/') shl 24) then
-    exit; // not application/*
+  begin // not application/*
+    result := (ContentType[ContentTypeLen + (12 - 5)] = '/') and
+              (PCardinal(@ContentType[ContentTypeLen + (12 - 4)])^ or $20202020 =
+                 ord('j') + ord('s') shl 8 + ord('o') shl 16 + ord('n') shl 24);
+    exit; // consider '*/json' as JSON
+  end;
   case PCardinalArray(ContentType)[3] or $20202020 of
     ord('j') + ord('s') shl 8 + ord('o') shl 16 + ord('n') shl 24:
       ; // found
@@ -9684,7 +9785,7 @@ end;
 function TProgressInfo.GetProgress: RawUtf8;
 var
   ctx, remain: TShort47;
-  persec, expect, curr: TShort16;
+  persec, expect, curr: TShort15;
 begin
   result := LastProgress;
   if result <> '' then
@@ -9702,7 +9803,7 @@ begin
   begin
     PCardinal(@persec)^ := $2001; // ' '
     AppendKB(PerSecond, persec, {withspace=}false);
-    AppendShortTwoChars(ord('/') + ord('s') shl 8, @persec);
+    AppendShortTwoCharsSafe(ord('/') + ord('s') shl 8, persec);
   end;
   curr[0] := #0;
   AppendKB(CurrentSize, curr, {withspace=}false);
@@ -10234,19 +10335,21 @@ end;
 
 { TBufferedStreamReader }
 
-constructor TBufferedStreamReader.Create(aSource: TStream; aBufSize: integer);
+constructor TBufferedStreamReader.Create(aSource: TStream; aBufSize: integer;
+  aOwnSource: boolean);
 begin
-  pointer(fBuffer) := FastNewString(aBufSize);
   fSource := aSource;
   fSize := fSource.Size; // get it once
   fSource.Seek(0, soBeginning);
+  pointer(fBuffer) := FastNewString(aBufSize);
+  if aOwnSource then
+    fOwnStream := fSource;
 end;
 
 constructor TBufferedStreamReader.Create(const aSourceFileName: TFileName;
   aBufSize: integer);
 begin
-  Create(TFileStreamEx.CreateRead(aSourceFileName));
-  fOwnStream := fSource;
+  Create(TFileStreamEx.CreateRead(aSourceFileName), aBufSize, {ownsource=}true);
 end;
 
 destructor TBufferedStreamReader.Destroy;
@@ -10291,12 +10394,13 @@ begin
       inc(result, avail);
       dec(Count, avail);
       if Count = 0 then
-        break;
+        break; // we got enough data from the internal buffer
       inc(dest, avail);
     end;
     if Count > length(fBuffer) then
     begin // big requests would read directly from stream
       inc(result, fSource.Read(dest^, Count));
+      fBufferLeft := 0; // invalidate buffer
       break;
     end;
     fBufferPos := pointer(fBuffer); // fill buffer and retry
@@ -10308,6 +10412,38 @@ begin
 end;
 
 
+{ TLimitedStreamWriter }
+
+constructor TLimitedStreamWriter.Create(aDest: TStream; aLimit: Int64);
+begin
+  inherited Create;
+  fDest := aDest;
+  if (fDest = nil) or
+     (fDest.Position <> 0) or
+     (fDest.Size <> 0) then
+    RaiseStreamError(self, 'Create with invalid Dest');
+  fLimit := aLimit;
+end;
+
+destructor TLimitedStreamWriter.Destroy;
+begin
+  inherited Destroy;
+  fDest.Free;
+end;
+
+function TLimitedStreamWriter.Write(const Buffer; Count: Longint): Longint;
+begin
+  if (fLimit > 0) and
+     (fSize + Count > fLimit) then
+    RaiseStreamError(self, 'Write: reached the specified Limit');
+  result := fDest.Write(Buffer, Count);
+  if result <= 0 then
+    exit;
+   inc(fPosition, result);
+   inc(fSize, result);
+end;
+
+
 function HashFile(const FileName: TFileName; Hasher: THasher): cardinal;
 var
   buf: array[word] of cardinal; // 256KB of buffer
@@ -10315,7 +10451,7 @@ var
   f: THandle;
 begin
   if not Assigned(Hasher) then
-    Hasher := DefaultHasher;
+    Hasher := DefaultHasher; // maybe AesNiHash32/hashsse42/crc32carm64/xxhash32
   result := 0;
   f := FileOpenSequentialRead(FileName);
   if ValidHandle(f) then
