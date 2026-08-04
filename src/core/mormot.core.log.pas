@@ -6666,13 +6666,8 @@ begin
     exit; // disabled for this thread (avoid nested call)
   log := HandleExceptionFamily.Add;
   if log = nil then
-<<<<<<< HEAD
    exit;
-  if log.fFamily.ExceptionIgnoreLibrary and
-=======
-    exit;
   if log.fFamily.ExceptionIgnoreExternal and
->>>>>>> 3b11ad4b2a3a7edf23c13fb8e0ca33432b766dea
      (Ctxt.EAddr <> 0) and
      not IsCurrentExecutable(pointer(Ctxt.EAddr)) then // fast guess
     exit;
