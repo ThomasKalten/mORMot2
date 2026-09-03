@@ -374,6 +374,7 @@ function CodePageToText(aCodePage: cardinal): RawUtf8;
 
 type
   /// a list of common human languages, in identifier alphabetic order
+  // - see mormot.core.i18n.pas for TLanguageFile internationalization support
   TLanguage = (lngUndefined,
     lngAfrikaans,  lngAlbanian, lngAlsatian,   lngArabic,     lngArmenian,
     lngAssamese,   lngAzeri,    lngBashkir,    lngBasque,     lngBelarusian,
@@ -1066,7 +1067,8 @@ procedure Utf8ToRawUtf8(P: PUtf8Char; var result: RawUtf8);
 function Utf8ToWinPChar(dest: PAnsiChar; source: PUtf8Char; count: integer): integer;
   {$ifdef HASINLINE}inline;{$endif}
 
-{$ifndef PUREMORMOT2}
+{$ifndef PUREMORMOT2} { RawUnicode is deprecated in mORMot 2 - prefer SynUnicode }
+
 /// direct conversion of a WinAnsi (CodePage 1252) string into a Unicode encoded String
 // - very fast, by using a fixed pre-calculated array for individual chars conversion
 function WinAnsiToRawUnicode(const S: WinAnsiString): RawUnicode;
@@ -1107,21 +1109,9 @@ function RawUnicodeToSynUnicode(const Unicode: RawUnicode): SynUnicode; overload
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any RTL string into a RawUnicode encoded String
-// - it's preferred to use TLanguageFile.StringToUtf8() method in mORMoti18n,
-// which will handle full i18n of your application
-// - it will work as is with Delphi 2009+ (direct unicode conversion)
-// - under older version of Delphi (no unicode), it will use the
-// current RTL codepage, as with WideString conversion (but without slow
-// WideString usage)
 function StringToRawUnicode(const S: string): RawUnicode; overload;
 
 /// convert any RTL string into a RawUnicode encoded String
-// - it's preferred to use TLanguageFile.StringToUtf8() method in mORMoti18n,
-// which will handle full i18n of your application
-// - it will work as is with Delphi 2009+ (direct unicode conversion)
-// - under older version of Delphi (no unicode), it will use the
-// current RTL codepage, as with WideString conversion (but without slow
-// WideString usage)
 function StringToRawUnicode(P: PChar; L: integer): RawUnicode; overload;
 
 /// convert any RawUnicode encoded string into a RTL string
@@ -1234,20 +1224,14 @@ function WinAnsiToSynUnicode(const WinAnsi: WinAnsiString): SynUnicode;
   {$ifdef HASINLINE}inline;{$endif} overload;
 
 /// convert any RTL string into an UTF-8 encoded String
-// - in the VCL context, it's preferred to use TLanguageFile.StringToUtf8()
-//  method from mORMoti18n, which will handle full i18n of your application
-// - it will work as is with Delphi 2009+ (direct unicode conversion)
-// - under older version of Delphi (no unicode), it will use the
-// current RTL codepage, as with WideString conversion (but without slow
-// WideString usage)
+// - Delphi 2009+ (UNICODE) will make direct UTF-16 to UTF-8 conversion
+// - follow Unicode_CodePage under FPC or older version of Delphi (no UNICODE)
 function StringToUtf8(const Text: string): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any RTL string buffer into an UTF-8 encoded String
-// - it will work as is with Delphi 2009+ (direct unicode conversion)
-// - under older version of Delphi (no unicode), it will use the
-// current RTL codepage, as with WideString conversion (but without slow
-// WideString usage)
+// - Delphi 2009+ (UNICODE) will make direct UTF-16 to UTF-8 conversion
+// - follow Unicode_CodePage under FPC or older version of Delphi (no UNICODE)
 procedure StringToUtf8(Text: PChar; TextLen: PtrInt; var result: RawUtf8); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -1279,27 +1263,17 @@ function ToUtf8(const Ansi7Text: ShortString): RawUtf8; overload;
 
 /// convert any RTL string buffer into an UTF-8 encoded buffer
 // - Dest must be able to receive at least SourceChars*3 bytes
-// - it will work as is with Delphi 2009+ (direct unicode conversion)
-// - under older version of Delphi (no unicode), it will use the
-// current RTL codepage, as with WideString conversion (but without slow
-// WideString usage)
+// - Delphi 2009+ (UNICODE) will make direct UTF-16 to UTF-8 conversion
+// - follow Unicode_CodePage under FPC or older version of Delphi (no UNICODE)
 function StringBufferToUtf8(Dest: PUtf8Char;
   Source: PChar; SourceChars: PtrInt): PUtf8Char; overload;
 
 /// convert any RTL string 0-terminated Text buffer into an UTF-8 string
-// - it will work as is with Delphi 2009+ (direct unicode conversion)
-// - under older version of Delphi (no unicode), it will use the
-// current RTL codepage, as with WideString conversion (but without slow
-// WideString usage)
+// - Delphi 2009+ (UNICODE) will make direct UTF-16 to UTF-8 conversion
+// - follow Unicode_CodePage under FPC or older version of Delphi (no UNICODE)
 procedure StringBufferToUtf8(Source: PChar; out result: RawUtf8); overload;
 
 /// convert any RTL string into a SynUnicode encoded String
-// - it's preferred to use TLanguageFile.StringToUtf8() method in mORMoti18n,
-// which will handle full i18n of your application
-// - it will work as is with Delphi 2009+ (direct unicode conversion)
-// - under older version of Delphi (no unicode), it will use the
-// current RTL codepage, as with WideString conversion (but without slow
-// WideString usage)
 function StringToSynUnicode(const S: string): SynUnicode; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -1319,12 +1293,8 @@ function SynUnicodeToString(const U: SynUnicode): string;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any UTF-8 encoded String into a RTL string
-// - it's preferred to use TLanguageFile.Utf8ToString() in mORMoti18n,
-// which will handle full i18n of your application
-// - it will work as is with Delphi 2009+ (direct unicode conversion)
-// - under older version of Delphi (no unicode), it will use the
-// current RTL codepage, as with WideString conversion (but without slow
-// WideString usage)
+// - Delphi 2009+ (UNICODE) will make direct UTF-8 to UTF-16 conversion
+// - follow Unicode_CodePage under FPC or older version of Delphi (no UNICODE)
 function Utf8ToString(const Text: RawUtf8): string;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -1335,12 +1305,8 @@ procedure Utf8ToStringVar(const Text: RawUtf8; var result: string);
 procedure Utf8ToFileName(const Text: RawUtf8; var result: TFileName);
 
 /// convert any UTF-8 encoded buffer into a RTL string
-// - it's preferred to use TLanguageFile.Utf8ToString() in mORMoti18n,
-// which will handle full i18n of your application
-// - it will work as is with Delphi 2009+ (direct unicode conversion)
-// - under older version of Delphi (no unicode), it will use the
-// current RTL codepage, as with WideString conversion (but without slow
-// WideString usage)
+// - Delphi 2009+ (UNICODE) will make direct UTF-8 to UTF-16 conversion
+// - follow Unicode_CodePage under FPC or older version of Delphi (no UNICODE)
 function Utf8DecodeToString(P: PUtf8Char; L: integer): string; overload;
   {$ifdef UNICODE}inline;{$endif}
 
@@ -2101,11 +2067,11 @@ type
   TSynByteSet = set of byte;
 
   /// a generic callback, which can be used to translate some text on the fly
-  // - maps procedure TLanguageFile.Translate(var English: string) signature
-  // as defined in mORMoti18n.pas
+  // - match TLanguageFile.Translate signature in mormot.core.i18n.pas
   // - can be used e.g. for TSynMustache's {{"English text}} callback
   TOnStringTranslate = procedure(var English: string) of object;
   /// a generic callback, which can be used to translate some text on the fly
+  // - match TLanguageFile.TranslateUtf8 signature in mormot.core.i18n.pas
   // - if UTF-8 is enough you don't need the whole "string" type
   // - would render to any assigned Translated value, or fallback to English if ''
   // - can be used e.g. for TSynMustache's {{"English text}} callback
@@ -2315,11 +2281,11 @@ function UnQuotedSqlSymbolName(const ExternalDBSymbol: RawUtf8): RawUtf8;
 function GotoEndOfQuotedString(P: PUtf8Char): PUtf8Char;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// get the next character not in [#1..' ']
+/// get the next character not in [#1 .. ' ']
 function GotoNextNotSpace(P: PUtf8Char): PUtf8Char;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// get the next character not in [#1..' ']
+/// get the next character not in [#1 .. ' ']
 function IgnoreAndGotoNextNotSpace(P: PUtf8Char): PUtf8Char;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -2331,7 +2297,7 @@ function GotoNextNotSpaceSameLine(P: PUtf8Char): PUtf8Char;
 function GotoNextSpace(P: PUtf8Char): PUtf8Char;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// check if the next character not in [#1..' '] matchs a given value
+/// check if the next character not in [#1 .. ' '] matchs a given value
 // - first ignore any non space character
 // - then returns TRUE if P^=ch, setting P to the character after ch
 // - or returns FALSE if P^<>ch, leaving P at the level of the unexpected char
@@ -2667,11 +2633,12 @@ procedure SnakeCase(P: PAnsiChar; len: PtrInt; var s: RawUtf8; sep: AnsiChar = '
 function SnakeCase(const text: RawUtf8; sep: AnsiChar = '_'): RawUtf8; overload;
 
 var
-  /// these procedure type must be defined if a default system.pas is used
+  /// runtime global callback for our GetCaptionFromPCharLen() procedure
   // - expect generic "string" type, i.e. UnicodeString for Delphi 2009+
+  // - properly implemented e.g. by TLanguageFiles.SetGlobal in mormot.core.i18n
   LoadResStringTranslate: procedure(var Text: string) = nil;
 
-/// UnCamelCase and translate a char buffer
+/// UnCamelCase and translate an UTF-8 text buffer
 // - P is expected to be #0 ended, or we will use the supplied Len
 // - return "string" type, i.e. UnicodeString for Delphi 2009+
 procedure GetCaptionFromPCharLen(P: PUtf8Char; out result: string; Len: PtrUInt = 0);
@@ -2877,6 +2844,9 @@ type
 
 /// add the Value to Values[] string array
 function AddString(var Values: TStringDynArray; const Value: string): PtrInt;
+
+/// case-sensitive search a Value to Values[] string array
+function FindString(const Values: TStringDynArray; const Value: string): PtrInt;
 
 /// convert the string dynamic array into a dynamic array of UTF-8 strings
 procedure StringDynArrayToRawUtf8DynArray(const Source: array of string;
@@ -3349,7 +3319,7 @@ var
   {$endif CPUX86NOTPIC}
 label
   quit, nosource, by2;
-begin // slightly slower overload with explicit destlen
+begin // slightly slower overload with explicit dest length as MaxDestChars
   result := 0;
   if dest = nil then
     exit;
@@ -3367,8 +3337,9 @@ begin // slightly slower overload with explicit destlen
     until source[sourcebytes] = #0;
     {$endif ASMX86}
   end;
-  inc(sourceBytes, PtrUInt(source)); // PUtf8Char(sourceBytes)  = endSource
-  inc(MaxDestChars, PtrUInt(dest));  // PUtf8Char(MaxDestChars) = endDest
+  inc(sourceBytes, PtrUInt(source)); // PUtf8Char(sourceBytes) = endSource
+  // MaxDestChars is a WideChar count: compute PUtf8Char(MaxDestChars) = endDest
+  MaxDestChars := PtrUInt(@dest[MaxDestChars]);
   {$ifndef CPUX86NOTPIC}
   utf8 := @UTF8_TABLE;
   {$endif CPUX86NOTPIC}
@@ -5203,7 +5174,7 @@ function AnyTextFileToRawUtf8(const FileName: TFileName; AssumeUtf8IfNoBom: bool
 var
   tmp: RawByteString;
   buf: pointer;
-  chars: PtrInt;
+  chars: PtrInt; // not integer
 begin
   case StringFromBomFile(FileName, tmp, buf, chars) of
     bomNone: // most common case, especially on POSIX
@@ -5234,7 +5205,7 @@ function AnyTextFileToSynUnicode(const FileName: TFileName; ForceUtf8: boolean):
 var
   tmp: RawByteString;
   buf: pointer;
-  chars: PtrInt;
+  chars: PtrInt; // not integer
 begin
   case StringFromBomFile(FileName, tmp, buf, chars) of
     bomNone: // most common case, especially on POSIX
@@ -5266,7 +5237,7 @@ function AnyTextFileToString(const FileName: TFileName; ForceUtf8: boolean): str
 var
   tmp: RawByteString;
   buf: pointer;
-  chars: PtrInt;
+  chars: PtrInt; // not integer
 begin
   case StringFromBomFile(FileName, tmp, buf, chars) of
     bomNone: // most common case, especially on POSIX
@@ -5316,7 +5287,7 @@ begin
     exit;
   end;
   if cp = CP_ACP then
-    cp := Unicode_CodePage; // most likely on FPC
+    cp := Unicode_CodePage; // most likely CP_UTF8 on FPC/Lazarus
   if (cp >= CP_RAWBLOB) or
      (cp = CP_UTF8) then
       if sr^.refCnt >= 0 then
@@ -5334,7 +5305,7 @@ end;
 procedure AnyAnsiToUtf8Var(const s: RawByteString; var result: RawUtf8);
 begin
   if (s = '') or
-     IsValidUtf8Buffer(pointer(s), length(s)) then // slower but safe
+     IsValidUtf8Buffer(pointer(s), length(s)) then // brutal but safe
     result := s
   else
     CurrentAnsiConvert.AnsiBufferToRawUtf8(pointer(s), length(s), result);
@@ -7243,7 +7214,7 @@ end;
 function _Utf8CompareOS(P1, P2: PUtf8Char; IgnoreCase: boolean): PtrInt;
 var // use temporary UTF-16 conversion on stack
   w1, w2: PtrInt;
-  t1, t2: array[0 .. 1023] of WideChar; // convert+compare up to 1023 widechars
+  t1, t2: TWide1K; // convert+compare up to 1023 widechars
 begin // here P1<>nil and P2<>nil
   w1 := Utf8ToWideChar(@t1, p1, high(t1), StrLen(P1)) shr 1;
   w2 := Utf8ToWideChar(@t2, p2, high(t2), StrLen(P2)) shr 1;
@@ -7301,7 +7272,7 @@ begin
     table := @NormToUpperAnsi7;
     {$endif CPUX86NOTPIC}
     if pEnd = nil then
-      repeat
+      repeat // p end at #0
         if p^ <= #13 then // p^ into a temp var is slower
           goto lf1
         else if table[p^] = up^ then
@@ -7331,7 +7302,7 @@ ok:         result := true; // found
         inc(p);
       until false
     else
-      repeat
+      repeat // p..pEnd version
         if p >= pEnd then
           break;
         if p^ <= #13 then
@@ -8721,8 +8692,7 @@ begin
   p := UniqueRawUtf8(S);
   d := p; // in-place process
   repeat
-    while (p^ <= ' ') and
-          (p^ <> #0) do
+    while p^ in [#1 .. ' '] do
       inc(p);
     while not (p^ in [#0, #10, #13]) do
     begin
@@ -9303,16 +9273,15 @@ end; // P^='"' or P^=#0 at function return
 
 function GotoNextNotSpace(P: PUtf8Char): PUtf8Char;
 begin
-  {$ifdef FPC}
-  while (P^ <= ' ') and
-        (P^ <> #0) do
-    inc(P);
-  {$else}
-  if P^ in [#1..' '] then
+  {$ifdef WIN32DELPHI}
+  if P^ in [#1 .. ' '] then // Delphi i386 seems to prefer this kind of code
     repeat
       inc(P);
-    until not (P^ in [#1..' ']);
-  {$endif FPC}
+    until not (P^ in [#1 .. ' ']);
+  {$else}
+  while P^ in [#1 .. ' '] do // seems to be the best pattern on FPC + Delphi64
+    inc(P);
+  {$endif WIN32DELPHI}
   result := P;
 end;
 
@@ -9320,7 +9289,7 @@ function IgnoreAndGotoNextNotSpace(P: PUtf8Char): PUtf8Char;
 begin
   repeat
     inc(P);
-  until not (P^ in [#1..' ']);
+  until not (P^ in [#1 .. ' ']);
   result := P;
 end;
 
@@ -9342,9 +9311,7 @@ end;
 
 function NextNotSpaceCharIs(var P: PUtf8Char; ch: AnsiChar): boolean;
 begin
-  while (P^ <= ' ') and
-        (P^ <> #0) do
-    inc(P);
+  P := GotoNextNotSpace(P);
   if P^ = ch then
   begin
     inc(P);
@@ -10552,7 +10519,7 @@ begin
     for result := 0 to ValuesCount do
       if (PtrUInt(Values^) <> 0) and
          ({%H-}PStrLen(PtrUInt(Values^) - _STRLEN)^ = len) and
-         CompareMemFixed(pointer(PtrInt(Values^)), pointer(Value), len) then
+         CompareMemFixed(pointer(PtrUInt(Values^)), pointer(Value), len) then
         exit
       else
         inc(Values)
@@ -10754,6 +10721,14 @@ begin
   result := length(Values);
   SetLength(Values, result + 1);
   Values[result] := Value;
+end;
+
+function FindString(const Values: TStringDynArray; const Value: string): PtrInt;
+begin
+  for result := 0 to length(Values) - 1 do
+    if Values[result] = Value then
+      exit;
+  result := -1;
 end;
 
 procedure StringDynArrayToRawUtf8DynArray(const Source: array of string;

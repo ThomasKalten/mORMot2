@@ -178,8 +178,6 @@ type
   PMethod = ^TMethod;
 
 {$ifndef ISDELPHIXE2}
-  /// used to store the handle of a system Thread
-  TThreadID = cardinal;
   /// compatibility definition with FPC and newer Delphi
   PUInt64 = ^UInt64;
 
@@ -795,6 +793,9 @@ const
   // - even if a dynamic array can handle PtrInt length, consider other patterns
   _DAMAXSIZE = (800 shl 20) - 1;
 
+  /// cross-compiler refCnt for a constant string or dynamic array instance
+  _REFCNTCONST = -1;
+
 /// like SetLength() but without any memory resize - WARNING: len should be > 0
 procedure DynArrayFakeLength(arr: pointer; len: TDALen);
   {$ifdef HASINLINE} inline; {$endif}
@@ -843,6 +844,7 @@ const
   OPTI_32    = ord('O') + ord('P') shl 8 + ord('T') shl 16 + ord('I') shl 24;
   NONE_32    = ord('N') + ord('O') shl 8 + ord('N') shl 16 + ord('E') shl 24;
   NOT_32     = ord('N') + ord('O') shl 8 + ord('T') shl 16 + ord(' ') shl 24;
+  TEXT32     = ord('t') + ord('e') shl 8 + ord('x') shl 16 + ord('t') shl 24;
   SLASH_16   = ord('/') + ord('/') shl 8;
   SLBEG_16   = ord('/') + ord('*') shl 8;
   SLEND_16   = ord('*') + ord('/') shl 8;
@@ -967,6 +969,14 @@ procedure FastSetStrRec(var Rec: TStrRec; const Len: TStrLen; const RefCnt: TStr
 
 /// fill a RawUtf8 constant with up to 7 chars of UTF-8 content
 function FastSetConst(var S; var Rec: TStrRecConst; P: pointer; Len: TStrLen): PUtf8Char;
+
+/// prepare a RawByteString to pre-allocate several constant RawUtf8 values
+// - see ReadSymbol() in mormot.core.log for an usage sample
+function StrRecAlloc(var temp: RawByteString; count, size: PtrInt): PStrRec;
+
+/// append a new RawUtf8 to a StrRecAlloc() pre-allocate array
+function StrRecNew(U: PPointer; sr: PStrRec; P: pointer; const len: PtrInt): PStrRec;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// ensure the supplied variable will have a CP_UTF8 code page
 // - making it unique if needed
@@ -2051,6 +2061,14 @@ function FromU64(const Values: array of QWord): TQWordDynArray;
 /// internal function called e.g. by DeleteWord/DeleteInteger/DeleteInt64
 procedure UnmanagedDynArrayDelete(var v; Count, Index, ItemSize: PtrUInt);
 
+/// prepare a RawByteString to pre-allocate several constant dynamic array values
+// - see TDebugFile.LoadMab in mormot.core.log for an usage sample
+function DARecAlloc(var temp: RawByteString; count, size: PtrInt): PDynArrayRec;
+
+/// append a new RawUtf8 to a StrRecAlloc() pre-allocate array
+function DARecNew(A: PPointer; da: PDynArrayRec; P: pointer; const len: PtrInt): PDynArrayRec;
+  {$ifdef HASINLINE}inline;{$endif}
+
 type
   /// used to store and retrieve Words in a sorted array
   // - ensure Count=0 before use - if not defined as a private member of a class
@@ -2576,6 +2594,10 @@ function Hash128Index(P: PHash128Rec; Count: PtrInt; h: PHash128Rec): PtrInt;
 function AddHash128(var Arr: THash128DynArray;
   {$ifdef FPC}constref{$else}const{$endif} V: THash128; var Count: integer): PtrInt;
 
+/// mark a 128-bit random binary into a UUid value according to RFC 4122
+procedure MakeRandomGuid(u: PHash128);
+  {$ifdef HASINLINE}inline;{$endif}
+
 /// returns TRUE if all 20 bytes of this 160-bit buffer equal zero
 // - e.g. a SHA-1 digest
 function IsZero(const dig: THash160): boolean; overload;
@@ -2667,26 +2689,6 @@ procedure FillZero(out dig: THash512); overload;
 // for cryptographic purposes - use CompareMem/CompareMemSmall/CompareMemFixed
 // as faster alternatives for general-purpose code
 function IsEqual(const A, B; count: PtrInt): boolean; overload;
-
-/// thread-safe move of a 32-bit value using a simple Read-Copy-Update pattern
-procedure Rcu32(var src, dst);
-
-/// thread-safe move of a 64-bit value using a simple Read-Copy-Update pattern
-procedure Rcu64(var src, dst);
-
-/// thread-safe move of a 128-bit value using a simple Read-Copy-Update pattern
-procedure Rcu128(var src, dst);
-
-/// thread-safe move of a pointer value using a simple Read-Copy-Update pattern
-procedure RcuPtr(var src, dst);
-
-/// thread-safe move of a memory buffer using a simple Read-Copy-Update pattern
-procedure Rcu(var src, dst; len: integer);
-
-{$ifdef ISDELPHI}
-/// this function is an intrinsic in FPC
-procedure ReadBarrier; {$ifndef ASMINTEL} inline; {$endif}
-{$endif ISDELPHI}
 
 /// fast computation of two 64-bit unsigned integers into a 128-bit value
 {$ifdef ASMINTEL}
@@ -2821,6 +2823,7 @@ type
   // - Intel introduced a Level 4 cache (eDRAM) with some Haswell/Iris CPUs
   // - only Unified or Data caches are included (not Instruction or Trace)
   // - note: some CPU - like the Apple M1 - have 128 bytes of LineSize
+  // - warning: WinArm may put wrong values into Size - typically 64
   TCpuCaches = array[1 .. 4] of record
     Count, Size, LineSize: cardinal;
   end;
@@ -2968,6 +2971,9 @@ var
   // - e.g. '13th Gen Intel(R) Core(TM) i5-13500'
   IntelBrand: RawUtf8;
 
+  /// as used by NextSpin() - default is 1 for Intel - set to 10 on AMD Zen3+
+  SPIN_FACTOR: PtrUInt = 1;
+
 /// twelve-character ASCII hypervisor string returned by Intel/AMD cpuid
 // - returns '' if cfHYP is not part of CpuFeatures
 // - typical values are 'Microsoft Hv', 'VMwareVMware' or 'VBoxVBoxVBox'
@@ -3024,6 +3030,9 @@ function hashsse42(seed: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
 
 {$else}
 
+const
+  SPIN_FACTOR = 2; // ARM yield has smaller latency than Intel's pause
+
 {$ifdef ISDELPHI}
 /// redirect to Delphi AtomicIncrement() on non Intel CPU
 function InterlockedIncrement(var I: integer): integer; inline;
@@ -3050,6 +3059,13 @@ procedure LockedInc64(int64: PInt64); inline;
 function LockedExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt): boolean;
   {$ifndef ASMINTEL} inline; {$endif}
 
+/// fast atomic compare-and-swap operation on a 32-bit integer value
+// - via Intel/AMD custom asm or FPC RTL InterlockedCompareExchange(pointer)
+// - true if Target was equal to Comparand, and Target set to NewValue
+// - Target should be aligned, which is the case when defined as a class field
+function LockedExc32(var Target: cardinal; NewValue, Comperand: cardinal): boolean;
+  {$ifndef ASMINTEL} inline; {$endif}
+
 /// fast atomic addition operation on a pointer-sized integer value
 // - via Intel/AMD custom asm or FPC RTL InterlockedExchangeAdd(pointer)
 // - Target should be aligned, which is the case when defined as a class field
@@ -3067,6 +3083,9 @@ procedure LockedDec(var Target: PtrUInt; Decrement: PtrUInt);
 // - Target should be aligned, which is the case when defined as a class field
 procedure LockedAdd32(var Target: cardinal; Increment: cardinal);
   {$ifndef ASMINTEL} inline; {$endif}
+
+/// fast atomic "result := Target^; Target^ := 0;" on a 32-bit integer value
+function LockedGet32(Target: PInteger): integer;
 
 {$ifdef ISDELPHI}
 /// return the position of the leftmost set bit in a 32-bit value
@@ -3110,6 +3129,21 @@ procedure Base64DecodeAvx2(var b64: PAnsiChar; var b64len: PtrInt; var b: PAnsiC
 {$endif ASMX64AVX1}
 
 {$endif ASMX64NOTPIC}
+
+/// calls the pause asm opcode on Intel/AMD, or yield on ARM, or do nothing
+procedure DoPause;
+
+const
+  // default adaptive spin count: up to 992 "pause"/"yield" instructions
+  // - on Intel, this is typically a few microseconds on older CPUs, but newer
+  // CPUs may have longer pause latency (tens of cycles)
+  // - AMD Zen 3+ has shorter pause latency, detected via CPUID at startup
+  // to adjust SPIN_FACTOR variable and keep a similar waiting duration
+  // - this 5-50us range matches the eventual nanosleep(10us) fallback
+  SPIN_COUNT = pred(6 shl 5); // = 191
+
+/// adaptative spinning depending on the actual CPU architecture involved
+function NextSpin(spin: PtrUInt): PtrUInt;
 
 
 { ************ Faster Alternative to RTL Standard Functions }
@@ -3498,13 +3532,6 @@ type
   end;
   PLecuyer = ^TLecuyer;
 
-{$ifndef PUREMORMOT2}
-/// return the gsl_rng_taus2 Pierre L'Ecuyer generator of the current thread
-// - was an alternative to SharedRandom/Random32 functions from mormot.core.os
-// - you should better define your own local threadvar for any specific purpose
-function Lecuyer: PLecuyer;
-{$endif PUREMORMOT2}
-
 /// internal function used e.g. by TLecuyer.FillShort/FillShort31
 procedure AdjustShortStringFromRandom(dest: PByteArray; size: PtrUInt);
 
@@ -3667,6 +3694,11 @@ type
   TBuffer64K = array[word] of AnsiChar;
   /// define a buffer of 128KB of data
   TBuffer128K = array[0 .. pred(128 shl 10)] of AnsiChar;
+
+  /// define a buffer of 1024 WideChar
+  TWide1K = array[0 .. pred(1 shl 10)] of WideChar;
+  /// define a buffer of 4096 WideChar
+  TWide4K = array[0 .. pred(4 shl 10)] of WideChar;
 
   /// implements a 4KB stack-based storage of some (UTF-8 or binary) content
   // - could be used e.g. to make a temporary copy when JSON is parsed in-place
@@ -4292,6 +4324,9 @@ var
 procedure VarClear(var v: variant); inline;
 {$endif HASINLINE}
 
+/// calls VarClear(v[]) on all supplied variant pointers
+procedure VarClearSeveral(const v: array of PVariant);
+
 /// overloaded function which can be properly inlined to clear a variant
 procedure VarClearAndSetType(var v: variant; vtype: integer);
   {$ifdef HASINLINE}inline;{$endif}
@@ -4396,6 +4431,10 @@ procedure RawUtf8ToVariant(const Txt: RawUtf8; var Value: variant); overload;
 
 /// convert an UTF-8 encoded string into a variant RawUtf8 varString
 function RawUtf8ToVariant(const Txt: RawUtf8): variant; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert an UTF-8 encoded ShortString into a variant RawUtf8 varString
+procedure ShortStringToVariant(const Txt: ShortString; var Value: variant);
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert a Variant varString value into RawUtf8 encoded String
@@ -4656,6 +4695,10 @@ type
     function Write(const Buffer; Count: Longint): Longint; override;
   end;
 
+/// wrapper used e.g. by TStreamWithPosition.Seek()
+function StreamSeek(S: TStream; const Offset: Int64; Origin: TSeekOrigin;
+  var Position: Int64): Int64; {$ifdef HASINLINE} inline; {$endif}
+
 /// raise a EStreamError exception - e.g. from TSynMemoryStream.Write
 function RaiseStreamError(Caller: TObject; const Context: ShortString): PtrInt;
 
@@ -4866,6 +4909,22 @@ begin
 end;
 {$endif HASINLINE}
 
+procedure VarClearSeveral(const v: array of PVariant);
+var
+  i: PtrInt;
+  p: ^PSynVarData;
+begin
+  p := @v[0];
+  for i := 0 to high(v) do
+  begin
+    if (p^.VType and VTYPE_STATIC) <> 0 then
+      VarClearProc(p^.Data)
+    else
+      p^.VType := 0;
+    inc(p);
+  end;
+end;
+
 {$ifdef CPUARM}
 function ToByte(value: cardinal): cardinal;
 begin
@@ -5065,6 +5124,13 @@ begin
   result := length(guids);
   SetLength(guids, result + 1);
   guids[result] := guid;
+end;
+
+procedure MakeRandomGuid(u: PHash128);
+begin // see https://datatracker.ietf.org/doc/html/rfc4122#section-4.4
+  PCardinal(@u[6])^ := (PCardinal(@u[6])^ and $ff3f0fff) or $00804000;
+  // u[7] := PtrUInt(u[7] and $0f) or $40; // version bits 12-15 = 4 (random)
+  // u[8] := PtrUInt(u[8] and $3f) or $80; // reserved bits 6-7 = 1
 end;
 
 procedure FillZero(var result: TGuid);
@@ -5394,12 +5460,27 @@ end;
 
 function FastSetConst(var S; var Rec: TStrRecConst; P: pointer; Len: TStrLen): PUtf8Char;
 begin
-  FastSetStrRec(Rec.Header, Len, -1);
+  FastSetStrRec(Rec.Header, Len, _REFCNTCONST);
   result := @Rec.TextLo;
   if P <> nil then
     PInt64(result)^ := PInt64(P)^; // up to 7 chars
   result[Len] := #0;
   pointer(S) := result;
+end;
+
+function StrRecAlloc(var temp: RawByteString; count, size: PtrInt): PStrRec;
+begin
+  result := FastNewRawByteString(temp, count * (SizeOf(result^) + 1) + size);
+end;
+
+function StrRecNew(U: PPointer; sr: PStrRec; P: pointer; const len: PtrInt): PStrRec;
+begin
+  FastSetStrRec(sr^, len, _REFCNTCONST);
+  inc(sr);
+  U^ := sr;
+  MoveFast(P^, sr^, len);
+  PAnsiChar(sr)[len] := #0;
+  result := pointer(@PAnsiChar(sr)[len + 1]);
 end;
 
 {$ifdef HASVARUSTRING}
@@ -6539,8 +6620,7 @@ begin
   result := 0;
   if P = nil then
     exit;
-  while (P^ <= ' ') and
-        (P^ <> #0) do
+  while P^ in [#1 .. ' '] do
     inc(P);
   c := byte(P^) - 48;
   if c > 9 then
@@ -6571,8 +6651,7 @@ begin
   result := 0;
   if P = nil then
     exit;
-  while (P^ <= ' ') and
-        (P^ <> #0) do
+  while P^ in [#1 .. ' '] do
     inc(P);
   if P^ = '-' then
   begin
@@ -6626,8 +6705,7 @@ begin
   result := 0;
   if P = nil then
     exit;
-  while (P^ <= ' ') and
-        (P^ <> #0) do
+  while P^ in [#1 .. ' '] do
     inc(P);
   if P^ = '+' then
     repeat
@@ -6725,8 +6803,7 @@ begin
   result := 0;
   if P = nil then
     exit;
-  while (P^ <= ' ') and
-        (P^ <> #0) do
+  while P^ in [#1 .. ' '] do
     inc(P);
   if P^ = '-' then
   begin
@@ -6799,8 +6876,7 @@ begin
   result := 0;
   if P = nil then
     exit;
-  while (P^ <= ' ') and
-        (P^ <> #0) do
+  while P^ in [#1 .. ' '] do
     inc(P);
   inc(err);
   r32 := byte(P^) - 48;
@@ -7334,6 +7410,21 @@ begin // ensured (Last > 0) and (Index <= Last) and made Finalize(Values[Index])
   //FillCharFast(p[Last * ValueSize], ValueSize, 0); // not needed: dec(length)
 end;
 
+function DARecAlloc(var temp: RawByteString; count, size: PtrInt): PDynArrayRec;
+begin
+  result := FastNewRawByteString(temp, count * SizeOf(result^) + size);
+end;
+
+function DARecNew(A: PPointer; da: PDynArrayRec; P: pointer; const len: PtrInt): PDynArrayRec;
+begin
+  da^.length := len;
+  da^.refCnt := _REFCNTCONST;
+  inc(da);
+  A^ := da;
+  MoveFast(P^, da^, len);
+  result := pointer(@PAnsiChar(da)[len]);
+end;
+
 {$ifdef FPC} // some FPC-specific low-level code due to diverse compiler or RTL
 
 // redirect to FPC compilerproc - maybe patched by mormot.core.rtti.fpc.inc
@@ -7573,7 +7664,8 @@ var
   n: PtrInt;
 begin
   dec(old);
-  dec(old^.refCnt);
+  if old^.refCnt > 0 then
+    dec(old^.refCnt);
   n := (old^.length * ItemSize) + SizeOf(new^);
   new := AllocMem(n);
   MoveFast(old^, new^, n); // copy header + all ordinal values
@@ -9364,70 +9456,6 @@ begin
   end;
 end;
 
-{$ifdef ISDELPHI} // intrinsic in FPC
-{$ifdef ASMINTEL}
-procedure ReadBarrier;
-asm
-        {$ifdef CPUX86}
-        lock add dword ptr [esp], 0
-        {$else}
-        .noframe
-        lfence // lfence requires an SSE CPU, which is OK on x86-64
-        {$endif CPUX86}
-end;
-{$else}
-procedure ReadBarrier;
-begin
-  MemoryBarrier; // modern Delphi intrinsic
-end;
-{$endif ASMINTEL}
-{$endif ISDELPHI}
-
-procedure Rcu32(var src, dst);
-begin
-  repeat
-    integer(dst) := integer(src);
-    ReadBarrier;
-  until integer(dst) = integer(src);
-end;
-
-procedure Rcu64(var src, dst);
-begin
-  repeat
-    Int64(dst) := Int64(src);
-    ReadBarrier;
-  until Int64(dst) = Int64(src);
-end;
-
-procedure RcuPtr(var src, dst);
-begin
-  repeat
-    PtrInt(dst) := PtrInt(src);
-    ReadBarrier;
-  until PtrInt(dst) = PtrInt(src);
-end;
-
-procedure Rcu128(var src, dst);
-var
-  s: THash128Rec absolute src;
-  d: THash128Rec absolute dst;
-begin
-  repeat
-    d := s;
-    ReadBarrier;
-  until (d.L = s.L) and
-        (d.H = s.H);
-end;
-
-procedure Rcu(var src, dst; len: integer);
-begin
-  if len > 0 then
-    repeat
-      MoveByOne(@src, @dst, len); // per-byte inlined copy
-      ReadBarrier;
-    until CompareMemSmall(@src, @dst, len);
-end;
-
 procedure AddInt64Array(d, s: PInt64Array; n: PtrInt);
 var
   by4: PtrInt;
@@ -10370,7 +10398,7 @@ begin
   {$ifdef FPC}
   e.q[0] := GetTickCount64;         // always available in FPC RTL
   {$else}
-  PDouble(@e)^ := Now;              // good enough as Delphi POSIX  fallback
+  PDouble(@e)^ := Now;              // good enough Delphi POSIX fallback
   {$endif FPC}
   crc256c(@e, SizeOf(e.q[0]), e.b); // weak but not void
 end; // mormot.core.os.posix.inc overrides to use OS API - but not /dev/urandom
@@ -10591,16 +10619,6 @@ begin
   gen.Fill(dest, destsize); // XOR dest
 end;
 
-{$ifndef PUREMORMOT2}
-threadvar // do not publish for compilation within Delphi packages
-  _Lecuyer: TLecuyer; // uses only 16 bytes per thread
-
-function Lecuyer: PLecuyer;
-begin
-  result := @_Lecuyer;
-end;
-{$endif PUREMORMOT2}
-
 
 { MultiEvent* functions }
 
@@ -10688,6 +10706,8 @@ end;
 
 
 { ************ Low-level CPU Detection and Intrinsics }
+
+{$undef HASPAUSEOPCODE}
 
 type
   // 16KB/32KB hash table used by SynLZ - as used by the asm .inc files below
@@ -10957,6 +10977,29 @@ begin
   end;
   {$endif HASNOSSE2}
   {$endif ASMX86NOTPIC}
+  if (CpuManufacturer = icmAmd) and
+     (CpuFamily = $19) and
+     (CpuModel >= $30) then // Zen 3 or later
+    SPIN_FACTOR := 10;       // "pause" opcode is only 1-2 cycles
+end;
+
+{$define HASPAUSEOPCODE}
+// on Intel/AMD, the pause CPU instruction would relax the core
+// - "pause" is expected to be inlined within the spinning loop itself
+// - sadly, Delphi does not support inlined asm on Win64 so we use a function
+{$ifdef WIN64DELPHI}
+procedure DelphiPause(n: PtrUInt);
+asm
+@s:   pause          // = "rep nop" opcode
+      dec     rcx
+      jnz     @s     // within its own 1..16x loop (better than nothing)
+end;
+{$endif WIN64DELPHI}
+
+procedure DoPause; {$ifdef FPC}assembler; nostackframe;{$endif}
+asm
+     pause
+     pause
 end;
 
 {$else not ASMINTEL}
@@ -11252,6 +11295,12 @@ begin
     pointer(Target), pointer(NewValue), pointer(Comperand)) = pointer(Comperand);
 end;
 
+function LockedExc32(var Target: cardinal; NewValue, Comperand: cardinal): boolean;
+begin
+  result := {$ifdef ISDELPHI}AtomicCmpExchange{$else}InterlockedCompareExchange{$endif}(
+    Target, NewValue, Comperand) = Comperand;
+end;
+
 procedure LockedAdd32(var Target: cardinal; Increment: cardinal);
 begin
   {$ifdef ISDELPHI}AtomicIncrement{$else}InterlockedExchangeAdd{$endif}(
@@ -11492,6 +11541,18 @@ end;
 
 {$ifdef CPUARM3264} // ARM-specific code
 
+{$ifdef FPC_CPUARM}
+{$ifndef OSANDROID}
+{$define HASPAUSEOPCODE}
+// "yield" is available since ARMv6K architecture, including ARMv7-A and ARMv8-A
+// - but our FPC arm32 asm seems not knowledgable of this
+procedure DoPause; assembler; nostackframe;
+asm
+     yield // a few cycles, but helps modern CPU adjust their power requirements
+end;
+{$endif OSANDROID}
+{$endif FPC_CPUARM}
+
 {$ifdef OSLINUXANDROID} // read CpuFeatures + auxv from Linux envp
 
 {$ifdef FPC}
@@ -11593,7 +11654,48 @@ end;
 
 {$endif CPUARM3264}
 
+{$ifndef HASPAUSEOPCODE}
+procedure DoPause;
+begin
+end;
+{$endif HASPAUSEOPCODE}
+
 {$endif ASMINTEL}
+
+function LockedGet32(Target: PInteger): integer;
+begin
+  repeat
+    result := Target^;
+  until LockedExc32(PCardinal(Target)^, 0, result);
+end;
+
+function NextSpin(spin: PtrUInt): PtrUInt;
+begin
+  {$ifdef HASPAUSEOPCODE} // adaptive spinning to reduce cache coherence traffic
+  result := (SPIN_COUNT - spin) shr 5; // 0..5 range, each 32 times
+  if result <> 0 then     // no pause up to 32 times (low latency acquisition)
+  begin                   // exponential backoff: 1,2,4,8,16 x DoPause
+    result := SPIN_FACTOR shl pred(result);
+    // "pause" called 992 times until SwithToThread = up to 50us on modern CPU
+    {$ifdef WIN64DELPHI}
+    DelphiPause(result);
+    {$else}
+    repeat
+      {$ifdef ASMINTEL}
+      asm
+        pause // if possible, opcode should be inlined within the spinning loop
+      end;
+      {$else}
+      DoPause; // FPC_CPUARM "yield" arm/aarch64 instruction
+      {$endif ASMINTEL}
+      dec(result);
+    until result = 0;
+    {$endif WIN64DELPHI}
+  end;
+  {$endif HASPAUSEOPCODE}
+  dec(spin);
+  result := spin;
+end;
 
 {$ifndef ASMINTELNOTPIC}
 
@@ -13371,9 +13473,12 @@ begin
     RawByteString(TVarData(Value).VAny) := Data;
 end;
 
-procedure VariantToUtf8(const Value: variant; var Dest: RawByteString);
+procedure RtlVariantToUtf8(const Value: variant; var Dest: RawByteString);
+var
+  tmp: string;
 begin // sub-proc to avoid hidden temp variable in VariantToRawByteString
-  Dest := {$ifdef UNICODE}RawByteString{$else}string{$endif}(Value);
+  tmp := Value; // let the RTL do the conversion
+  Dest := RawUtf8(tmp);
 end;
 
 procedure VariantToRawByteString(const Value: variant; var Dest: RawByteString);
@@ -13389,7 +13494,7 @@ begin
     varVariantByRef:
       VariantToRawByteString(PVariant(TVarData(Value).VPointer)^, Dest);
     else // not from RawByteStringToVariant() -> conversion to string
-      VariantToUtf8(Value, Dest);
+      RtlVariantToUtf8(Value, Dest);
   end;
 end;
 
@@ -13735,6 +13840,11 @@ begin
   RawUtf8ToVariant(Txt, result{%H-});
 end;
 
+procedure ShortStringToVariant(const Txt: ShortString; var Value: variant);
+begin
+  RawUtf8ToVariant(@Txt[1], length(Txt), Value);
+end;
+
 procedure VariantStringToUtf8(const V: Variant; var result: RawUtf8);
 var
   vd: PVarData;
@@ -14042,42 +14152,41 @@ end;
 
 { TStreamWithPosition }
 
-{$ifdef FPC}
-function TStreamWithPosition.GetPosition: Int64;
-begin
-  result := fPosition;
-end;
-{$endif FPC}
-
-function TStreamWithPosition.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
+function StreamSeek(S: TStream; const Offset: Int64; Origin: TSeekOrigin;
+  var Position: Int64): Int64;
 var
   size: Int64;
 begin
   if (Offset <> 0) or
      (Origin <> soCurrent) then
   begin
-    size := GetSize;
+    size := S.Size; // call GetSize method
     case Origin of
       soBeginning:
         result := Offset;
       soEnd:
         result := size - Offset;
     else
-      result := fPosition + Offset; // soCurrent
+      result := Position + Offset; // soCurrent
     end;
     if result > size then
       result := size
     else if result < 0 then
       result := 0;
-    fPosition := result;
+    Position := result;
   end
   else // optimized for Delphi with no GetPosition method but Seek(0,soCurrent)
-    result := fPosition;
+    result := Position;
+end;
+
+function TStreamWithPosition.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
+begin
+  result := StreamSeek(self, Offset, Origin, fPosition);
 end;
 
 function TStreamWithPosition.Seek(Offset: Longint; Origin: Word): Longint;
 begin
-  result := Seek(Offset, TSeekOrigin(Origin)); // call the 64-bit version above
+  result := Seek(Offset, TSeekOrigin(Origin)); // redirect to the 64-bit method
 end;
 
 function TStreamWithPosition.Read(var Buffer; Count: Longint): Longint;
@@ -14089,6 +14198,13 @@ function TStreamWithPosition.Write(const Buffer; Count: Longint): Longint;
 begin
   result := RaiseStreamError(self, 'Write');
 end;
+
+{$ifdef FPC}
+function TStreamWithPosition.GetPosition: Int64;
+begin
+  result := fPosition;
+end;
+{$endif FPC}
 
 
 { TStreamWithPositionAndSize }

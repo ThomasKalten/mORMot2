@@ -1228,8 +1228,8 @@ type
     // - if you want to access the value, you should use fSafe.Lock/Unlock:
     // consider using Exists or FindAndCopy thread-safe methods instead
     // - aUpdateTimeOut will update the associated timeout value of the entry
-    function FindValue(const aKey; aUpdateTimeOut: boolean = false;
-      aIndex: PPtrInt = nil): pointer;
+    function FindValue(aKey: pointer; aUpdateTimeOut: boolean = false;
+      const aIndex: PPtrInt = nil): pointer; {$ifdef HASINLINE} inline; {$endif}
     /// search of a primary key within the internal hashed dictionary
     // - returns a pointer to the matching or already existing value item
     // - if you want to access the value, you should use fSafe.Lock/Unlock:
@@ -1242,8 +1242,7 @@ type
     // - returns TRUE if aKey was found, FALSE if no match exists
     // - will update the associated timeout value of the entry, unless
     // aUpdateTimeOut is set to false
-    function FindAndCopy(const aKey;
-      var aValue; aUpdateTimeOut: boolean = true): boolean;
+    function FindAndCopy(const aKey; var aValue; aUpdateTimeOut: boolean = true): boolean;
     /// search of a stored value by its primary key, then delete and return it
     // - returns TRUE if aKey was found, fill aValue with its content,
     // and delete the entry in the internal storage
@@ -2658,17 +2657,14 @@ begin // caller ensure P^ is a valid first (json) digit
   result := P;
   repeat
     inc(result);
-  until (result^ < '0') or
-        (result^ > '9'); // check digits
+  until not (result^ in ['0' .. '9']); // check digits
   if result^ = '.' then
   begin
-    if (result[1] < '0') or
-       (result[1] > '9') then
+    if not (result[1] in ['0' .. '9']) then
       exit; // at least one digit after '.' or return '.' position
     repeat
       inc(result);
-    until (result^ < '0') or
-          (result^ > '9'); // check fractional digits
+    until not (result^ in ['0' .. '9']); // check fractional digits
   end;
   if (result^ <> 'e') and
      (result^ <> 'E') then
@@ -2677,12 +2673,10 @@ begin // caller ensure P^ is a valid first (json) digit
   if (P^ = '+') or
      (P^ = '-') then
     inc(P);
-  if (P^ < '0') or
-     (P^ > '9') then
+  if not (P^ in ['0' .. '9']) then
     exit; // at least one digit after E E+ E-
   result := P;
-  while (result^ >= '0') and
-        (result^ <= '9') do
+  while result^ in ['0' .. '9'] do
     inc(result);
 end;
 
@@ -2693,8 +2687,8 @@ begin
     exit;
   if result^ = '-' then
     inc(result);
-  if ((result^ >= '1') and (result^ <= '9')) or // is first char numeric?
-     ((result^ = '0') and ((result[1] < '0') or (result[1] > '9'))) then // no '012'
+  if (result^ in ['1' .. '9']) or // is first char numeric?
+     ((result^ = '0') and not(result[1] in ['0' .. '9'])) then // no '012'
     result := GotoEndRawNumber(result)
   else
     result := nil; // don't begin with a numerical value -> must be a string
@@ -2775,16 +2769,15 @@ begin
   if P = nil then
     exit;
   repeat
-    {$ifdef FPC}
-    while (P^ <= ' ') and
-          (P^ <> #0) do
-      inc(P);
-    {$else}
-    if P^ in [#1..' '] then
+    {$ifdef WIN32DELPHI} // inlined GotoNextNotSpace()
+    if P^ in [#1 .. ' '] then // Delphi i386 seems to prefer this kind of code
       repeat
-        inc(P)
-      until not (P^ in [#1..' ']);
-    {$endif FPC}
+        inc(P);
+      until not (P^ in [#1 .. ' ']);
+    {$else}
+    while P^ in [#1 .. ' '] do // seems to be the best pattern on FPC + Delphi64
+      inc(P);
+    {$endif WIN32DELPHI}
     case JsonFirst[P^] of // FPC and Delphi will use a jump table :)
       jtNone:
         exit;  // unexpected character in JSON input
@@ -3001,8 +2994,7 @@ ident:    if ExpectStandard then
        (State <> stObjectName) then
       break;
   until false;
-  while (P^ <= ' ') and
-        (P^ <> #0) do
+  while P^ in [#1 .. ' '] do
     inc(P);
   result := P; // points to the next meaningful char
 end;
@@ -3269,8 +3261,7 @@ begin
   JsonSet := @JSON_CHARS_RELAXED;
   {$endif CPUX86}
   repeat // reuse GotoEnd state machine for the purpose of reformatting
-    while (P^ <= ' ') and
-          (P^ <> #0) do
+    while P^ in [#1 .. ' '] do
       inc(P);
     case JsonFirst[P^] of
       jtDoubleQuote: // "string"
@@ -3553,8 +3544,7 @@ begin
   if (P^ = '+') or
      (P^ = '-') then
     inc(P);
-  if (P^ < '0') or
-     (P^ > '9') then
+  if not (P^ in ['0' .. '9']) then
     exit;
   P := GotoEndRawNumber(P);
   if (P <> nil) and
@@ -3607,8 +3597,8 @@ begin
   begin
     if P^ = '-' then
       inc(P);
-    if ((P^ >= '1') and (P^ <= '9')) or // is first char numeric?
-       ((P^ = '0') and ((P[1] < '0') or (P[1] > '9'))) then // no '012'
+    if (P^ in ['1' .. '9']) or // is first char numeric?
+       ((P^ = '0') and not(P[1] in ['0' .. '9'])) then // no '012'
       if GotoEndRawNumber(P)^ = #0 then
       begin
         result := true;
@@ -3654,8 +3644,8 @@ begin
   inc(len, PtrUInt(P)); // len = PtrUInt(PMax)
   if P^ = '-' then
     inc(P);
-  if ((P^ >= '1') and (P^ <= '9')) or // is first char numeric?
-     ((P^ = '0') and ((P[1] < '0') or (P[1] > '9'))) then // no '012'
+  if (P^ in ['1' .. '9']) or // is first char numeric?
+     ((P^ = '0') and not (P[1] in ['0' .. '9'])) then // no '012'
   begin
     P := GotoEndRawNumber(P); // inlined P := GotoEndJsonItemNumber(P);
     while true do
@@ -3713,14 +3703,11 @@ end;
 
 procedure IgnoreComma(var P: PUtf8Char);
 begin
-  if P <> nil then
-  begin
-    while (P^ <= ' ') and
-          (P^ <> #0) do
-      inc(P);
-    if P^ = ',' then
-      inc(P);
-  end;
+  if P = nil then
+    exit;
+  P := GotoNextNotSpace(P);
+  if P^ = ',' then
+    inc(P);
 end;
 
 function JsonPropNameValid(P: PUtf8Char): boolean;
@@ -3860,8 +3847,7 @@ begin // see http://www.ietf.org/rfc/rfc4627.txt - with extensions
         // numerical value
         Value := P;
         if P^ = '0' then
-          if (P[1] >= '0') and
-             (P[1] <= '9') then
+          if P[1] in ['0' .. '9'] then
             exit; // 0123 value is excluded by JSON - we don't relax it here
         repeat
           inc(P);
@@ -3874,8 +3860,7 @@ begin // see http://www.ietf.org/rfc/rfc4627.txt - with extensions
         if ValueLen > 1 then
           goto ident2; // e.g. 192.168.0.0/24
         ValueLen := P - Value;
-        if (P^ <= ' ') and
-           (P^ <> #0) then
+        if P^ in [#1 .. ' '] then
         begin
           P^ := #0; // force numerical field with no trailing ' '
           inc(P);
@@ -4083,8 +4068,7 @@ begin
   ValueLen := 0;
   if P = nil then
     exit;
-  while (P^ <= ' ') and
-        (P^ <> #0) do
+  while P^ in [#1 .. ' '] do
     inc(P);
   if P^ = '/' then
     P := GotoEndOfSlashComment(P);
@@ -4100,8 +4084,7 @@ begin
     else
     begin
       ValueLen := P - Value;
-      while (P^ <= ' ') and
-            (P^ <> #0) do
+      while P^ in [#1 .. ' '] do
         inc(P);
       EndOfObject := P^;
       if P^ <> #0 then
@@ -4159,7 +4142,7 @@ begin
           begin
             repeat
               inc(P);
-            until not (P^ in [#1..' ']);
+            until not (P^ in [#1 .. ' ']);
             result := P; // success
             exit;
           end
@@ -4308,8 +4291,7 @@ begin
   // retrieve string field
   if P = nil then
     exit;
-  while (P^ <= ' ') and
-        (P^ <> #0) do
+  while P^ in [#1 .. ' '] do
     inc(P);
   if P^ <> '"' then
     exit;
@@ -4324,8 +4306,7 @@ begin
   // check valid JSON delimiter
   repeat
     inc(P)
-  until (P^ > ' ') or
-        (P^ = #0);
+  until not (P^ in [#1 .. ' ']);
   if ExpectNameField then
   begin
     if P^ <> ':' then
@@ -4390,16 +4371,12 @@ begin
   if P = nil then
     exit;
   FastSetString(RawUtf8(result), B, P);
-  while (P^ <= ' ') and
-        (P^ <> #0) do
+  while P^ in [#1 .. ' '] do
     inc(P);
   if EndOfObject <> nil then
     EndOfObject^ := P^;
   if P^ <> #0 then //if P^=',' then
-    repeat
-      inc(P)
-    until (P^ > ' ') or
-          (P^ = #0);
+    P := IgnoreAndGotoNextNotSpace(P);
 end;
 
 function GetJsonItemAsRawUtf8(var P: PUtf8Char; var output: RawUtf8;
@@ -4473,8 +4450,7 @@ begin
     exit;
   if Len <> nil then
     Len^ := result - P;
-  while (result^ <= ' ') and
-        (result^ <> #0) do
+  while result^ in [#1 .. ' '] do
     inc(result);
   if EndOfObject <> nil then
     EndOfObject^ := result^;
@@ -4753,8 +4729,7 @@ begin
     if P^ <> #0 then
       repeat
         inc(P); // ignore trailing , ] } and any successive spaces
-      until (P^ > ' ') or
-            (P^ = #0);
+      until not (P^ in [#1 .. ' ']);
   end;
   result := P;
 end;
@@ -4772,15 +4747,11 @@ begin
      (MinValue < 0) or
      (MaxValue < 0) then
     exit;
-  while (P^ <= ' ') and
-        (P^ <> #0) do
+  while P^ in [#1 .. ' '] do
     inc(P);
   if P^ = '[' then
   begin // stored as JSON array
-    repeat
-      inc(P)
-    until (P^ > ' ') or
-          (P^ = #0);
+    P := IgnoreAndGotoNextNotSpace(P);
     if P^ = ']' then
       inc(P)
     else
@@ -4963,8 +4934,7 @@ begin
   J := P;
   if J = nil then
     exit;
-  while (J^ <= ' ') and
-        (J^ <> #0) do
+  while J^ in [#1 .. ' '] do
     inc(J);
   if PPtrInt(J)^ = PPtrInt(Pattern)^ then // PatternLen is at least 8 bytes long
   begin
@@ -5188,14 +5158,18 @@ end;
 function JsonBufferReformat(P: PUtf8Char; out Dest: RawUtf8;
   Format: TTextWriterJsonFormat; Preproc: TPreprocAbstract): boolean;
 var
-  S: TRawByteStringStream;
+  temp: TTextWriterStackBuffer; // 8KB buffer
+  W: TJsonWriter;
 begin
-  S := TRawByteStringStream.Create;
+  result := false;
+  if P = nil then
+    exit;
+  W := TJsonWriter.CreateOwnedStream(temp);
   try
-    result := JsonBufferReformatToStream(P, S, Format, Preproc);
-    Dest := S.DataString;
+    result := W.AddJsonReformat(P, Format, PreProc);
+    W.SetText(Dest);
   finally
-    S.Free;
+    W.Free;
   end;
 end;
 
@@ -7821,7 +7795,7 @@ begin
   begin
     repeat
       inc(P);
-    until not (P^ in [#1..' ']); // ignore trailing [
+    until not (P^ in [#1 .. ' ']); // ignore trailing [
     if P^ = ']' then
     begin
       // void but valid array
@@ -7851,7 +7825,7 @@ begin
   begin
     repeat
       inc(P);
-    until not (P^ in [#1..' ']); // ignore trailing {
+    until not (P^ in [#1 .. ' ']); // ignore trailing {
     if P^ = '}' then
     begin
       // void but valid array
@@ -8301,7 +8275,7 @@ no:   Ctxt.Valid := false;
     end;
   repeat
     inc(j);
-  until not (j^ in [#1..' ']);
+  until not (j^ in [#1 .. ' ']);
   if j^ <> '}' then
   begin
     Ctxt.Json := j;
@@ -8428,15 +8402,11 @@ begin
   P := Ctxt.Json;
   if P <> nil then // in-place replace trailing RowID -> ID for unserialization
   begin
-    while (P^ <= ' ') and
-          (P^ <> #0) do
+    while P^ in [#1 .. ' '] do
       inc(P);
     if P^ = '{' then
     begin
-      repeat
-        inc(P);
-      until (P^ > ' ') or
-            (P^ = #0);
+      P := IgnoreAndGotoNextNotSpace(P);
       if PInt64(P)^ and $00ffdfdfdfdfdfff = // case insensitive search
         ord('"') + Int64(_ROWI32) shl 8 + Int64(ord('D')) shl 40 + Int64(ord('"')) shl 48 then
       begin // "RowID" -> __{"ID"
@@ -8754,7 +8724,7 @@ begin
               FreeAndNil(tmp)
             else
             begin
-              PRttiProp(v.VAny).SetOrdProp(Data, PtrInt(tmp));
+              PRttiProp(v.VAny).SetOrdProp(Data, PtrUInt(tmp));
               if jpoSetterExpectsToFreeTempInstance in Options then
                 FreeAndNil(tmp);
             end;
@@ -9534,25 +9504,26 @@ begin
   if self <> nil then
   begin
     result := fKeys.Hasher.FindOrNew(fKeys.Hasher.HashOne(@aKey), @aKey);
-    if result < 0 then
-      result := -1
-    else if aUpdateTimeOut then
+    if result >= 0 then
     begin
-      tim := fSafe.Padding[DIC_TIMESEC].VInteger;
-      if tim <> 0 then // inlined fTimeout[result] := GetTimeout
-        fTimeout[result] := GetTickSec + tim;
+      if aUpdateTimeOut then
+      begin
+        tim := fSafe.Padding[DIC_TIMESEC].VInteger;
+        if tim <> 0 then // inlined fTimeout[result] := GetTimeout
+          fTimeout[result] := GetTickSec + tim;
+      end;
+      exit;
     end;
-  end
-  else
-    result := -1
+  end;
+  result := -1; // always normalize to -1
 end;
 
-function TSynDictionary.FindValue(const aKey; aUpdateTimeOut: boolean;
-  aIndex: PPtrInt): pointer;
+function TSynDictionary.FindValue(aKey: pointer; aUpdateTimeOut: boolean;
+  const aIndex: PPtrInt): pointer;
 var
   ndx: PtrInt;
 begin
-  ndx := Find(aKey, aUpdateTimeOut);
+  ndx := Find(aKey^, aUpdateTimeOut);
   if aIndex <> nil then
     aIndex^ := ndx;
   if ndx < 0 then
@@ -9586,10 +9557,9 @@ begin
   result := PAnsiChar(fValues.Value^) + ndx * fValues.Info.Cache.ItemSize;
 end;
 
-function TSynDictionary.FindAndCopy(const aKey;
-  var aValue; aUpdateTimeOut: boolean): boolean;
+function TSynDictionary.FindAndCopy(const aKey; var aValue; aUpdateTimeOut: boolean): boolean;
 var
-  ndx: PtrInt;
+  p: pointer;
 begin
   result := false;
   if (self = nil) or
@@ -9601,11 +9571,10 @@ begin
   {$else}
   begin
   {$endif HASFASTTRYFINALLY}
-    ndx := Find(aKey, aUpdateTimeOut);
-    if ndx >= 0 then
+    p := FindValue(@aKey, aUpdateTimeOut);
+    if p <> nil then
     begin
-      fValues.ItemCopy( // inlined ItemCopyAt(ndx, @aValue)
-        PAnsiChar(fValues.Value^) + ndx * fValues.Info.Cache.ItemSize, @aValue);
+      fValues.ItemCopy(p, @aValue);
       result := true;
     end;
   {$ifdef HASFASTTRYFINALLY}
@@ -9976,6 +9945,8 @@ begin
   FastAssignNew(result);
   if fSafe.Padding[DIC_KEYCOUNT].VInteger = 0 then
     exit;
+  if Algo = nil then
+    Algo := GetCompressAlgo;
   W := TBufferWriter.Create(tmp{%H-});
   try
     fSafe.ReadLock;

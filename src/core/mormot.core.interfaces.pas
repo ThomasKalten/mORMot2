@@ -1513,7 +1513,7 @@ type
     fHasExpects: set of (eCount, eTrace);
     fLogs: TInterfaceStubLogDynArray;
     fLog: TDynArray;
-    fLogCount: integer;
+    fLogCount: integer; // not PtrInt
     fInterfaceExpectedTraceHash: cardinal;
     fLastInterfacedObjectFake: TInterfacedObject;
     function TryResolve(aInterface: PRttiInfo; out Obj): boolean; override;
@@ -2041,18 +2041,20 @@ type
     {$ifdef ABIX86}
     EDX, ECX, MethodIndex, EBP, Ret: cardinal;
     {$else}
-    {$ifdef OSPOSIX}
+    // the x64 Windows stub stores the integer registers after the frame,
+    // every other ABI (including aarch64 on Windows) stores them first
+    {$ifndef ABIWINX64}
     ParamRegs: packed array[PARAMREG_FIRST .. PARAMREG_LAST] of pointer;
-    {$endif OSPOSIX}
+    {$endif ABIWINX64}
     {$ifdef HAS_FPREG}
     FPRegs: packed array[FPREG_FIRST..FPREG_LAST] of double;
     {$endif HAS_FPREG}
     MethodIndex: PtrUInt;
     Frame: pointer;
     Ret: pointer;
-    {$ifndef OSPOSIX}
+    {$ifdef ABIWINX64}
     ParamRegs: packed array[PARAMREG_FIRST .. PARAMREG_LAST] of pointer;
-    {$endif OSPOSIX}
+    {$endif ABIWINX64}
     {$endif ABIX86}
     {$ifdef ABIA32}
     // alf: on ARM, there is more on the stack than you will expect
@@ -4074,11 +4076,11 @@ var
   {$ifdef ABIX86}
   offs: integer;
   {$else}
-  {$ifdef OSPOSIX} // not used for Win64
+  {$ifndef ABIWINX64} // not used for the x64 Windows ABI
   {$ifdef HAS_FPREG}
   fpreg: integer;
   {$endif HAS_FPREG}
-  {$endif OSPOSIX}
+  {$endif ABIWINX64}
   {$endif ABIX86}
 begin
   // validate supplied TypeInfo() RTTI input
@@ -4289,9 +4291,9 @@ begin
     // prepare stack and register layout
     reg := PARAMREG_FIRST;
     {$ifdef HAS_FPREG}
-    {$ifdef OSPOSIX}
+    {$ifndef ABIWINX64} // only the x64 Windows ABI overlaps int and FP indexes
     fpreg := FPREG_FIRST;
-    {$endif OSPOSIX}
+    {$endif ABIWINX64}
     {$endif HAS_FPREG}
     a := pointer(m^.Args);
     for na := 0 to high(m^.Args) do
@@ -4395,12 +4397,12 @@ begin
         (a^.SizeInStack <> POINTERBYTES) or
         {$endif ABIA32}
         {$ifdef HAS_FPREG}
-        {$ifdef OSPOSIX}  // Linux x64, armhf, aarch64
+        {$ifdef ABIWINX64}
+        (reg > PARAMREG_LAST) // Win64 x64: XMMs overlap regular registers
+        {$else}  // Linux x64, armhf, aarch64 - and aarch64 on Windows
         ((SizeInFPR = 1) and (fpreg > FPREG_LAST)) or // too many FP registers
         ((SizeInFPR = 0) and (reg > PARAMREG_LAST))  // too many int registers
-        {$else}
-        (reg > PARAMREG_LAST) // Win64: XMMs overlap regular registers
-        {$endif OSPOSIX}
+        {$endif ABIWINX64}
         {$else}
         (reg > PARAMREG_LAST) // Win32, Linux x86, armel
         {$endif HAS_FPREG}
@@ -4442,13 +4444,15 @@ begin
         if SizeInFPR = 1 then
         begin
           // put in next floating-point register
-          {$ifdef OSPOSIX}
-          a^.FPRegisterIdent := fpreg; // ABISYSVX64 has its own FP registers index
-          inc(fpreg);
-          {$else}
-          a^.FPRegisterIdent := reg; // Win64 ABI: reg and fpreg do overlap
+          {$ifdef ABIWINX64}
+          a^.FPRegisterIdent := reg; // Win64 x64 ABI: reg and fpreg do overlap
           inc(reg);
-          {$endif OSPOSIX}
+          {$else}
+          // SysV x64, armhf and aarch64 (POSIX or Windows) have a separate
+          // floating-point register bank with its own index
+          a^.FPRegisterIdent := fpreg;
+          inc(fpreg);
+          {$endif ABIWINX64}
         end
         else
         {$endif HAS_FPREG}
@@ -7124,8 +7128,17 @@ procedure CallMethod(var Args: TCallMethodArgs); assembler;
 {$ifdef FPC} nostackframe;
 asm
         push    rbp
+        {$ifdef OSPOSIX}
         push    r12
         mov     rbp, rsp
+        {$else} // Win64 requires unwinding information
+        .seh_pushreg rbp
+        push    r12
+        .seh_pushreg r12
+        mov     rbp, rsp
+        .seh_setframe rbp,0
+        .seh_endprologue
+        {$endif OSPOSIX}
         // simulate .params 32
         lea     rsp, [rsp - MAX_EXECSTACK]
         // align stack to 16 bytes
@@ -7183,14 +7196,12 @@ asm
         mov     cl, [r12].TCallMethodArgs.resKind
         cmp     cl, imvDouble
         je      @d
-        cmp     cl, imvDateTime
-        je      @d
-        cmp     cl, imvCurrency
+        cmp     cl, imvDateTime // but imvCurrency is returned in rax
         jne     @e
 @d:     movlpd  qword ptr [r12].TCallMethodArgs.res64, xmm0
         // movlpd to ignore upper 64-bit of 128-bit xmm0 reg
 @e:     {$ifdef FPC}
-        mov     rsp, rbp
+        lea     rsp, [rbp]
         pop     r12
         pop     rbp
         {$endif FPC}
@@ -7899,13 +7910,21 @@ begin
   next();
 end;
 
+const
+  // = the deprecated System.vmtFreeInstance, which Delphi replaced by the
+  // asm-only VMTOFFSET operator - verified to match the RTL value on 32/64-bit
+  // - CPP_ABI_ADJUST was introduced with Delphi XE3, and the RTL constant is
+  // not deprecated on older compilers, so it is used as-is there and on FPC
+  VMT_FREEINSTANCE = {$ifdef ISDELPHIXE3} -2 * SizeOf(pointer) - CPP_ABI_ADJUST
+                     {$else} vmtFreeInstance {$endif ISDELPHIXE3};
+
 constructor TSetWeakZero.Create(aClass: TClass);
 var
   P: PPtrUInt;
 begin
   // key = instance TObject, value = dynarray field(s) to be zeroed
   inherited Create(TypeInfo(TPointerDynArray), TypeInfo(TPointerDynArrayDynArray));
-  P := pointer(PAnsiChar(aClass) + vmtFreeInstance);
+  P := pointer(PAnsiChar(aClass) + VMT_FREEINSTANCE);
   if PPointer(P)^ = @TSetWeakZero.HookedFreeInstance then
     // hook once - Create may be done twice in GetWeakZero() for SetPrivateSlot
     exit;

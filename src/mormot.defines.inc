@@ -14,8 +14,12 @@
 
 {.$define USEPACKAGES}
 // define this if you compile the unit within a Delphi package
-// - it will avoid error like "[DCC Error] E2201 Need imported data reference
-// ($G) to access 'VarCopyProc'"
+// - it will enable {$IMPORTEDDATA ON} ($G+) for all our units at once, as
+// older Delphi compilers required it to access data from another package, e.g.
+// "[DCC Error] E2201 Need imported data reference ($G) to access 'VarCopyProc'"
+// - note: $G+ is the compiler default, and on Delphi 13.1 (compiler 37.0) this
+// error is not affected by the switch any more, so defining this conditional
+// has no observable effect on such a recent compiler
 // - shall be set at the package options level, and left untouched by default
 // - note: you should probably also set "Generate DCUs only" in Project Options
 // -> Delphi Compiler -> Output C/C++ -> C/C++ output file generation
@@ -33,7 +37,8 @@
 // serialization) - left undefined by default to ensure minimal impact
 
 {.$define FPCUSEVERSIONINFO}
-// link POSIX fileinfo/machoreader/elfreader units to retrieve more information
+// link POSIX fileinfo/machoreader/elfreader units to call TFileVersion.Create()
+// on any TFileName and not only the local executable resource
 
 {.$define NOSETTHREADNAME}
 // Delphi Wintel only: if defined, SetThreadName() would not raise the "thread
@@ -149,7 +154,7 @@
     OSWINDOWS OSWINTEL OSWINARM
     OSPOSIX OSBSD OSDARWIN OSBSDDARWIN OSOPENBSD OSFREEBSD
     OSLINUX OSANDROID OSLINUXINTEL OSLINUXX64 OSLINUXX86
-    OSLINUXANDROID OSANDROIDARM64 OSELF
+    OSLINUXANDROID OSANDROIDARM64 OSELF OSFUTEX
     PUREMORMOT2
 
   FPC only:
@@ -160,7 +165,8 @@
 
   Delphi only:
     ISDELPHI ISDELPHIUNICODE ISDELPHIxxx
-    WIN32DELPHI WIN64DELPHI WINTELDELPHI WINARMDELPHI DELPHIPOSIX DELPHIANDROID
+    WINDELPHI WIN32DELPHI WIN64DELPHI WINTELDELPHI WINARMDELPHI DELPHIPOSIX 
+    DELPHIANDROID
 
 ********************** Conditionals **********************)
 
@@ -197,13 +203,16 @@
   {$define HASDYNARRAYTYPE}   // eltype2 field, used e.g. for T*ObjArray
   {$define HASQWORD}
   {$define HASITERATORS}
+  {$define HASSAFEITERATORS}
   {$define HASIMPLICITOPERATOR}
   {$define HASDBFTWIDE}
   {$define HASTTHREADSTART}
+  {$define HASTTHREADFINISHED}
   {$define HASINTERFACEASTOBJECT}
   {$define EXTENDEDTOSHORT_USESTR} // FloatToText uses str() in FPC
   {$define DOUBLETOSHORT_USEGRISU} // fast DoubleToAscii()
-  {$define USERECORDWITHMETHODS}   // use "object" only for Delphi 7
+  {$define USERECORDWITHMETHODS}   // use "object" only for Delphi 7/2007
+  {$define USERECORDWITHMETHODSSAFE}
   {$define FPC_OR_UNICODE}
   {$define FPC_OR_DELPHIXE}        // to circumvent Delphi internal errors
   {$define FPC_OR_DELPHIXE4}
@@ -394,8 +403,9 @@
       {$define CPUARM3264}
       {$define FPC_CPUARM}     // circumvent bug e.g. about sets in registers
       {$define FPC_CPUAARCH64}
-      {$ifdef OSWINDOWS}
-        {$undef FPC_SINGLEABI} // aarch64-win64 compatibility
+      {$ifdef OSWINDOWS}       // aarch64-win64 compatibility
+        {$undef FPC_SINGLEABI}
+        {$define DISPINVOKE_NO_OLESTR} // avoid late binding _ := 'constant'
       {$endif OSWINDOWS}
     {$endif CPUAARCH64}
   {$else}
@@ -412,6 +422,7 @@
       {$ifndef FPC_PIC}        // MachOS/OpenBSD/Android require PIC on i386
         {$define ASMINTELNOTPIC}
         {$define CPUX86NOTPIC} // use "absolute" instead of local register
+        {$define FPCX86NOTPIC}
         {$define ASMX86NOTPIC} // supports asm with globals
         {$define ASMAESNI}
       {$endif FPC_PIC}
@@ -454,9 +465,16 @@
     {$define FPC_OLDRTTI}
   {$endif}
 
+  {$ifdef UNICODERTL}
+    // an FPC Unicode RTL build (-dUNICODERTL) expects UnicodeString=string
+    // units, exactly as every unit of that RTL declares for itself
+    // see https://wiki.freepascal.org/Unicode_Support_in_Lazarus
+    {$MODESWITCH UNICODESTRINGS}
+  {$endif UNICODERTL}
+
   {$ifdef FPC_HAS_CPSTRING}
     // see http://wiki.freepascal.org/FPC_Unicode_support
-    {$define HASCODEPAGE} // UNICODE means {$mode delphiunicode}
+    {$define HASCODEPAGE} // UNICODE means {$MODESWITCH UNICODESTRINGS}
   {$endif FPC_HAS_CPSTRING}
 
   {$ifdef ISFPC27}
@@ -477,12 +495,16 @@
   {$define HASRTLCRITICALSECTION}
 
   // note: you may remove all unexpected hints by setting in your project options
-  // -vm11047,3187,3123,3124,4055,4079,4081,5023,5024,5027,5028,5036,5037,5058,5059,5060,5066,5089,5090,5091,5092,5093,5094,6018,6058
+  // -vm11047,3187,3123,3124,4055,4079,4081,5023,5024,5027,5028,5036,5037,5057,5058,5059,5060,5066,5089,5090,5091,5092,5093,5094,6018,6058
 
   // disable some no-brainer warnings - let FPC align with Delphi in that matter
+  {$WARN 4055 off} // conversion between ordinals and pointers
+  {$WARN 5023 off} // unit not used
+  {$WARN 5026 off} // parameter assigned never used
   {$WARN 5027 off} // local assigned variable never used
   {$WARN 5036 off} // uninitialized local variable 1
   {$WARN 5037 off} // uninitialized local variable 2
+  {$WARN 5057 off} // uninitialized local variable 3
   {$WARN 5059 off} // function result variable does not seem to be initialized
   {$WARN 5066 off} // symbol is deprecated
   {$WARN 5089 off} // uninitialized managed variables 1
@@ -612,6 +634,10 @@
 
   {$A+} // force normal alignment, as expected by our units
 
+  {$ifdef USEPACKAGES}
+    {$IMPORTEDDATA ON} // $G+ is needed when compiled within a Delphi package
+  {$endif USEPACKAGES}
+
   {$ifdef UNICODE}
     {$define HASVARUSTRING}
     {$define HASCODEPAGE}
@@ -623,6 +649,7 @@
       since TDynArrayHashed = object(TDynArray) fails to initialize
       http://blog.synopse.info/post/2011/01/29/record-and-object-issue-in-Delphi-2010 }
     {$define UNDIRECTDYNARRAY}
+    {$define HASTTHREADFINISHED}    // Delphi 2009 introduced TThread.Finished
   {$else}
     {$define HASNOSTATICRTTI}        // Delphi 7/2007 has no TypeInfo(TGuid)
   {$endif UNICODE}
@@ -714,13 +741,14 @@
     {$endif}
     {$if CompilerVersion > 18}
       {$define ISDELPHI2007ANDUP} // = Delphi 2007 or newer
-      {$define HASITERATORS}
+      {$define HASITERATORS}      // minimal buggy implementation
       {$define HASDBFTWIDE}       // ftWideMemo,ftFixedWideChar
     {$ifend}
     {$if CompilerVersion = 20}    // = Delphi 2009
       {$define ISDELPHI2009}      // to circumvent some specific bugs
       {$define ISDELPHI20092010}
       {$define HASQWORD}          // properly handle and inline UInt64
+      {$define HASSAFEITERATORS}  // usable iterators
       {$define HASNOSTATICRTTI}   // has no TypeInfo(TGuid)
     {$ifend}
     {$if CompilerVersion = 21}    // = Delphi 2010
@@ -728,6 +756,7 @@
     {$ifend}
     {$if CompilerVersion >= 21.0}
       {$define ISDELPHI2010}
+      {$define USERECORDWITHMETHODSSAFE} // circumvent Delphi 2009 issue
       {$define HASSAFEINLINE}     // Delphi 2007-2009 have troubles inlining :(
       {$define HASSAFEFPCINLINE}  // FPC specific inlining troubles
       {$define HASDYNARRAYTYPE}   // eltype2 field, used e.g. for T*ObjArray
@@ -814,6 +843,7 @@
     {$ifend}
     {$if CompilerVersion >= 34.0} // = Delphi 10.4
       {$define ISDELPHI104}
+      {$define HASCACHEDRESSTRING} // introducing LoadResStringFunc()
     {$ifend}
     {$if CompilerVersion >= 35.0} // = Delphi 11.x Alexandria
       {$define ISDELPHI11}
@@ -839,6 +869,7 @@
   // -- compiler-specific code generation conditionals
 
   {$ifdef OSWINDOWS}
+    {$define WINDELPHI}           // Delphi on Windows + Intel/AMD or ARM64
     {$ifdef CPUX86}
       {$define WIN32DELPHI}       // Delphi with Win32 inlined asm
       {$define ASMINTELNOTPIC}
@@ -948,7 +979,8 @@
         {$define ABISYSVA64}
       {$endif OSPOSIX}
       {$ifdef OSWINDOWS}
-        {$define ABIWINA64}
+        {$define ABIWINA64}    // win64-aarch64 target
+        {$define NOLIBCSTATIC} // ease linking until stabilized
       {$endif OSWINDOWS}
     {$endif CPUAARCH64}
   {$endif CPUARM3264}
@@ -993,13 +1025,17 @@
     {$define OSWINARM}
   {$endif ABIARM}
   {$define THREADID32}    // TThreadID always 32-bit DWORD on all Windows archs
+  {$define OSFUTEX}       // WaitForValue() futex-like API appeared with Win8
 {$else}
   {$ifdef CPU32}
-    {$define THREADID32}    // TThreadID 32-bit on 32-bit systems
+    {$define THREADID32}  // TThreadID is 32-bit on 32-bit POSIX systems
   {$endif CPU32}
   {$ifdef OSLINUX}
     {$define OSLINUXANDROID}
     {$define OSELF}
+    {$ifdef FPC}
+      {$define OSFUTEX}   // direct futex syscall on FPC Linux
+    {$endif FPC}
     {$ifdef ABIX86}
       {$define OSLINUXINTEL}
       {$define OSLINUXX86}
@@ -1018,6 +1054,7 @@
   {$ifdef OSANDROID}
     {$define OSLINUXANDROID}
     {$define OSELF}
+    {.$define OSFUTEX}        // untested
     {$ifdef ABIA64}
       {$define OSANDROIDARM64}
     {$endif ABIA64}

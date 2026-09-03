@@ -860,7 +860,7 @@ begin
   if aSecurity in SEC_TLS then
     include(hso, hsoEnableTls);
   //include(hso, hsoHeadersInterning);
-  if aThreadPoolCount < integer(CpuThreads) * 5 then
+  if aThreadPoolCount < integer(SystemInfo.dwNumberOfProcessors) * 5 then
     include(hso, hsoThreadSmooting); // regular HW tends to like it
   {$ifdef USEHTTPSYS}
   if aUse in HTTP_API_MODES then // Windows system's http.sys
@@ -884,7 +884,7 @@ begin
         end;
       // actually launch the http.sys server
       fHttpServer := THttpApiServer.Create(aQueueName, HttpThreadStart,
-        HttpThreadTerminate, fRestServerNames, hso, fLog);
+        HttpThreadTerminate, fRestServerNames, hso, fLog, aThreadPoolCount);
       if not THttpApiServer(fHttpServer).WaitStarted then
         EHttpApiServer.RaiseUtf8('%.WaitStarted timeout on %',
           [self, fRestServerNames]);
@@ -1237,7 +1237,7 @@ begin
     match := rmNoMatch;
     matchcase := rsoRedirectServerRootUriForExactCase in fOptions;
     // thread-safe TLS + URI match from fRestServers[].Server.Model array
-    fSafe.ReadLock;
+    fSafe.ReadLock; // protect fRestServers[]
     {$ifdef HASFASTTRYFINALLY}
     try
     {$else}
@@ -1584,7 +1584,7 @@ begin
         inc(one);
       end;
   finally
-    fSafe.ReadLock;
+    fSafe.ReadUnLock;
   end;
 end;
 

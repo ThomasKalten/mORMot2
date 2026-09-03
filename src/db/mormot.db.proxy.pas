@@ -160,7 +160,7 @@ type
     fTransactionRetryTimeout: Int64;
     fTransactionActiveTimeout: Int64;
     fTransactionActiveAutoReleaseTicks: Int64;
-    fSafe: TOSLock;
+    fSafe: TOSLightLock; // = TOSLightMutex = futex on Linux and Win8+
     function GetAuthenticate: TSynAuthenticationAbstract;
     /// default Handle*() will just return the incoming value
     function HandleInput(const input: RawByteString): RawByteString; virtual;
@@ -505,7 +505,7 @@ type
   // TSqlDBServerSockets - this abstract class won't set any HTTP server
   TSqlDBServerAbstract = class
   protected
-    fSafe: TOSLightLock; // = TOSLightMutex = SRW lock or direct pthread mutex
+    fSafe: TOSLightLock; // = TOSLightMutex = futex on Linux and Win8+
     fServer: THttpServerGeneric;
     fThreadPoolCount: integer;
     fPort, fDatabaseName: RawUtf8;
@@ -733,6 +733,11 @@ implementation
 {$ifdef DELPHIPOSIX}
 Uses System.SyncObjs; // inline expand
 {$endif DELPHIPOSIX}
+
+{$ifdef FPC} // already part of mormot.defines.inc but seems needed with -O2
+  {$WARN 5093 off} // function result variable of a managed uninitialized 1
+{$endif FPC}
+
 
 { ************ Shared Proxy Information }
 

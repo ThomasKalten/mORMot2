@@ -321,6 +321,10 @@ procedure DateTimeToIso8601TextVar(DT: TDateTime; FirstChar: AnsiChar;
 procedure DateTimeToIso8601StringVar(DT: TDateTime; FirstChar: AnsiChar;
   var result: string; WithMS: boolean = false);
 
+/// write a TDateTime into strict ISO-8601 date and/or time text as TTempUtf8
+procedure DateTimeToIso8601TempUtf8(DT: TDateTime; FirstChar: AnsiChar;
+  var Dest: TTempUtf8; WithMS: boolean);
+
 /// Write a Time to P^ Ansi buffer
 // - if Expanded is false, 'Thhmmss' time format is used
 // - if Expanded is true, 'Thh:mm:ss' time format is used
@@ -409,18 +413,19 @@ function AppendToTextFile(const aLine: RawUtf8; const aFileName: TFileName;
 var
   /// custom TTimeLog date to ready to be displayed text function
   // - you can override this pointer in order to display the text according
-  // to your expected i18n settings
-  // - this callback will therefore be set by the mORMoti18n.pas unit
+  // to your expected i18n settings e.g. as set by the mORMoti18n.pas unit
   // - used e.g. by TTimeLogBits.i18nText and by TOrmTable.ExpandAsString()
   // methods, i.e. TOrmTableToGrid.DrawCell()
+  // - rendering-only: no time zone or local conversion of the supplied TTimeLog
   i18nDateText: function(const Iso: TTimeLog): string = nil;
 
   /// custom date to ready to be displayed text function
   // - you can override this pointer in order to display the text according
-  // to your expected i18n settings
+  // to your expected i18n settings e.g. as set by the mORMoti18n.pas unit
   // - this callback will therefore be set by the mORMoti18n.pas unit
   // - used e.g. by TOrmTable.ExpandAsString() method,
   // i.e. TOrmTableToGrid.DrawCell()
+  // - rendering-only: no time zone or local conversion of the supplied TDateTime
   i18nDateTimeText: function(const DateTime: TDateTime): string = nil;
 
 
@@ -634,6 +639,9 @@ type
     procedure ToIsoDate(out text: RawUtf8);
     /// convert the stored time into its Iso-8601 text with no date part nor Milliseconds
     procedure ToIsoTime(out text: RawUtf8; FirstTimeChar: RawUtf8 = 'T');
+    /// convert the stored date and time into Iso-8601 text
+    procedure ToTempUtf8(var Dest: TTempUtf8; Expanded: boolean = true;
+      FirstTimeChar: AnsiChar = 'T'; WithMS: boolean = false);
     /// convert the stored time into a TDateTime
     function ToDateTime: TDateTime;
     /// convert the stored time into a TUnixTime in seconds since UNIX Epoch
@@ -677,6 +685,9 @@ type
 /// internal low-level function to retrieve the cached current decoded date/time
 procedure FromGlobalTime(out NewTime: TSynSystemTime; LocalTime: boolean;
   tix64: Int64 = 0);
+
+/// low-level retrieve the current decoded date/time from OS with no cache
+procedure RawGlobalTime(out Time: TSynSystemTime; LocalTime: boolean);
 
 /// our own faster version of the corresponding RTL function
 function TryEncodeDate(Year, Month, Day: cardinal; out Date: TDateTime): boolean;
@@ -1217,8 +1228,23 @@ function DecodeMicroSec(P: PByteArray): PtrInt;
 { ******************* TValuePUtf8Char text value wrapper record }
 
 type
-  /// points to one value of raw UTF-8 content, decoded from a JSON buffer
+  /// points to one value as raw memory buffer pointer and length
+  // - since the data is typeless, no method has been associated
+  {$ifdef USERECORDWITHMETHODS}
+  TValuePointer = record
+  {$else}
+  TValuePointer = object
+  {$endif USERECORDWITHMETHODS}
+  public
+    /// a pointer to the actual UTF-8 or binary content
+    Buffer: pointer;
+    /// how many bytes are stored in Buffer
+    Len: PtrInt;
+  end;
+
+  /// points to one value of raw UTF-8 content, decoded from e.g. a JSON/XML buffer
   // - used e.g. by JsonDecode() overloaded function to returns names/values
+  // - supply some methods for direct high-level types conversion or comparison
   {$ifdef USERECORDWITHMETHODS}
   TValuePUtf8Char = record
   {$else}
@@ -1262,6 +1288,16 @@ type
     /// will call IdemPropNameU() over the stored text Value
     function Idem(const Value: RawUtf8): boolean;
       {$ifdef HASSAFEINLINE}inline;{$endif}
+    /// case-sensitive comparison with the stored text Value
+    function Equal(const Value: RawUtf8): boolean; overload;
+      {$ifdef HASSAFEINLINE}inline;{$endif}
+    /// case-sensitive comparison with the stored text Value
+    function Equal(Value: PUtf8Char; ValueLen: PtrInt): boolean; overload;
+      {$ifdef HASSAFEINLINE}inline;{$endif}
+    /// CSV case-sensitive matching index with the stored text Value
+    // - returns -1 if Value/Len was not found, or the 0-based index in csv
+    // - e.g. Equal('two') means Match('one,two')=1
+    function Match(Csv: PUtf8Char; Sep: AnsiChar = ','): integer;
   end;
   PValuePUtf8Char = ^TValuePUtf8Char;
   /// used e.g. by JsonDecode() overloaded function to returns values
@@ -2056,19 +2092,20 @@ begin
   result := Dest;
 end;
 
-function VariantToDateTime2(const V: Variant; var Value: TDateTime): boolean;
+procedure DateTimeToIso8601TempUtf8(DT: TDateTime; FirstChar: AnsiChar;
+  var Dest: TTempUtf8; WithMS: boolean);
 var
-  tmp: RawUtf8; // sub-procedure to void hidden try..finally
+  T: TSynSystemTime;
 begin
-  VariantToUtf8(V, tmp);
-  Iso8601ToDateTimePUtf8CharVar(pointer(tmp), length(tmp), Value);
-  result := Value <> 0;
+  T.FromDateTime(DT);
+  T.ToTempUtf8(Dest, {expanded=}true, FirstChar, WithMS);
 end;
 
 function VariantToDateTime(const V: Variant; var Value: TDateTime): boolean;
 var
   vd: TVarData;
   vt: cardinal;
+  tmp: TTempUtf8;
 begin
   vt := TVarData(V).VType;
   if vt = varVariantByRef then
@@ -2099,7 +2136,11 @@ begin
       if SetVariantUnRefSimpleValue(V, vd{%H-}) then
         result := VariantToDateTime(variant(vd), Value)
       else
-        result := VariantToDateTime2(V, Value);
+      begin
+        VariantToTempUtf8(V, tmp, [vfNoAlloc]);
+        Iso8601ToDateTimePUtf8CharVar(tmp.Text, tmp.Len, Value);
+        result := Value <> 0;
+      end;
     end;
   end;
 end;
@@ -2156,7 +2197,7 @@ begin
     if not (s[1] in ['0'..'9']) or
        not (s[2] in ['0'..'9']) then
       exit;
-    z := integer(ord(s[1]) * 10 + ord(s[2]) - (48 + 480)) * 60;
+    z := PtrInt(ord(s[1]) * 10 + ord(s[2]) - (48 + 480)) * 60;
     if s[3] in ['0'..'9', ':'] then
     begin
       if s[3] = ':' then
@@ -2287,13 +2328,32 @@ end;
 
 { ************ TSynDate / TSynDateTime / TSynSystemTime High-Level objects }
 
+procedure RawGlobalTime(out Time: TSynSystemTime; LocalTime: boolean);
+var
+  {$ifdef OSPOSIX}
+  tmp: cardinal;
+  {$endif OSPOSIX}
+  sys: TSystemTime absolute Time;
+begin
+  if LocalTime then
+    GetLocalTime(sys)
+  else
+    GetSystemTime(sys);
+  {$ifdef OSPOSIX}
+  // two TSystemTime fields are inverted in FPC datih.inc :(
+  tmp := sys.DayOfWeek;
+  Time.Day := sys.Day;
+  Time.DayOfWeek := tmp;
+  {$endif OSPOSIX}
+end;
+
 var
   // GlobalTime[LocalTime] thread-safe cache, each one taking one L1 cache line
   GlobalTime: array[boolean] of packed record
-    safe: TLightLock; // better than RCU
-    time: TSystemTime;
+    safe: TRWLightLock;
     clock: cardinal;  // avoid slower API call with 16ms loss of precision
-    _pad: array[1 .. 64 - SizeOf(TLightLock) - SizeOf(TSystemTime) - 4] of byte;
+    time: TSystemTime;
+    _pad: array[1 .. 64 - SizeOf(TRWLightLock) - SizeOf(TSystemTime) - 4] of byte;
   end;
 
 procedure FromGlobalTime(out NewTime: TSynSystemTime; LocalTime: boolean;
@@ -2306,29 +2366,19 @@ begin
     tix64 := GetTickCount64;
   tix := tix64 shr 4;
   with GlobalTime[LocalTime] do
-    if clock <> tix then // recompute every 16 ms
+    if (clock <> tix) and
+       LockedExc32(clock, tix, clock) then // recompute once every 16 ms
     begin
-      clock := tix; // can be set first thanks to safe.Lock below
-      NewTime.Clear;
-      if LocalTime then
-        GetLocalTime(newtimesys)
-      else
-        GetSystemTime(newtimesys);
-      {$ifdef OSPOSIX}
-      // two TSystemTime fields are inverted in FPC datih.inc :(
-      tix := newtimesys.DayOfWeek;
-      NewTime.Day := newtimesys.Day;
-      NewTime.DayOfWeek := tix;
-      {$endif OSPOSIX}
-      safe.Lock;
-      time := newtimesys;
-      safe.UnLock;
+      RawGlobalTime(NewTime, LocalTime);
+      safe.WriteLock;
+      time := newtimesys; // thread-safe persist in cache
+      safe.WriteUnLock;
     end
     else
     begin
-      safe.Lock;
+      safe.ReadLock;      // allow concurrent access
       newtimesys := time; // fast copy last decoded value from cache
-      safe.UnLock;
+      safe.ReadUnLock;
     end;
 end;
 
@@ -3030,6 +3080,19 @@ begin
     UInt2DigitsToShortFast(Hour),
     UInt2DigitsToShortFast(Minute),
     UInt2DigitsToShortFast(Second)], text);
+end;
+
+procedure TSynSystemTime.ToTempUtf8(var Dest: TTempUtf8; Expanded: boolean;
+  FirstTimeChar: AnsiChar; WithMS: boolean);
+var
+  p: PUtf8Char;
+begin
+  Dest.TempRawUtf8 := nil;
+  Dest.Text := @Dest.Temp;
+  p := DateToIso8601PChar(@Dest.Temp, Expanded, Year, Month, Day);
+  p := TimeToIso8601PChar(p, Expanded, Hour, Minute, Second, MilliSecond, FirstTimeChar, WithMS);
+  p^ := #0; // make ASCIIZ - Expanded+WithMS+#0 is just enough for [0..23]
+  Dest.Len := p - Dest.Text;
 end;
 
 function TSynSystemTime.ToDateTime: TDateTime;
@@ -4434,6 +4497,13 @@ begin
   SetInt64(Text, result{%H-});
 end;
 
+function TValuePUtf8Char.ToBoolean: boolean;
+begin
+  result := (Text <> nil) and
+            ((PWord(Text)^ = ord('1')) or
+             (GetTrue(Text) = 1));
+end;
+
 function TValuePUtf8Char.ToDouble: double;
 begin
   result := GetExtended(Text);
@@ -4451,11 +4521,39 @@ begin
              IdemPropNameUSameLenNotNull(pointer(Value), Text, Len));
 end;
 
-function TValuePUtf8Char.ToBoolean: boolean;
+function TValuePUtf8Char.Equal(const Value: RawUtf8): boolean;
 begin
-  result := (Text <> nil) and
-            ((PWord(Text)^ = ord('1')) or
-             (GetTrue(Text) = 1));
+  result := (length(Value) = Len) and
+            ((Len = 0) or
+             CompareMemSmall(pointer(Value), Text, Len)); // inlined
+end;
+
+function TValuePUtf8Char.Equal(Value: PUtf8Char; ValueLen: PtrInt): boolean;
+begin
+  result := (ValueLen = Len) and
+            ((Len = 0) or
+             CompareMemSmall(Value, Text, Len)); // inlined
+end;
+
+function TValuePUtf8Char.Match(Csv: PUtf8Char; Sep: AnsiChar): integer;
+var
+  l: PtrInt;
+begin
+  result := 0;
+  if Csv <> nil then
+    repeat
+      l := PosChar0(Csv, Sep) - Csv; // use fast SSE2 asm on x86_64
+      if (l = Len) and
+         ((l = 0) or
+          CompareMemSmall(Csv, Text, l)) then
+        exit;
+      inc(Csv, l);
+      if Csv^ = #0 then
+        break;
+      inc(Csv);    // skip Sep
+      inc(result); // 0,1,2..
+    until false;
+  result := -1;
 end;
 
 
@@ -4466,8 +4564,9 @@ begin
   assert(SizeOf(GlobalTime) = 128);
   assert(TTextDateWriter.InstanceSize <= SizeOf(TLocalWriter) - 256);
   // some mormot.core.text wrappers are implemented by this unit
-  _VariantToUtf8DateTimeIso8601 := DateTimeToIso8601TextVar;
-  _Iso8601ToDateTime            := Iso8601ToDateTime;
+  _VariantToUtf8DateTimeIso8601     := DateTimeToIso8601TextVar;
+  _VariantToTempUtf8DateTimeIso8601 := DateTimeToIso8601TempUtf8;
+  _Iso8601ToDateTime                := Iso8601ToDateTime;
 end;
 
 

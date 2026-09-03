@@ -80,6 +80,8 @@ type
   // proper multipart formatting as defined by RFC 2488 / RFC 1341
   // - AddFile() won't load the file content into memory so it is more
   // efficient than MultiPartFormDataEncode() from mormot.core.buffers
+  // - THttpClientSocket.Post() will call Flush and rewind the stream itself,
+  // so the very same instance can be sent several times, e.g. on retry
   THttpMultiPartStream = class(TNestedStreamReader)
   protected
     fSections: THttpMultiPartStreamSections;
@@ -88,6 +90,7 @@ type
     fMultipartContentType: RawUtf8;
     fFilesCount: integer;
     fRfc2388NestedFiles: boolean;
+    fFlushed: boolean;
     function Add(const name, content, contenttype,
       filename, encoding: RawUtf8): PHttpMultiPartStreamSection;
   public
@@ -108,6 +111,9 @@ type
       const contenttype: RawUtf8 = '');
     /// call this method before any Read() call to sent data to HTTP server
     // - it is called also when Seek(0, soBeginning) is called
+    // - the closing boundaries are appended once, so it is safe to call this
+    // method several times, e.g. on every THttpClientSocket.Post() retry
+    // - no Add*() method should be called after Flush
     procedure Flush; override;
     /// the content-type header value for this multipart content
     // - equals '' if no section has been added
@@ -217,13 +223,13 @@ type
   protected
     fSource: TStream;
     fState: THttpMultiPartDecoderState;
+    fSourceEof: boolean;
     fCurrent: THttpMultiPartDecoderSection;
     fDelimiter: RawUtf8;    // #13#10'--' + boundary
     fBuffer: RawByteString; // sliding window over fSource content
     fBufPos, fBufLen: PtrInt;
     fScanned: PtrInt;        // ReadLine watermark to avoid re-scanning
     fContentPending: PtrInt; // known section content bytes not yet consumed
-    fSourceEof: boolean;
     function Refill: boolean;
     function EnsureBytes(Count: PtrInt): boolean;
     function FindDelimiter(MaxLen: PtrInt; out SafeLen: PtrInt): PtrInt;
@@ -596,11 +602,11 @@ type
     wgsProgressive,
     wgsProgressiveFailed,
     wgsGet,
-    wgsSetDate,
     wgsLastMod,
     wgsAlternateRename,
     wgsAlternateFailedRename,
-    wgsAlternateFailedCopyInCache);
+    wgsAlternateFailedCopyInCache,
+    wgsLastModFailed);
   /// which steps have been performed during THttpClientSocket.WGet() process
   TWGetSteps = set of TWGetStep;
 
@@ -2278,12 +2284,15 @@ function SendEmailSubject(const Text: string): RawUtf8;
 
 implementation
 
+{$ifdef FPC} // already part of mormot.defines.inc but seems needed with -O2
+  {$WARN 5093 off} // function result variable of a managed uninitialized 1
+{$endif FPC}
+
 {$ifdef DELPHIPOSIX}
 uses
     Posix.UniStd, // inline expand
     Posix.StdIO; // inline expand
 {$endif DELPHIPOSIX}
-
 { ******************** THttpMultiPartStream for multipart/formdata HTTP POST }
 
 { THttpMultiPartStream }
@@ -2294,6 +2303,8 @@ var
   ns: PtrInt;
   s: RawUtf8;
 begin
+  if fFlushed then
+    EHttpSocket.RaiseUtf8('%.Add(%) after Flush', [self, name]);
   // same logic than MultiPartFormDataEncode() from mormot.core.buffers
   ns := length(fSections);
   SetLength(fSections, ns + 1);
@@ -2385,6 +2396,8 @@ var
   fs: TStream;
   fn: RawUtf8;
 begin
+  if fFlushed then // check before opening the file, as Add() would do
+    EHttpSocket.RaiseUtf8('%.AddFile(%) after Flush', [self, filename]);
   fs := TFileStreamEx.Create(filename, fmOpenReadShared);
   // an exception is raised in above line if filename is incorrect
   StringToUtf8(ExtractFileName(filename), fn);
@@ -2400,10 +2413,18 @@ var
 begin
   if fBounds = nil then
     exit;
-  for i := length(fBounds) - 1 downto 0 do
-    mormot.core.text.Append(s, ['--', fBounds[i], '--'#13#10]);
-  Append(s);
-  inherited Flush; // compute fSize
+  if not fFlushed then
+  begin
+    // append the closing boundaries only once: Flush is called again by any
+    // Seek(0, soBeginning), e.g. from THttpClientSocket.RequestInternal after
+    // an explicit Flush, or on retry - the duplicated boundaries exceeded the
+    // Content-Length: header and broke the keep-alive connection - see #565
+    for i := length(fBounds) - 1 downto 0 do
+      s := Join([{%H-}s, '--', fBounds[i], '--'#13#10]);
+    Append(s);
+    fFlushed := true;
+  end;
+  inherited Flush; // rewind nested streams and compute fSize
 end;
 
 
@@ -2412,22 +2433,26 @@ end;
 function GetQuotedParamValue(var P: PUtf8Char; out Value: RawUtf8): boolean;
 var
   b, d: PUtf8Char;
+  needescape: boolean;
   tmp: TSynTempBuffer;
 begin
   // decode a "quoted-string" parameter value, unescaping any \x quoted-pair
   result := false;
   b := P;
+  needescape := false;
   while not (P^ in ['"', #0]) do
-    if (P^ = '\') and
-       (P[1] <> #0) then
-      inc(P, 2) // an escaped char is part of the value
-    else
-      inc(P);
+  begin
+    if P^ = '\' then
+      if P[1] <> #0 then
+      begin
+        inc(P); // an escaped char is part of the value
+        needescape := true;
+      end;
+    inc(P);
+  end;
   if P^ <> '"' then
     exit; // unbalanced quote: caller will stop parsing this line
-  if ByteScanIndex(pointer(b), P - b, ord('\')) < 0 then
-    FastSetString(Value, b, P - b) // no quoted-pair: just copy the value
-  else
+  if needescape then
   begin
     d := tmp.Init(P - b); // unescape into a transient buffer
     while b < P do
@@ -2439,9 +2464,10 @@ begin
       inc(d);
       inc(b);
     end;
-    FastSetString(Value, tmp.buf, d - PUtf8Char(tmp.buf));
-    tmp.Done;
-  end;
+    tmp.Done(d, Value);
+  end
+  else
+    FastSetString(Value, b, P - b); // no quoted-pair: just copy the value
   inc(P); // ignore the ending quote
   result := true;
 end;
@@ -2519,7 +2545,7 @@ begin
   end
   else if fOwner.fState = mpdsError then
     // never mistake a truncated section for a complete one
-    raise EHttpMultiPart.CreateUtf8(
+    EHttpMultiPart.RaiseUtf8(
       '%.Read: malformed or truncated multipart content', [self]);
 end;
 
@@ -2536,11 +2562,11 @@ begin
      (length(aBoundary) > 256) then
     // RFC 2046 limits boundaries to 70 chars - be lenient, but bounded, so
     // that the minimal work buffer below always holds a full delimiter
-    raise EHttpMultiPart.CreateUtf8('%.Create: invalid boundary length = %',
+    EHttpMultiPart.RaiseUtf8('%.Create: invalid boundary length = %',
       [self, length(aBoundary)]);
   for i := 1 to length(aBoundary) do
     if aBoundary[i] < ' ' then // e.g. CR/LF would corrupt the delimiter
-      raise EHttpMultiPart.CreateUtf8(
+      EHttpMultiPart.RaiseUtf8(
         '%.Create: control char #% in boundary', [self, ord(aBoundary[i])]);
   fSource := aSource;
   Join([#13#10'--', aBoundary], fDelimiter);
@@ -2558,7 +2584,7 @@ var
   b: RawUtf8;
 begin
   if not MultiPartFormDataBoundary(aContentType, b) then
-    raise EHttpMultiPart.CreateUtf8(
+    EHttpMultiPart.RaiseUtf8(
       '%.CreateFromContentType: no boundary in [%]', [self, aContentType]);
   Create(aSource, b, aBufferSize);
 end;
@@ -3280,7 +3306,7 @@ begin
     id := p^.ID;
     n := RawAssociate(Http, p);
   finally
-    Safe.ReadUnLock; // keep ReadLock if a file name was found
+    Safe.ReadUnLock; // won't keep ReadLock even if a file name was found
   end;
   if (n <> 0) and
      Assigned(OnLog) then
@@ -3902,6 +3928,10 @@ begin
       else
         SockSend('Connection: Close');
       dat := ctxt.Data; // local var copy for Data to be compressed in-place
+      if ctxt.InStream <> nil then
+        // InStream may be a THttpMultiPartStream -> Seek(0) calls Flush, so
+        // that its Size is known when Content-Length: is computed below
+        ctxt.InStream.Seek(0, soBeginning); // rewind
       if (dat <> '') or
          (not IsGet(ctxt.Method) and // no message body len/type for GET/HEAD
           not IsHead(ctxt.Method)) then
@@ -3917,8 +3947,6 @@ begin
         FillCharFast(pointer(fSndBuf)^, buflen, 0); // hide SPI bearer
       if ctxt.InStream <> nil then
       begin
-        // InStream may be a THttpMultiPartStream -> Seek(0) calls Flush
-        ctxt.InStream.Seek(0, soBeginning);
         res := SockSendStream(ctxt.InStream, 1 shl 20,
              {noraise=}false, {checkrecv=}true);
         AppendLine(fRequestContext, [ctxt.InStream, ' = ', _NR[res]]);
@@ -4373,10 +4401,11 @@ var
     parthash := stream.GetHash; // hash updated on each stream.Write()
     FreeAndNil(stream);
     if Http.ContentLastModified > 0 then
-    begin
-      FileSetDateFromUnixUtc(part, Http.ContentLastModified);
-      params.SetStep(wgsLastMod, [Http.ContentLastModified]);
-    end;
+      if FileSetDateFromUnixUtc(part, Http.ContentLastModified) then
+        params.SetStep(wgsLastMod, [Http.ContentLastModified])
+      else
+        params.SetStep(wgsLastModFailed,
+          [Http.ContentLastModified, ' ', OsErrorShort]);
   end;
 
   procedure AbortAlternateDownloading;
@@ -6974,7 +7003,7 @@ begin
   sock := SocketOpen(Server, Port, {tls=}Tls = stlsImplicit, TlsCtx, nil);
   if sock <> nil then
   try
-    sock.CreateSockIn; // we use SockIn for buffered SockRecvLn() in Exec()
+    sock.CreateSockIn; // we need SockIn for buffered SockRecvLn() in Exec()
     Exec('', '220');
     // EHLO is always sent first: needed for STARTTLS and AUTH capabilities
     caps := Exec(Join(['EHLO ', Server]), '250');

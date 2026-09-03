@@ -544,8 +544,7 @@ type
   // - by default we rely on UTF-8 encoding (which is mandatory in the RFC 8259)
   // but you can use jsonEscapeUnicode to produce pure 7-bit ASCII output,
   // with \u#### escape of non-ASCII chars, e.g. as default python json.dumps
-  // - jsonNoEscapeUnicode will search for any \u#### pattern and generate pure
-  // UTF-8 output instead
+  // - jsonNoEscapeUnicode replaces any \u#### pattern by pure UTF-8 output
   // - those features are not implemented in this unit, but in mormot.core.json
   TTextWriterJsonFormat = (
     jsonCompact,
@@ -577,8 +576,8 @@ type
     fWrittenBytes: Int64;
     fInitialStreamPosition: Int64;
     fCustomOptions: TTextWriterOptions; // 16-bit
-    fFlags: TTextWriterFlags;           // 8-bit
-    fShortStringMax: byte; // = high(Dest) for twfDestIsShortString
+    fFlags: TTextWriterFlags;     // 8-bit
+    fShortStringMax: byte;        // 8-bit = high(Dest) for twfDestIsShortString
     function GetTextLength: Int64;
     function GetStream: TStream;
       {$ifdef HASINLINE} inline; {$endif}
@@ -627,6 +626,10 @@ type
     /// the data will be written to an internal RawUtf8 using the 8KB stack buffer
     // - fDest will be pointer(RawUtf8), not a true TRawByteStringStream
     constructor CreateOwnedStream(var aStackBuf: TTextWriterStackBuffer); overload;
+    /// the data will be appended to an existing RawUtf8 using the 8KB stack buffer
+    // - fDest will be pointer(RawUtf8), not a true TRawByteStringStream
+    constructor CreateOwnedStream(var aStackBuf: TTextWriterStackBuffer;
+      var aAppendTo: RawUtf8); overload;
     /// the data will be written to an external file
     // - you should call explicitly FlushFinal or FlushToStream to write
     // any pending data to the file
@@ -1744,8 +1747,13 @@ procedure VariantSaveJson(const Value: variant; Escape: TTextWriterKind;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// internal low-level function to compare two variants with RawUt8 conversion
-// - as used e.g. by FastVarDataComp() for complex or diverse VType
+// - as used e.g. by FastVarDataComp() for complex VTypes
 function VariantCompAsText(A, B: PVarData; caseInsensitive: boolean): integer;
+
+/// internal low-level function to compare two variants with TTempUtf8 conversion
+// - as used e.g. by FastVarDataComp() for diverse non-complex VType
+function VariantCompAsTempUtf8(A, B: PVarData; caseInsensitive: boolean;
+  flags: TVariantToTempUtf8Flags = []): integer;
 
 var
   /// serialize a variant value into a JSON content
@@ -1793,7 +1801,7 @@ function AnyVariantToDouble(const Value: Variant; out V: double): boolean;
 
 /// convert any numerical or text Variant into a 64-bit integer
 // - call first VariantToInt64() then GetInt64Bool() via VariantToTempUtf8()
-// - V=null or any not integer-shaped value will return false
+// - V=null will return true/0, but any not integer-shaped value will return false
 function AnyVariantToInteger(const Value: Variant; out V: Int64): boolean;
 
 /// convert any numerical or text Variant into a 64-bit integer or a given default
@@ -1909,6 +1917,11 @@ procedure TempUtf8Done(var Res: TTempUtf8);
 // - you MUST eventually call TempUtf8Done(Res) unless vfNoAlloc has been set
 function VariantToTempUtf8(const V: variant; var Res: TTempUtf8;
   Flags: TVariantToTempUtf8Flags = []): boolean;
+
+
+var /// used by VariantToTempUtf8() for TDateTime conversion
+  _VariantToTempUtf8DateTimeIso8601: procedure(DT: TDateTime;
+    FirstChar: AnsiChar; var result: TTempUtf8; WithMS: boolean);
 
 /// append any Variant to a TSynTempAdder using TTempUtf8
 procedure VariantToAdder(var Adder: TSynTempAdder; const V: variant;
@@ -2068,6 +2081,9 @@ procedure Append(var Text: RawUtf8; Added: pointer; AddedLen: PtrInt); overload;
 /// append one short string to a RawUtf8 variable with no code page conversion
 procedure AppendStr(var Text: RawUtf8; const Added: ShortString);
 
+/// append one full range UCS-4 CodePoint into Dest with proper UTF-8 encoding
+procedure AppendUcs4(var Text: RawUtf8; ucs4: Ucs4CodePoint);
+
 /// append some text items to a RawByteString variable
 procedure Append(var Text: RawByteString; const Args: array of const); overload;
 
@@ -2193,28 +2209,6 @@ procedure ConsoleWriteRaw(const Args: array of const; NoLineFeed: boolean = fals
 // !  end;
 // !end.
 procedure ConsoleShowFatalException(E: Exception; WaitForEnterKey: boolean = true);
-
-/// create a temporary string random content, WinAnsi (code page 1252) content
-function RandomWinAnsi(CharCount: integer): WinAnsiString;
-
-/// create a temporary UTF-8 random string, from RandomWinAnsi() content
-// - CharCount is the number of random WinAnsi chars, so it is very likely that
-// length(result) > CharCount once encoded into UTF-8
-function RandomUtf8(CharCount: integer): RawUtf8;
-
-/// create a temporary UTF-16 random string, from RandomWinAnsi() content
-function RandomUnicode(CharCount: integer): SynUnicode;
-
-/// create a temporary string random content, using only ASCII 7-bit chars
-// - e.g. RandomAnsi7(10) = '1d2I(\?U; ' (from #$20 space to #$7e tilde)
-function RandomAnsi7(CharCount: integer; CodePage: integer = CP_UTF8): RawByteString;
-
-/// create a temporary string random content, using A..Z,_,0..9 chars only
-// - for a strong password, use safer TAesPrng.Main.RandomPassword method
-function RandomIdentifier(CharCount: integer): RawUtf8;
-
-/// create a temporary string random content, using uri-compatible chars only
-function RandomUri(CharCount: integer): RawUtf8;
 
 
 { ************ ESynException class }
@@ -2970,8 +2964,7 @@ begin
   if (S = nil) or
      (Sep <= ' ') then
     exit;
-  while (S^ <= ' ') and
-        (S^ <> #0) do
+  while S^ in [#1 .. ' '] do
     inc(S); // trim left
   Item := S;
   S := PosChar0(S, Sep); // use fast SSE2 asm on x86_64
@@ -3001,7 +2994,7 @@ begin
   if S^ = #0 then
     P := nil
   else
-    P := S + 1;
+    P := S + 1; // skip Sep
 end;
 
 function GetNextItemBufferLen(var P: PUtf8Char; var PL: PtrInt; Sep: AnsiChar;
@@ -3107,9 +3100,7 @@ begin
     FastAssignNew(result)
   else
   begin
-    while (P^ <= ' ') and
-          (P^ <> #0) do
-      inc(P); // trim left
+    P := GotoNextNotSpace(P);  // trim left
     S := P;
     while (S^ <> #0) and
           ((S^ <> Sep) or
@@ -3118,7 +3109,7 @@ begin
       inc(S);
     E := S;
     while (E > P) and
-          (E[-1] in [#1..' ']) do
+          (E[-1] in [#1 .. ' ']) do
       dec(E); // trim right
     FastSetString(result, P, E);
     if S^ <> #0 then
@@ -3252,9 +3243,7 @@ begin
   FillCharFast(Bin^, BinBytes, 0);
   if P = nil then
     exit;
-  while (P^ <= ' ') and
-        (P^ <> #0) do
-    inc(P);
+  P := GotoNextNotSpace(P);
   S := P;
   if Sep = #0 then
     while S^ > ' ' do
@@ -3262,7 +3251,7 @@ begin
   else
     S := PosChar0(S, Sep);
   len := S - P;
-  while (P[len - 1] in [#1..' ']) and
+  while (P[len - 1] in [#1 .. ' ']) and
         (len > 0) do
     dec(len); // trim right spaces
   if len <> BinBytes * 2 then
@@ -4310,6 +4299,14 @@ begin
   SetOwnedRawUtf8(aStackBuf);
 end;
 
+constructor TTextWriter.CreateOwnedStream(var aStackBuf: TTextWriterStackBuffer;
+  var aAppendTo: RawUtf8);
+begin
+  SetOwnedRawUtf8(aStackBuf);
+  pointer(fDest) := pointer(aAppendTo); // will now own this instance
+  pointer(aAppendTo) := nil;
+end;
+
 constructor TTextWriter.CreateOwnedFileStream(
   const aFileName: TFileName; aBufSize: PtrUInt);
 begin
@@ -4469,7 +4466,7 @@ begin
   begin
     VariantToTempUtf8(PVariant(Value)^, tmp);
     if tmp.Len <> 0 then
-      _AddHtmlEscape(self, tmp.Text, tmp.Len);
+      _AddHtmlEscape(self, tmp.Text, tmp.Len); // in mormot.core.fmt.pas
     TempUtf8Done(tmp);
   end
   else // avoid UTF-8 conversion for plain numbers or if no HTML escaping
@@ -6177,14 +6174,14 @@ end;
 
 procedure TTextWriter.AddHtmlEscape(Text: PUtf8Char; Fmt: TTextWriterHtmlFormat);
 begin
-  _AddHtmlEscape(self, Text, {TextLen=}0, Fmt);
+  _AddHtmlEscape(self, Text, {TextLen=}0, Fmt); // in mormot.core.fmt.pas
 end;
 
 procedure TTextWriter.AddHtmlEscape(Text: PUtf8Char; TextLen: PtrInt;
   Fmt: TTextWriterHtmlFormat);
 begin
   if TextLen > 0 then
-    _AddHtmlEscape(self, Text, TextLen, Fmt);
+    _AddHtmlEscape(self, Text, TextLen, Fmt); // in mormot.core.fmt.pas
 end;
 
 procedure TTextWriter.AddHtmlEscapeW(Text: PWideChar; Fmt: TTextWriterHtmlFormat);
@@ -6218,7 +6215,7 @@ var
 begin
   p := StringToUtf8Temp(Text, tmp);
   if tmp.Len <> 0 then
-    _AddHtmlEscape(self, p, tmp.len, Fmt);
+    _AddHtmlEscape(self, p, tmp.len, Fmt); // in mormot.core.fmt.pas
   tmp.Done;
 end;
 {$endif UNICODE}
@@ -6930,8 +6927,7 @@ begin
   result := 0;
   if P = nil then
     exit;
-  while (P^ <= ' ') and
-        (P^ <> #0) do
+  while P^ in [#1 .. ' '] do
     inc(P);
   if P^ = '-' then
   begin
@@ -8441,15 +8437,13 @@ begin
     inc(s);
     c := s^;
   end;
-  if (c >= '0') and
-     (c <= '9') then
+  if c in ['0' .. '9'] then
     repeat
       inc(s);
       d^ := c;
       inc(d);
       c := s^;
-      if ((c >= '0') and
-          (c <= '9')) or
+      if (c in ['0' .. '9']) or
          (c = '.') then
         continue;
       if (c <> 'e') and
@@ -8466,8 +8460,7 @@ begin
         inc(d);
         c := s^;
       end;
-      while (c >= '0') and
-            (c <= '9') do
+      while c in ['0' .. '9'] do
       begin
         inc(s);
         d^ := c;
@@ -8713,7 +8706,7 @@ function VariantCompAsText(A, B: PVarData; caseInsensitive: boolean): integer;
 var
   au, bu: pointer;
   wasString: boolean;
-begin
+begin // used e.g. by FastVarDataComp() for complex VTypes
   au := nil; // no try..finally for local RawUtf8 variables
   bu := nil;
   VariantToUtf8(PVariant(A)^, RawUtf8(au), wasString);
@@ -8721,6 +8714,21 @@ begin
   result := SortDynArrayAnsiStringByCase[caseInsensitive](au, bu);
   FastAssignNew(au);
   FastAssignNew(bu);
+end;
+
+function VariantCompAsTempUtf8(A, B: PVarData; caseInsensitive: boolean;
+  flags: TVariantToTempUtf8Flags): integer;
+var
+  at, bt: TTempUtf8;
+begin // used e.g. by FastVarDataComp() for diverse non-complex VType
+  VariantToTempUtf8(PVariant(A)^, at, flags);
+  VariantToTempUtf8(PVariant(B)^, bt, flags);
+  if caseInsensitive then
+    result := StrIComp(at.Text, bt.Text)
+  else
+    result := StrComp(at.Text, bt.Text);
+  TempUtf8Done(at);
+  TempUtf8Done(bt);
 end;
 
 function AnyTextToDouble(const Text: RawUtf8; out V: double): boolean;
@@ -8761,16 +8769,12 @@ var
   tmp: TTempUtf8;
   d: double;
 begin
-  result := false;
-  if VarIsEmptyOrNull(Value) then // null means no value, so not a valid integer
-    exit;
   result := true;
   if VariantToInt64(Value, V) then
-    exit; // direct conversion from an integer value
+    exit; // direct conversion from an integer value - null would return 0
   if VariantToDouble(Value, d) then
   begin
     V := trunc(d); // better truncate than convert to TTempUtf8
-    result := true;
     exit;
   end;
   VariantToTempUtf8(Value, tmp, [vfNoAlloc, vfNullAsVoid]);
@@ -8779,7 +8783,8 @@ end;
 
 function AnyVariantToIntegerDef(const V: Variant; Default: Int64): Int64;
 begin
-  if not AnyVariantToInteger(V, result) then
+  if VarIsEmptyOrNull(V) or
+     not AnyVariantToInteger(V, result) then
     result := Default;
 end;
 
@@ -9118,7 +9123,7 @@ var
   vd: PVarData;
   vt: cardinal;
 label
-  n;
+  n, dt;
 begin
   result := false;             // wasString=false by default (assume numbers)
   Res.TempRawUtf8 := nil;      // no allocation by default - and avoid GPF
@@ -9182,19 +9187,15 @@ n:    if vfNullAsVoid in Flags then
     varSingle:
       DoubleToTempUtf8(vd^.VSingle, Res);
     varDouble:
-      DoubleToTempUtf8(vd^.VDouble, Res);
+dt:   DoubleToTempUtf8(vd^.VDouble, Res);
     varCurrency:
       Curr64ToTempUtf8(vd^.VInt64, Res);
     varDate:
-      if Flags * [vfNoAlloc, vfDateAsFloat] <> [] then
-        DoubleToTempUtf8(vd^.VDate, Res)
-      else
       begin
+        if vfDateAsFloat in Flags then
+          goto dt;
         result := true;
-        _VariantToUtf8DateTimeIso8601(vd^.VDate, 'T',
-          RawUtf8(Res.TempRawUtf8), false);
-        Res.Text := pointer(Res.TempRawUtf8);
-        Res.Len := length(RawUtf8(Res.TempRawUtf8));
+        _VariantToTempUtf8DateTimeIso8601(vd^.VDate, 'T', Res, {withMS=}false);
       end;
     varOleStr:
       result := BStrToTempUtf8(vd^.VAny, Res, vfNoAlloc in Flags);
@@ -9961,6 +9962,13 @@ begin
     _App1(@Text, @Added[1], ord(Added[0]), CP_UTF8);
 end;
 
+procedure AppendUcs4(var Text: RawUtf8; ucs4: Ucs4CodePoint);
+var
+  tmp: array[0 .. 15] of AnsiChar;
+begin
+  _App1(@Text, @tmp, Ucs4ToUtf8(ucs4, @tmp), CP_UTF8);
+end;
+
 procedure Append(var Text: RawByteString; const Added: RawByteString);
 begin
   if Added <> '' then
@@ -10276,83 +10284,6 @@ begin
   {$endif OSPOSIX}
 end;
 
-procedure _Random2WinAnsi(p: PByte; n: integer);
-var
-  c: byte;
-begin
-  if n <> 0 then
-    repeat
-      c := p^;         // in two steps for FPC
-      c := c and 127;  // in range 00..7f +$20 = 20..9f
-      case c of        // note: 81, 8d, 8f, 90, 9d are unused in CP1252
-        $5f .. $6f:
-          inc(c, $60); // 80..$8f -> c0..cf uppercase accents (7f=DEL)
-        $70 .. $7f:
-          inc(c, $70); // 90..9f -> e0..ef lowercase accents
-      else
-        inc(c, $20);   // -> 20..7e chars (' '..'~' range)
-      end;
-      p^ := c;
-      inc(p);
-      dec(n);
-    until n = 0;
-end;
-
-function RandomWinAnsi(CharCount: integer): WinAnsiString;
-begin
-  _Random2WinAnsi(RandomByteString(CharCount, result, CP_WINANSI), CharCount);
-end;
-
-function RandomAnsi7(CharCount, CodePage: integer): RawByteString;
-var
-  i: PtrInt;
-  R: PByteArray;
-begin
-  R := RandomByteString(CharCount, result, CodePage);
-  for i := 0 to CharCount - 1 do
-    R[i] := (R[i] mod 95) + 32; // [' ' .. #$7e] (#126=tilde) range
-end;
-
-procedure InitRandom64(chars64: PAnsiChar; count: integer; var result: RawUtf8);
-var
-  i: PtrInt;
-  R: PAnsiChar;
-begin
-  R := RandomByteString(count, result, CP_UTF8);
-  for i := 0 to count - 1 do
-    R[i] := chars64[PtrUInt(R[i]) and 63];
-end;
-
-const
-  IDENT_CHARS: TChar64 =
-    'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ_';
-  URL_CHARS: TChar64 =
-    'abcdefghijklmnopqrstuvwxyz0123456789-ABCDEFGH.JKLMNOP-RSTUVWXYZ.';
-
-function RandomIdentifier(CharCount: integer): RawUtf8;
-begin
-  InitRandom64(@IDENT_CHARS, CharCount, result);
-end;
-
-function RandomUri(CharCount: integer): RawUtf8;
-begin
-  InitRandom64(@URL_CHARS, CharCount, result);
-end;
-
-function RandomUtf8(CharCount: integer): RawUtf8;
-var
-  win: TSynTempBuffer;
-begin
-  _Random2WinAnsi(win.Init(CharCount), CharCount); // include accentuated chars
-  WinAnsiConvert.AnsiBufferToRawUtf8(win.buf, CharCount, result);
-  win.Done;
-end;
-
-function RandomUnicode(CharCount: integer): SynUnicode;
-begin
-  result := WinAnsiConvert.AnsiToUnicodeString(RandomWinAnsi(CharCount));
-end;
-
 
 { ************ ESynException class }
 
@@ -10510,7 +10441,7 @@ end;
 
 const
   // last item is fake HTTP status 513 = 'Invalid Request'
-  INDEX_HTTP_INVALID = 46;
+  INDEX_HTTP_INVALID = 47;
   // sorted by actual usage order for WordScanIndex() in matching HTTP_CODE[]
   HTTP_REASON: array[0 .. INDEX_HTTP_INVALID] of RawUtf8 = (
    'OK',                                // HTTP_SUCCESS - should be first
@@ -10557,6 +10488,7 @@ const
    'Service Unavailable',               // HTTP_UNAVAILABLE
    'Gateway Timeout',                   // HTTP_GATEWAYTIMEOUT
    'HTTP Version Not Supported',        // HTTP_HTTPVERSIONNONSUPPORTED
+   'Insufficient Storage',              // HTTP_INSUFFICIENTSTORAGE
    'Network Authentication Required',   // 511
    'Client Side Connection Error',      // HTTP_CLIENTERROR = 666
    'Invalid Request');                  // last INDEX_HTTP_INVALID = 513
@@ -10605,6 +10537,7 @@ const
     HTTP_UNAVAILABLE,
     HTTP_GATEWAYTIMEOUT,
     HTTP_HTTPVERSIONNONSUPPORTED,
+    HTTP_INSUFFICIENTSTORAGE,
     511,
     HTTP_CLIENTERROR,
     513); // last INDEX_HTTP_INVALID = fake 'Invalid Request' fallback code
@@ -11179,7 +11112,7 @@ end;
 
 function crc32cStringToHexShort(const str: string): TShort15;
 begin
-  CardinalToHexShort(crc32cString(str));
+  result := CardinalToHexShort(crc32cString(str));
 end;
 
 function ToHexShort(P: pointer; Len: PtrInt): TShort64;
@@ -11880,11 +11813,13 @@ begin
   AppendShortUuid               := _AppendShortUuid;
   _AddHtmlEscape                := __AddHtmlEscape;
   _VariantToUtf8DateTimeIso8601 := __VariantToUtf8DateTimeIso8601;
+  _VariantToTempUtf8DateTimeIso8601 := @__VariantToUtf8DateTimeIso8601;
   _VariantSaveJson              := __VariantSaveJson;
 end;
 
 
 initialization
+  Assert(SizeOf(TFormatUtf8) <= SizeOf(TTextWriterStackBuffer)); // 4KB<=8KB
   InitializeUnit;
 
 end.

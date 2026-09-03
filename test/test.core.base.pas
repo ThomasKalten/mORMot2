@@ -186,7 +186,7 @@ type
     a: TOrmPeopleObjArray;
     fAdd, fDel: RawUtf8;
     fQuickSelectValues: TIntegerDynArray;
-    rnd: TLecuyer;
+    rnd: PLecuyer;
     procedure Setup; override;
     function QuickSelectGT(IndexA, IndexB: PtrInt): boolean;
     procedure intadd(const Sender; Value: integer);
@@ -220,6 +220,10 @@ type
     procedure _TSynNameValue;
     /// test TRawUtf8Interning process
     procedure _TRawUtf8Interning;
+    {$ifdef FPC_X64MM}
+    /// validate the FPC x86_64 memory manager allocation capacity
+    procedure _fpcx64mm;
+    {$endif FPC_X64MM}
     /// test T*ObjArray types and the ObjArray*() wrappers
     procedure _TObjArray;
     /// validate our optimized MoveFast/FillCharFast functions
@@ -363,8 +367,35 @@ end;
 
 procedure TTestCoreBase.Setup;
 begin
-  RandomLecuyer(rnd);
+  rnd := ThreadRandom; // reference to the main thread generator
 end;
+
+{$ifdef FPC_X64MM}
+
+procedure TTestCoreBase._fpcx64mm;
+const
+  Sizes: array[0 .. 13] of PtrUInt = (
+    264744, 264745,
+    327640, 327641, 327642,
+    655320, 655321, 655322,
+    4194264, 4194265, 4194266,
+    6291416, 6291417, 6291418);
+var
+  i: PtrInt;
+  p: pointer;
+begin
+  for i := 0 to high(Sizes) do
+  begin
+    p := GetMem(Sizes[i]);
+    try
+      Check(MemSize(p) >= Sizes[i], 'MemSize');
+    finally
+      FreeMem(p);
+    end;
+  end;
+end;
+
+{$endif FPC_X64MM}
 
 procedure TTestCoreBase._CamelCase;
 var
@@ -955,6 +986,7 @@ procedure TTestCoreBase.IniFiles;
 var
   Content, S, N, V: RawUtf8;
   Si, Ni, Vi, i, j: integer;
+  fs, fd, f2: TFileName;
   P: PUtf8Char;
 const
   VUP: array[0..3] of PAnsiChar = ('VALUE', 'value', 'value2', nil);
@@ -977,14 +1009,15 @@ begin
     Check(FindIniEntry(Content, S, 'no') = '');
     Check(FindIniEntry(Content, 'no', N) = '');
   end;
-  Check(FileFromString(Content, WorkDir + 'test.ini'), 'test.ini');
-  Check(AlgoSynLZ.FileCompress(WorkDir + 'test.ini',
-     WorkDir + 'test.ini.synlz', $ABA51051), 'synLZ');
-  if CheckFailed(AlgoSynLZ.FileUnCompress(WorkDir + 'test.ini.synlz',
-     WorkDir + 'test2.ini', $ABA51051), 'unSynLZ') then
+  fs := WorkDir + 'test.ini';
+  fd := WorkDir + 'test.ini.synlz';
+  f2 := WorkDir + 'test2.ini';
+  Check(FileFromString(Content, fs), 'test.ini');
+  Check(AlgoSynLZ.FileCompress(fs, fd, $ABA51051), 'synLZ');
+  if CheckFailed(AlgoSynLZ.FileUnCompress(fd, f2, $ABA51051), 'unSynLZ') then
     exit;
-  S := StringFromFile(WorkDir + 'test2.ini');
-  Check(S = Content, WorkDir + 'test2.ini');
+  S := StringFromFile(f2);
+  Check(S = Content, f2);
   Content := 'name=value'#13#10' name2= value2 '#13#10 +
              ' name 3  =  value3 '#13#10' name4: value 4 '#13#10;
   CheckEqual(FindIniNameValueU(Content, 'NAME='), 'value');
@@ -3679,6 +3712,12 @@ begin
   end;
 end;
 
+function GL(a, b: PAnsiChar; const c: RawUtf8): boolean;
+begin
+  // avoid Delphi compiler complains about PUtf8Char/PAnsiChar types
+  result := GetLineContains(pointer(a), pointer(b), pointer(c));
+end;
+
 procedure TTestCoreBase._IsMatch;
 var
   i, j: integer;
@@ -3699,12 +3738,6 @@ var
     check(not match.Match('a1'));
     check(not match.Match('a1b2'));
     check(not match.Match('1a2'));
-  end;
-
-  function GL(a, b: PAnsiChar; const c: RawUtf8): boolean;
-  begin
-    // avoid Delphi compiler complains about PUtf8Char/PAnsiChar types
-    result := GetLineContains(pointer(a), pointer(b), pointer(c));
   end;
 
 begin
@@ -4098,8 +4131,9 @@ var
   timer: TPrecisionTimer;
   gen: TLecuyer;
 begin
+  RandomLecuyer(gen); // local instance to avoid any thread influence
   for i := 0 to high(c) do
-    c[i] := Random32;
+    c[i] := gen.Next;
   QuickSortInteger(@c, 0, high(c));
   n := 0;
   for i := 0 to high(c) - 1 do
@@ -4107,17 +4141,17 @@ begin
       inc(n);
   Check(n < 2, 'unique Random32'); // n=1 have been seen once
   timer.Start;
-  Check(Random32(0) = 0);
-  Check(Random32(1) = 0);
+  Check(gen.Next(0) = 0);
+  Check(gen.Next(1) = 0);
   for i := 1 to 100000 do
-    Check(Random32(i) < cardinal(i));
+    Check(gen.Next(i) < cardinal(i));
   for i := 0 to 100000 do
-    Check(Random32(maxInt - i) < cardinal(maxInt - i));
+    Check(gen.Next(maxInt - i) < cardinal(maxInt - i));
   qp := 0;
   n := 0;
   for i := 1 to 20000 do
   begin
-    q := Random64;
+    q := gen.NextQWord;
     Check((q = 0) or (q <> qp));
     if q and $ffffffff00000000 <> 0 then
       inc(n);
@@ -4128,7 +4162,7 @@ begin
   NotifyTestSpeed('Random32', n, n * 4, @timer);
   timer.Start;
   for i := 1 to 100 do
-    RandomBytes(@c, SizeOf(c));
+    gen.Fill(@c, SizeOf(c));
   NotifyTestSpeed('RandomBytes', 0, SizeOf(c) * 100, @timer);
   for i := 0 to high(REF_LECUYER_GENERATOR) do
   begin
@@ -4144,6 +4178,7 @@ procedure TTestCoreBase._TRawUtf8Interning;
 var
   int: TRawUtf8Interning;
   i, v: integer;
+  sr: PStrRecConst; // refers to UINT_999[]
   tmp: RawUtf8;
   vs: TRawUtf8DynArray;
   timer: TPrecisionTimer;
@@ -4237,8 +4272,8 @@ begin
     timer.Start;
     for i := 0 to MAX do
     begin
-      v := i and 511;
-      int.Unique(vs[i], pointer(SmallUInt32Utf8[v]), length(SmallUInt32Utf8[v]));
+      sr := @UINT_999[i and 511];
+      int.Unique(vs[i], @sr^.TextLo, sr^.Header.length);
     end;
     NotifyTestSpeed('interning %', [KB(INTSIZE)], MAX, DIRSIZE, @timer);
     for i := 0 to MAX do
@@ -4248,7 +4283,9 @@ begin
     check(int.Count = 512);
     for i := 0 to MAX do
       check(Utf8ToInteger(vs[i]) = i and 511);
+    timer.Start;
     vs := nil; // fair test
+    NotifyTestSpeed('intern clear %', [KB(INTSIZE)], MAX, DIRSIZE, @timer);
     check(int.Count = 512);
     check(int.Clean = 512);
     check(int.Count = 0);
@@ -4259,12 +4296,15 @@ begin
   timer.Start;
   for i := 0 to MAX do
   begin
-    v := i and 511;
-    FastSetString(vs[i], pointer(SmallUInt32Utf8[v]), length(SmallUInt32Utf8[v]));
+    sr := @UINT_999[i and 511];
+    FastSetString(vs[i], @sr^.TextLo, sr^.Header.length);
   end;
   NotifyTestSpeed('direct %', [KB(DIRSIZE)], MAX, DIRSIZE, @timer);
   for i := 0 to MAX do
     check(Utf8ToInteger(vs[i]) = i and 511);
+  timer.Start;
+  vs := nil; // fair test
+  NotifyTestSpeed('direct clear %', [KB(DIRSIZE)], MAX, DIRSIZE, @timer);
 end;
 
 function kr32reference(buf: PAnsiChar; len: cardinal): cardinal;
@@ -5762,22 +5802,22 @@ begin
     end;
     PC := ToVarUInt32(juint, @varint);
     Check(PC <> nil);
-    Check(PtrInt(PC) - PtrInt(@varint) = integer(ToVarUInt32Length(juint)));
+    Check(PtrUInt(PC) - PtrUInt(@varint) = ToVarUInt32Length(juint));
     PB := @varint;
     Check(PtrUInt(FromVarUint32(PB)) = juint);
     Check(PB = PC);
     PC := ToVarUInt32(i, @varint);
     Check(PC <> nil);
     PB := @varint;
-    Check(PtrInt(FromVarUint32(PB)) = i);
+    Check(PtrUInt(FromVarUint32(PB)) = PtrUInt(i));
     Check(PB = PC);
     PB := FromVarUInt32Safe(@varint, PC, u32);
-    Check(PtrInt(u32) = i);
+    Check(PtrUInt(u32) = PtrUInt(i));
     Check(PB = PC);
     PC := ToVarInt32(j, @varint);
     Check(PC <> nil);
     PB := @varint;
-    Check(FromVarInt32(PB) = j);
+    CheckEqual(FromVarInt32(PB), j);
     Check(PB = PC);
     PC := ToVarInt32(i - 1, @varint);
     Check(PC <> nil);
@@ -5786,7 +5826,7 @@ begin
     Check(PB = PC);
     PC := ToVarUInt64(juint, @varint);
     Check(PC <> nil);
-    Check(PtrInt(PC) - PtrInt(@varint) = integer(ToVarUInt32Length(juint)));
+    Check(PtrUInt(PC) - PtrUInt(@varint) = ToVarUInt32Length(juint));
     PB := @varint;
     Check(PtrUInt(FromVarUint64(PB)) = juint);
     Check(PB = PC);
@@ -5796,9 +5836,9 @@ begin
     PC := ToVarInt64(k, @varint);
     Check(PC <> nil);
     PB := @varint;
-    Check(FromVarInt64(PB) = k);
+    CheckEqual(FromVarInt64(PB), k);
     Check(PB = PC);
-    Check(FromVarInt64Value(@varint) = k);
+    CheckEqual(FromVarInt64Value(@varint), k);
     PC := ToVarInt64(i, @varint);
     Check(PC <> nil);
     PB := @varint;
@@ -6033,6 +6073,7 @@ var
   WS: WideString;
   SU, SU2: SynUnicode;
   WU: array[0..3] of WideChar;
+  WU2: array[0..15] of WideChar;
   str: string;
   ss: ShortString;
   fn: TFileName;
@@ -7088,8 +7129,18 @@ begin
   Check(Utf8ToUnicodeLength(Pointer(U)) = 2);
   Check(Utf8FirstLineToUtf16Length(Pointer(U)) = 2);
   PCardinal(@WU)^ := 0;
-  if CheckEqual(Utf8ToWideChar(WU, pointer(U), SizeOf(WU), length(U), false), 4) then
+  if CheckEqual(Utf8ToWideChar(WU, pointer(U), length(WU), length(U), false), 4) then
     Check(PCardinal(@WU)^ = $DCD2D863);
+  // ensure MaxDestChars is a WideChar count - not a byte count
+  U := 'abcdefgh';
+  FillCharFast(WU2, SizeOf(WU2), 0);
+  CheckEqual(Utf8ToWideChar(@WU2, pointer(U), length(WU2), length(U), false), 16);
+  CheckEqual(StrLenW(@WU2), 8);
+  FillCharFast(WU2, SizeOf(WU2), 0);
+  CheckEqual(Utf8ToWideChar(@WU2, pointer(U), 5, length(U), false), 10);
+  CheckEqual(StrLenW(@WU2), 5);
+  SU2 := 'abcde';
+  Check(CompareMem(@WU2, pointer(SU2), 10), 'truncate at MaxDestChars');
   U := SynUnicodeToUtf8(SU);
   if Check(length(U) = 4) then
     Check(PCardinal(U)^ = $92b3a8f0);
@@ -10203,7 +10254,7 @@ var
   i, j, n: integer;
   fa: TFileAge;
   fdt: TDateTime;
-  fs: Int64;
+  fs, sz: Int64;
   fu: TUnixMSTime;
   fn: array[0..10] of TFileName;
   mp, mp2: TMultiPartDynArray;
@@ -10412,6 +10463,39 @@ begin
     DecodeAndTest;
     DecodeStreamAndTest(4096);
     DecodeStreamAndTest(65536);
+    // Flush should be idempotent: THttpClientSocket calls Seek(0, soBeginning)
+    // before sending the body, which triggers Flush again - the closing
+    // boundary was appended once more and the sent body exceeded the
+    // Content-Length: computed from Size - see #565
+    sz := st.Size;
+    CheckEqual(sz, length(mpc), 'st size');
+    st.Flush;
+    CheckEqual(st.Size, sz, 'st flush twice');
+    st.Seek(0, soBeginning);
+    CheckEqual(st.Size, sz, 'st rewind');
+    CheckEqual(StreamToRawByteString(st), mpc, 'st read twice');
+    TSynLog.Family.ExceptionIgnoreCurrentThread := true;
+    try
+      raised := false;
+      try
+        st.AddContent('late', 'not allowed after Flush');
+      except
+        on EHttpSocket do
+          raised := true;
+      end;
+      Check(raised, 'st add after flush');
+      raised := false;
+      try
+        st.AddFile('late', fn[0]); // should not even open the file
+      except
+        on EHttpSocket do
+          raised := true;
+      end;
+      Check(raised, 'st addfile after flush');
+      CheckEqual(st.Size, sz, 'st size after failed add');
+    finally
+      TSynLog.Family.ExceptionIgnoreCurrentThread := false;
+    end;
     st.Free;
     for i := 0 to high(fn) do
       check(DeleteFile(fn[i]));
@@ -10570,6 +10654,7 @@ begin
     dec := THttpMultiPartDecoder.Create(src, 'xyz', 4096);
     try
       Check(dec.NextPart, 'trunc');
+      TSynLog.Family.ExceptionIgnoreCurrentThread := true;
       raised := false;
       try
         ReadAll(dec.Current.Content);
@@ -10577,6 +10662,7 @@ begin
         on EHttpMultiPart do
           raised := true;
       end;
+      TSynLog.Family.ExceptionIgnoreCurrentThread := false;
       Check(raised, 'trunc raised');
       Check(dec.State = mpdsError, 'trunc state');
       Check(not dec.Close, 'trunc Close');
@@ -10636,6 +10722,7 @@ begin
   // invalid boundaries are rejected in the constructors
   src := TRawByteStringStream.Create('X');
   try
+    TSynLog.Family.ExceptionIgnoreCurrentThread := true;
     raised := false;
     try
       SetLength(bound, 500);
@@ -10667,6 +10754,7 @@ begin
     Check(raised, 'no boundary content type');
   finally
     src.Free;
+    TSynLog.Family.ExceptionIgnoreCurrentThread := false;
   end;
 end;
 
@@ -11239,7 +11327,7 @@ const
   MAX = 10000;
 var
   dict: TSynDictionary;
-  rnd: TLecuyer; // local per-thread instance
+  rnd: PLecuyer; // local per-thread instance
 
   procedure TestSpeed(Count: integer; SetCapacity, DoText: boolean;
     Hasher: THasher; const Msg: RawUtf8);
@@ -11336,7 +11424,7 @@ var
   b: byte;
   sdk: TSDKey;
 begin
-  RandomLecuyer(rnd); // local per-thread generator
+  rnd := ThreadRandom; // use the TLecuyer of this thread
   SetDict;
   try
     CheckEqual(dict.Count, 0);
@@ -11582,7 +11670,7 @@ finally
 end;
 
 type
-  TNotifyTask = record
+  TNotifyTask = record // a typical event for TSynQueue record validation
     Name: string;
     Payload: RawJson;
     Active: boolean;
@@ -11597,7 +11685,35 @@ var
   r1, r2: TNotifyTask;
   savedint: TIntegerDynArray;
   savedu: TRawUtf8DynArray;
+  ev: TSynEvent;
 begin
+  // validate TSynEvent process
+  ev := TSynEvent.Create;
+  try
+    CheckEqual(PtrUInt(GetCurrentThreadID), PtrUInt(MainThreadID), 'mainthread');
+    for i := 1 to 10 do
+    begin
+      // emulate a ResetEvent between the two SetEvent state updates
+      ev.ResetEvent;
+      ev.SetEvent;
+      Check(ev.WaitFor(1000), 'WaitFor signal');
+      ev.SetEvent;
+      ev.ResetEvent;
+      ev.SetEvent;
+      Check(ev.WaitFor(INFINITE), 'WaitFor(INFINITE) signal');
+      // validate the main-thread CheckSynchronize() wrapper as well
+      ev.ResetEvent;
+      ev.SetEvent;
+      Check(ev.WaitForSafe(1000), 'WaitForSafe signal');
+      ev.SetEvent;
+      ev.ResetEvent;
+      ev.SetEvent;
+      Check(ev.WaitForSafe(INFINITE), 'WaitForSafe(INFINITE) signal');
+    end;
+  finally
+    ev.Free;
+  end;
+  // validate TSynQueue with integer values
   f := TSynQueue.Create(TypeInfo(TIntegerDynArray));
   try
     for o := 1 to 1000 do
@@ -11675,6 +11791,7 @@ begin
   finally
     f.Free;
   end;
+  // validate TSynQueue with string values
   f := TSynQueue.Create(TypeInfo(TRawUtf8DynArray));
   try
     for o := 1 to 1000 do
@@ -11725,6 +11842,7 @@ begin
   finally
     f.Free;
   end;
+  // validate TSynQueue with complex record type
   f := TSynQueue.Create(TypeInfo(TNotifyTaskDynArray));
   try
     checkEqual(f.Count, 0);

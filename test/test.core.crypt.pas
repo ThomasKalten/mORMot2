@@ -865,6 +865,7 @@ var
   timer: TPrecisionTimer;
   i: integer;
   big: RawByteString;
+  gen: PLecuyer;
 begin
   SetLength(big, 100000);
   // validate TAesPrgn (+ TAesPrngOsl) generators
@@ -875,18 +876,19 @@ begin
   Prng(TAesPrngOsl, 'OpenSSL', big);
   {$endif USE_OPENSSL}
   // include Lecuyer for comparison, with same benchmarks as in Prng()
+  gen := ThreadRandom;
   timer.Start;
-  CheckEqual(Random32(0), 0);
-  CheckEqual(Random32(1), 0);
+  CheckEqual(gen.Next(0), 0);
+  CheckEqual(gen.Next(1), 0);
   for i := 1 to 50000 do
-    Check(Random32(i) < cardinal(i));
+    Check(gen.Next(i) < cardinal(i));
   for i := 0 to 50000 do
-    Check(Random32(maxInt - i) < cardinal(maxInt - i));
+    Check(gen.Next(maxInt - i) < cardinal(maxInt - i));
   NotifyTestSpeed('Lecuyer Random32', [], 100003, 100003 * 4, @timer);
   timer.Start;
   for i := 1 to 100 do
-    RandomBytes(pointer(big), length(big));
-  NotifyTestSpeed('       Lecuyer RandomBytes', [], 1, length(big) * 10, @timer);
+    gen.Fill(pointer(big), length(big));
+  NotifyTestSpeed('       Lecuyer RandomBytes', [], 1, length(big) * 100, @timer);
 end;
 
 procedure TTestCoreCrypto.Prng(meta: TAesPrngClass; const name, big: RawUtf8);
@@ -1951,6 +1953,10 @@ var
   clientsig: THash256;
   hasher: TSynHasher;
   timer: TPrecisionTimer;
+  {$ifdef USE_OPENSSL}
+  i: PtrInt;
+  e: TRawUtf8DynArray;
+  {$endif USE_OPENSSL}
 begin
   // validate THashAlgo and TSignAlgo recognition
   for h := low(h) to high(h) do
@@ -2420,6 +2426,28 @@ begin
     CheckEqual(BigNumHexFromDecimal('65535'), 'ffff');
     CheckEqual(BigNumHexFromDecimal('12345678901234567890'), 'ab54a98ceb1f0ad2');
   end;
+  CheckEqual(length(e), 0);
+  CsvToRawUtf8DynArray('OpenSSL-4.0-OpenSSLProject', e);
+  CheckEqual(length(e), 1);
+  n := 0;
+  CheckEqual(OpenSslWinLocateEntry(e, n), e[0]);
+  CheckEqual(n, 4);
+  CsvToRawUtf8DynArray('OpenSSL-3.1-OpenSSLProject', e);
+  CheckEqual(length(e), 2, 'append to e[]');
+  n := 0;
+  CheckEqual(OpenSslWinLocateEntry(e, n), e[0]);
+  CheckEqual(n, 4);
+  CsvToRawUtf8DynArray('OpenSSL-3.1-OpenSSLProject,Open-SSL-5.2-OpenSSLProject,' +
+    'OpenSSL-4.2-OpenSSLProject,OpenSSL-4.3-OpenSSLProjet', e);
+  CheckEqual(length(e), 6);
+  n := 0;
+  CheckEqual(OpenSslWinLocateEntry(e, n), 'OpenSSL-4.2-OpenSSLProject');
+  CheckEqual(n, 4);
+  CsvToRawUtf8DynArray('OpenSSL-4.10-OpenSSLProject', e);
+  CheckEqual(length(e), 7);
+  n := 0;
+  CheckEqual(OpenSslWinLocateEntry(e, n), 'OpenSSL-4.10-OpenSSLProject');
+  CheckEqual(n, 4);
   {$endif USE_OPENSSL}
 end;
 
@@ -4425,7 +4453,8 @@ begin
     check(not c2.IsSelfSigned, 'csr self2');
     CheckEqual(c2.GetAuthorityKey, c1.GetSubjectKey, 'csr auth2');
   end;
-  NotifyTestSpeed('% %', [c2.Instance, crt.AlgoName], 1, 0, @timer, {onlylog=}true);
+  if c2 <> nil then // may be nil if the key generation failed above
+    NotifyTestSpeed('% %', [c2.Instance, crt.AlgoName], 1, 0, @timer, {onlylog=}true);
 end;
 
 procedure TTestCoreCrypto.CatalogRunStore(Context: TObject);
@@ -5799,7 +5828,7 @@ begin
     CheckEqual(x.Extension[xeAuthorityKeyIdentifier],
       '14:2e:b3:17:b7:58:56:cb:ae:50:09:40:e6:1f:af:9d:8b:14:c2:c6');
     CheckEqual(x.Extension[xeAuthorityInformationAccess],
-      'ocsp=http://r3.o.lencr.org,caIssuers=http://r3.i.lencr.org/');
+      'ocsp=(http://r3.o.lencr.org) caIssuers=(http://r3.i.lencr.org/)');
     if Check(x.Signed.CaIssuers <> nil) then
       CheckEqual(x.Signed.CaIssuers[0], 'http://r3.i.lencr.org/');
     if Check(x.Signed.Ocsp <> nil) then
@@ -5848,9 +5877,11 @@ begin
         cuCrlSign, cuTlsServer, cuTlsClient]);
       Check(a.Signed.ExtensionOther = nil);
       CheckEqual(a.Extension[xeAuthorityInformationAccess],
-        'caIssuers=http://x1.i.lencr.org/');
+        'caIssuers=(http://x1.i.lencr.org/)');
       CheckEqual(a.Extension[xeCertificatePolicies],
         '2.23.140.1.2.1,1.3.6.1.4.1.44947.1.1.1');
+      CheckEqual(a.Extension[xeCrlDistributionPoints],
+        'http://x1.c.lencr.org/');
       for i := 1 to 1000 do // will use TX509.fLastVerifyAuthPublicKey cache
         Check(x.Verify(a, [], _synopse_date) = cvValidSigned, 'verify 1000');
       bin := x.Signed.ToDer;
@@ -5978,8 +6009,8 @@ begin
     Check(c[cu].Verify(cint) = cvValidSigned);
   end;
   SetLength(chain, 3); // create an unordered chain - should be consolidated
-  chain[1] := ca.CertAlgo.Generate([cuKeyCertSign], 'cint1', cint);
-  chain[2] := ca.CertAlgo.Generate([cuKeyCertSign], 'cint2', chain[1]);
+  chain[1] := ca.CertAlgo.Generate([cuCA, cuKeyCertSign], 'cint1', cint); // cA mandatory
+  chain[2] := ca.CertAlgo.Generate([cuCA], 'cint2', chain[1]); // no KeyUsage = OK
   chain[0] := ca.CertAlgo.Generate([cuTlsClient], 'www.toto.com', chain[2]);
   // validate a X.509 CRL generation and signature with a temporay authority
   crl := TX509Crl.Create;

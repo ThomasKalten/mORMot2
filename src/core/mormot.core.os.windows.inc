@@ -137,16 +137,15 @@ begin
   result := @Temp;
 end;
 
+procedure Win32SynUnicodeConvert(P: PWideChar; l: PtrInt; var s: string);
+var
+  u: SynUnicode; // transient UTF-16 variable
+begin
+  SetString(u, P, l);
+  s := string(u); // let the RTL do the conversion
+end;
+
 procedure Win32PWideCharToString(P: PWideChar; l: PtrInt; var s: string);
-
-  procedure DoSynUnicodeConv;
-  var
-    u: SynUnicode; // transient UTF-16 variable
-  begin
-    SetString(u, P, l);
-    s := string(u); // let the RTL do the conversion
-  end;
-
 begin
   if IsAnsiCompatibleW(P, l) then // most common case
   begin
@@ -159,7 +158,7 @@ begin
     Unicode_ToUtf8(P, l, RawUtf8(s)) // use RTL or mormot.core.unicode
   {$endif FPC}
   else
-    DoSynUnicodeConv;
+    Win32SynUnicodeConvert(P, l, s);
 end;
 
 procedure SetStringFromAnsi7Buffer(var d: string; s: PAnsiChar; l: PtrInt);
@@ -838,7 +837,7 @@ end;
 
 // some definitions missing on oldest Delphi
 const
-  FILE_ATTRIBUTE_REPARSE_POINT = $0000400; // = faSymLink
+  FILE_ATTRIBUTE_REPARSE_POINT = $0000400; // = faSymLink = faSymbolicLink
 
 function FindFirstFileExW(lpfilename: PWideChar; fInfoLevelId: FINDEX_INFO_LEVELS;
    lpFindFileData: pointer; fSearchOp: FINDEX_SEARCH_OPS;
@@ -1082,26 +1081,44 @@ begin
     result := 0;
 end;
 
-function GetExecutableName(aAddress: pointer; aBase: PPtrUInt): TFileName;
+function GetExecutableName(aAddress: pointer; aBase: PPtrUInt;
+  aSymbol: PPUtf8Char): TFileName;
 var
-  tmp: TByteToWideChar;
-  base: PtrUInt;
+  tmp: TW32Temp;
+  base, len: PtrUInt;
 begin
   result := '';
   base := GetExecutableBase(aAddress);
   if base = 0 then
-    exit;
+    exit; // not found
   if aBase <> nil then
     aBase^ := base;
-  FillcharFast(tmp, SizeOf(tmp), 0);
-  GetModuleFileNameW(HMODULE(base), tmp, SizeOf(tmp));
-  Win32PWideCharToFileName(tmp, result);
+  if aSymbol <> nil then
+    aSymbol^ := nil; // no simple API on Windows to retrieve the symbol name
+  len := GetModuleFileNameW(HMODULE(base), @tmp, SizeOf(tmp));
+  if len <> 0 then
+    Win32PWideCharToString(@tmp, len, string(result));
 end;
 
 function IsCurrentExecutable(aAddress: pointer): boolean;
 begin
   result := GetExecutableBase(aAddress) = PtrUInt(HInstance); // current exe/dll
 end;
+
+{$ifdef ISDELPHI} // FPC pre-loads all its resources in memory
+procedure _OsLoadResString(Rec: PResStringRec; var Res: string);
+var
+  tmp: array[0 .. 4095] of Char;
+begin
+  Res := '';
+  if Rec <> nil then
+    if Rec^.Identifier < 64 shl 10 then
+      SetString(Res, tmp, LoadString(FindResourceHInstance(Rec^.Module^),
+        Rec^.Identifier, @tmp, SizeOf(tmp))) // proper WinAPI call
+    else
+      Res := PChar(Rec^.Identifier);
+end;
+{$endif ISDELPHI}
 
 function FileIsWritable(const FileName: TFileName): boolean;
 var
@@ -1478,19 +1495,19 @@ begin
   result := p^.V;
 end; // warning: FPC's GetTickCount64 doesn't handle 49.7 days wrap on XP :(
 
-procedure InitializeSRWLockForXP(var P: TOSLightMutex); stdcall;
+procedure InitializeSRWLockForXP(var P: pointer); stdcall;
 begin
-  TLightLock(P).Init; // our TLightLock is good enough on XP
+  PLightLock(@P)^.Init; // our TLightLock is good enough on XP
 end;
 
-procedure AcquireSRWLockExclusiveForXP(var P: TOSLightMutex); stdcall;
+procedure AcquireSRWLockExclusiveForXP(var P: pointer); stdcall;
 begin
-  TLightLock(P).Lock;
+  PLightLock(@P)^.Lock;
 end;
 
-procedure ReleaseSRWLockExclusiveForXP(var P: TOSLightMutex); stdcall;
+procedure ReleaseSRWLockExclusiveForXP(var P: pointer); stdcall;
 begin
-  TLightLock(P).UnLock;
+  PLightLock(@P)^.UnLock;
 end;
 
 function GetTickSec: cardinal;
@@ -1512,65 +1529,51 @@ begin
 end;
 
 
-{ TOSLightLock }
+// Win8+ WaitOnAddress/WakeByAddressSingle futex-like efficient API
+// see also warnings at https://devblogs.microsoft.com/oldnewthing/20160826-00
+var
+  // function returns when Address^ differs from the value at CompareAddress^
+  WaitOnAddress: function(Address, CompareAddress: pointer;
+    AddressSize, dwMilliseconds: PtrUInt): BOOL; stdcall;
+  WakeByAddressSingle, WakeByAddressAll: procedure(Address: pointer); stdcall;
 
-procedure TOSLightLock.Init;
+procedure _OsWaitOnValue(Value: PCardinal; Expected, TimeoutMS: cardinal);
 begin
-  fMutex := nil;
-  InitializeSRWLock(fMutex); // fallback to TLightLock on XP
+  WaitOnAddress(Value, @Expected, SizeOf(Expected), TimeOutMS); // Win8+ API
 end;
 
-procedure TOSLightLock.Done;
-begin // nothing needed
+// used only on XP/Vista/7 as fallback - follow FPC RTL PRTLEvent syntax
+type
+  PRTLEvent = pointer;
+
+function RTLEventCreate: PRTLEvent;
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  result := pointer(Windows.CreateEvent(nil, false, false, nil));
 end;
 
-procedure TOSLightLock.Lock;
+procedure RTLEventDestroy(state: PRTLEvent);
+  {$ifdef HASINLINE} inline; {$endif}
 begin
-  AcquireSRWLockExclusive(fMutex);
+  Windows.CloseHandle(THandle(state));
 end;
 
-procedure TOSLightLock.UnLock;
+procedure RTLEventSetEvent(state: PRTLEvent);
+  {$ifdef HASINLINE} inline; {$endif}
 begin
-  ReleaseSRWLockExclusive(fMutex);
+  Windows.SetEvent(THandle(state));
 end;
 
-
-{ TSynEvent }
-
-constructor TSynEvent.Create;
+procedure RTLEventResetEvent(state: PRTLEvent);
+  {$ifdef HASINLINE} inline; {$endif}
 begin
-  fHandle := pointer(CreateEvent(nil, false, false, nil));
+  Windows.ResetEvent(THandle(state));
 end;
 
-destructor TSynEvent.Destroy;
-begin
-  CloseHandle(THandle(fHandle));
-  inherited Destroy;
-end;
-
-procedure TSynEvent.ResetEvent;
-begin
-  fNotified := false;
-  Windows.ResetEvent(THandle(fHandle));
-end;
-
-procedure TSynEvent.SetEvent;
-begin
-  fNotified := true; // should be set before notification
-  Windows.SetEvent(THandle(fHandle));
-end;
-
-function TSynEvent.WaitFor(TimeoutMS: cardinal): boolean;
-begin
-  fWaiting := true;
-  WaitForSingleObject(THandle(fHandle), TimeoutMS);
-  fWaiting := false;
-  result := fNotified;
-end;
-
-function TSynEvent.IsEventFD: boolean;
-begin
-  result := false;
+function RtlWaitFor(state: PRTLEvent; timeout: cardinal; notif: boolean): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+begin // Windows API returns true if it was signaled
+  result := WaitForSingleObject(THandle(state), timeout) = WAIT_OBJECT_0;
 end;
 
 // thread naming and "int 3" debug opcode only validated on Delphi Wintel
@@ -2199,7 +2202,7 @@ function EnumProcessName(PID: cardinal): RawUtf8;
 var
   h: THandle;
   len: DWord;
-  name: array[0..4095] of WideChar;
+  name: TWide4K;
 begin
   FastAssignNew(result);
   if PID = 0 then
@@ -2521,7 +2524,7 @@ begin
   if (Buffer = nil) or
      (Len <= 0) then
     exit;
-  // try the newest per-processor ProcessPrng() AES-CTR-DRBG first
+  // try the Win8+ per-processor ProcessPrng() AES-CTR-DRBG first
   if (OSVersion >= wEight) and
      DelayedProc(ProcessPrng, BCryptPrimitives, 'BCryptPrimitives.dll', 'ProcessPrng') then
     result := ProcessPrng(Buffer, Len);
@@ -2556,7 +2559,7 @@ type
     mem_unit: cardinal;                  // Memory unit size in bytes
   end;
 
-function RetrieveSysInfo(var si: TSysInfo): boolean;
+function _RetrieveSysInfo(var si: TSysInfo): boolean;
 var
   global: TMemoryStatusEx;
   I, K, U, S: Int64;
@@ -2804,7 +2807,7 @@ begin
   ConsoleHandleCtrlCPressed := true;
 end;
 
-function WinWaitFor(ms: cardinal; h: THandle; checkSubThreadQuit: boolean): TWinWaitFor;
+function WinWaitFor(ms: cardinal; h: THandle; checkSubThreadQuit, checkSync: boolean): TWinWaitFor;
 var
   mainthread: boolean;
   msg: TMsg;
@@ -2826,17 +2829,17 @@ begin
       if msg.Message = WM_QUIT then
         exit;
   // proper Sleep/WaitForSingleObject call
-  mainthread := mainthread and IsMultiThread;
+  checkSync := checkSync and mainthread and IsMultiThread;
   if h = 0 then
   begin
-    if mainthread then
+    if checkSync then
       CheckSynchronize(ms) // call any Synchronize() event at full speed
     else
       Windows.Sleep(ms);
     result := wwfTimeout;
     exit;
   end;
-  if mainthread then
+  if checkSync then
     CheckSynchronize(0);
   case WaitForSingleObject(h, ms) of
     WAIT_TIMEOUT:
@@ -2846,16 +2849,17 @@ begin
   else
     result := wwfFailed;
   end;
-  if mainthread then
+  if checkSync then
     CheckSynchronize(0);
 end;
 
-procedure ConsoleWaitForEnterKey;
+procedure ConsoleWaitForEnterKey(doCheckSynchronize: boolean);
 begin
   ConsoleHandleCtrlCPressed := false;
   HandleCtrlC(TConsoleHandleCtrlC.HandleCtrlC);
   try
-    while (WinWaitFor({ms=}100, {handle=}0, {wm_quit=}true) = wwfTimeout) and
+    while (WinWaitFor({ms=}500, {handle=}0, {wm_quit=}true,
+             doCheckSynchronize) = wwfTimeout) and
           not ConsoleKeyPressed(VK_RETURN) and
           not ConsoleHandleCtrlCPressed do ;
   finally
@@ -3158,6 +3162,19 @@ end;
 procedure ReserveExecutableMemoryPageAccess(Reserved: pointer; Exec: boolean);
 begin
   // nothing to be done on Windows: PAGE_EXECUTE_READWRITE always work
+end;
+
+function _GetmemDualAccessPages: pointer;
+var
+  s: PtrUInt;
+  ignore: DWord;
+begin
+  s := SystemInfo.dwPageSize;
+  result := VirtualAlloc(nil, s * 2, MEM_COMMIT, PAGE_READWRITE);
+  if result = nil then
+    exit;
+  inc(PByte(result), s);
+  VirtualProtect(result, s, PAGE_NOACCESS, ignore);
 end;
 
 function _GetLargeMem(BigSize: PtrUInt): pointer;
@@ -3521,9 +3538,9 @@ type
   UNICODE_STRING = packed record
     Length: word;
     MaximumLength: word;
-    {$ifdef CPUX64}
+    {$ifdef CPU64}
     _align: array[0..3] of byte;
-    {$endif CPUX64}
+    {$endif CPU64}
     Buffer: PWideChar;
   end;
 
@@ -4541,7 +4558,7 @@ begin
   result := false;
 end;
 
-function ChangeRoot(const FolderName: RawUtf8): boolean;
+function ChangeRoot(const FolderName: TFileName): boolean;
 begin
   result := false;
 end;
@@ -4784,7 +4801,7 @@ var
   begin
     repeat
       // note: WaitForMultipleObjects() with rd burns 100% of one core :(
-      case WinWaitFor({ms=}50, processinfo.hProcess) of
+      case WinWaitFor({ms=}500, processinfo.hProcess, roWinCheckSynchronize in options) of
         wwfSignaled:
           break;
         wwfFailed, wwfQuit:
@@ -5101,7 +5118,6 @@ var
   process, machine: word;
   P: pointer;
   Vers: TWindowsVersion;
-  cpu: RawUtf8;
   reg: TWinRegistry;
   rnd: PHash128;
   proc: array of TSystemLogicalProcessorInformation;
@@ -5269,6 +5285,21 @@ begin
   OSVersion32.os := osWindows;
   OSVersion32.win := Vers;
   OSVersion32.winbuild := OSVersionInfo.dwBuildNumber;
+  if OSVersion >= wEight then
+  begin
+    h := Windows.LoadLibrary('API-MS-Win-Core-Synch-l1-2-0.dll'); // Win8+
+    WaitOnAddress       := LibraryResolve(h, 'WaitOnAddress');
+    WakeByAddressSingle := LibraryResolve(h, 'WakeByAddressSingle');
+    WakeByAddressAll    := LibraryResolve(h, 'WakeByAddressAll');
+    if Assigned(WaitOnAddress) and
+       Assigned(WakeByAddressSingle) and
+       Assigned(WakeByAddressAll) then
+    begin
+      OsWaitOnValue    := @_OsWaitOnValue;
+      OsWakeOnValue    := @WakeByAddressSingle; // defined as stdcall
+      OsWakeAllOnValue := @WakeByAddressAll;    // defined as stdcall
+    end;
+  end;
   h := GetModuleHandle(ntdll); // late binding over unstable / altered API
   if h > 0 then
   begin
@@ -5308,18 +5339,20 @@ begin
   if OSVersionInfoEx <> '' then
     OSVersionText := Join([OSVersionText, ' - ', OSVersionInfoEx]);
   {$ifdef ASMINTEL}  // from CPUID
-  cpu := IntelBrand;
-  if cpu = '' then
+  CpuInfoText := IntelBrand;
+  if CpuInfoText = '' then
   {$endif ASMINTEL}
     if reg.ReadOpen(wrLocalMachine,
       'Hardware\Description\System\CentralProcessor\0', {close=}true) then
     begin
-      cpu := reg.ReadString('ProcessorNameString');
-      if cpu = '' then
-        cpu := reg.ReadString('Identifier');
+      {$ifdef CPUINTEL} // too vague on WinArm - e.g. 'virt-10.0'
+      CpuInfoText := reg.ReadString('ProcessorNameString');
+      if CpuInfoText = '' then
+      {$endif CPUINTEL}
+        CpuInfoText := reg.ReadString('Identifier');
     end;
-  if {%H-}cpu = '' then
-    cpu := GetSystemEnv('PROCESSOR_IDENTIFIER');
+  if {%H-}CpuInfoText = '' then
+    CpuInfoText := GetSystemEnv('PROCESSOR_IDENTIFIER');
   if reg.ReadOpen(wrLocalMachine, 'Hardware\Description\System\BIOS', true) then
   begin
     _Smbios[sbiManufacturer]      := reg.ReadString('SystemManufacturer');

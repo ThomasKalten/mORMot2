@@ -2467,7 +2467,8 @@ type
     cvDeprecatedAuthority,    // (8)
     cvInvalidSignature,       // (9)
     cvRevoked,                // (10)
-    cvWrongUsage);            // (11)
+    cvWrongUsage,             // (11)
+    cvExhaustedPathLen);      // (12)
 
   /// a set of Digital Signature results
   TCryptCertValidities = set of TCryptCertValidity;
@@ -2488,15 +2489,15 @@ type
     ccfBase64,
     ccfBase64Uri);
 
-  /// used to store one unknown/unsupported attribute or extension
-  // - in TCryptCertFields.CustomExts, TXTbsCertificate.ExtensionOther[]
-  // or TXname.Other[]
+  /// used to store any kind of X.509 attributes or extensions as OID and Value
+  // - e.g. in TCryptCertFields.CustomExts, TXTbsCertificate.ExtensionOther[],
+  // TXname.Other[] or ICryptCert.GetExtensions
   TCryptCustomExt = record
     /// the OID of this value, in raw binary form - e.g. from AsnEncOid('1.2.3')
     Oid: RawByteString;
     /// the value associated with this OID
-    // - as ASN1_OCTSTR raw content for TCryptCertFields.CustomExts or
-    // TXTbsCertificate.ExtensionOther[]
+    // - as ASN1_OCTSTR raw content for TCryptCertFields.CustomExts,
+    // TXTbsCertificate.ExtensionOther[] or ICryptCert.GetExtensions
     // - as RawUtf8 for TXname.Other[]
     Value: RawByteString;
     /// true if this extension is defined as critical
@@ -2504,9 +2505,9 @@ type
   end;
   PCryptCustomExt = ^TCryptCustomExt;
 
-  /// used to store some unknown attributes or extensions
-  // - in TCryptCertFields.CustomExts, TXTbsCertificate.ExtensionOther[]
-  // or TXname.Other[]
+  /// used to store any kind of X.509 attributes or extensions as OID and Value
+  // - e.g. in TCryptCertFields.CustomExts, TXTbsCertificate.ExtensionOther[],
+  // TXname.Other[] or ICryptCert.GetExtensions
   TCryptCustomExts = array of TCryptCustomExt;
 
   /// convenient wrapper of X.509 Certificate subject name X.501 fields
@@ -2577,6 +2578,167 @@ type
     ccmSha256,
     ccmIssuedBy);
 
+const
+  /// our units generate RSA keypairs with 2048-bit by default
+  // - anything lower than 2048-bit is unsafe and should not be used
+  // - 2048-bit is today's norm, creating 112-bit of security
+  // - 3072-bit is supposed to be supported up to 2030, with 128-bit of security
+  // - 4096-bit has no security advantage, just slower process
+  // - 7680-bit or 8192-bit are highly impractical (e.g. generation can be more
+  // than 30 secs) and offers only 192-bit of security
+  // - see also OpenSslDefaultRsaBits() and RSA_INTERNAL_DEFAULT_GENERATION_BITS
+  RSA_DEFAULT_GENERATION_BITS = 2048;
+
+  /// the JWT algorithm names according to our known asymmetric algorithms
+  // - as implemented e.g. by mormot.crypt.jwt
+  CAA_JWT: array[TCryptAsymAlgo] of RawUtf8 = (
+    'ES256',      // caaES256
+    'ES384',      // caaES384
+    'ES512',      // caaES512
+    'ES256K',     // caaES256K
+    'RS256',      // caaRS256
+    'RS384',      // caaRS384
+    'RS512',      // caaRS512
+    'PS256',      // caaPS256
+    'PS384',      // caaPS384
+    'PS512',      // caaPS512
+    'EdDSA');     // caaEdDSA
+
+  /// the JWS ECC curve names according to our known asymmetric algorithms
+  // - see https://www.iana.org/assignments/jose/jose.xhtml#web-key-elliptic-curve
+  CAA_CRV: array[TCryptAsymAlgo] of RawUtf8 = (
+    'P-256',     // caaES256
+    'P-384',     // caaES384
+    'P-521',     // caaES512, note that P-521 is not a typo ;)
+    'secp256k1', // caaES256K
+    '',          // caaRS256
+    '',          // caaRS384
+    '',          // caaRS512
+    '',          // caaPS256
+    '',          // caaPS384
+    '',          // caaPS512
+    'Ed25519');  // caaEdDSA
+
+  /// the THashAlgo according to our known asymmetric algorithms
+  CAA_HF: array[TCryptAsymAlgo] of THashAlgo = (
+    hfSHA256,     // caaES256
+    hfSHA384,     // caaES384
+    hfSHA512,     // caaES512
+    hfSHA256,     // caaES256K
+    hfSHA256,     // caaRS256
+    hfSHA384,     // caaRS384
+    hfSHA512,     // caaRS512
+    hfSHA256,     // caaPS256
+    hfSHA384,     // caaPS384
+    hfSHA512,     // caaPS512
+    hfSHA512);    // caaEdDSA - SHA-512 is included in the algorithm
+
+  /// the TCryptKeyAlgo according to our known asymmetric algorithms
+  CAA_CKA: array[TCryptAsymAlgo] of TCryptKeyAlgo = (
+    ckaEcc256,    // caaES256
+    ckaEcc384,    // caaES384
+    ckaEcc512,    // caaES512
+    ckaEcc256K,   // caaES256K
+    ckaRsa,       // caaRS256
+    ckaRsa,       // caaRS384
+    ckaRsa,       // caaRS512
+    ckaRsaPss,    // caaPS256
+    ckaRsaPss,    // caaPS384
+    ckaRsaPss,    // caaPS512
+    ckaEdDSA);    // caaEdDSA
+
+  /// the known asymmetric algorithms which implement ECC cryptography
+  CAA_ECC = [caaES256, caaES384, caaES512, caaES256K, caaEdDSA];
+
+  /// the known asymmetric algorithms which implement RSA cryptography
+  CAA_RSA = [caaRS256, caaRS384, caaRS512, caaPS256, caaPS384, caaPS512];
+
+  /// the known asymmetric algorithms which expects no ASN1_SEQ in JWT/JWS
+  CAA_RAWSIGNATURE = CAA_RSA + [caaEdDSA];
+
+  /// the known key algorithms which implement ECC cryptography
+  CKA_ECC = [ckaEcc256, ckaEcc384, ckaEcc512, ckaEcc256k, ckaEdDSA];
+
+  /// the known key algorithms which implement RSA cryptography
+  CKA_RSA = [ckaRsa, ckaRsaPss];
+
+  /// such a Certificate could be used for anything
+  CU_ALL = [low(TCryptCertUsage) .. high(TCryptCertUsage)];
+
+  /// such a Certificate could be used for a TLS server authentication
+  CU_TLS_SERVER = [cuTlsServer, cuKeyAgreement, cuKeyEncipherment];
+
+  /// such a Certificate could be used for a TLS client authentication
+  CU_TLS_CLIENT = [cuTlsClient, cuKeyAgreement, cuKeyEncipherment];
+
+  /// KeyUsage bits mapped in TCryptCertUsages
+  CU_KEY_USAGE = [cuEncipherOnly .. cuDecipherOnly];
+
+  /// Extended KeyUsage bits mapped in TCryptCertUsages
+  CU_EXT_KEY_USAGE = [cuTlsServer .. cuTimestamp];
+
+  /// TCryptCertValidity results indicating a valid digital signature
+  CV_VALIDSIGN = [cvValidSigned, cvValidSelfSigned];
+
+  /// a two-char identifier of Certificate usage
+  // - as used by ToText(u: TCryptCertUsages, from_cu_text=true)
+  CU_TEXT: array[TCryptCertUsage, 0..1] of AnsiChar = (
+    'ca',  //  cuCA
+    'eo',  //  cuEncipherOnly
+    'rs',  //  cuCrlSign
+    'ks',  //  cuKeyCertSign
+    'ka',  //  cuKeyAgreement
+    'de',  //  cuDataEncipherment
+    'ke',  //  cuKeyEncipherment
+    'nr',  //  cuNonRepudiation
+    'ds',  //  cuDigitalSignature
+    'do',  //  cuDecipherOnly
+    'ts',  //  cuTlsServer
+    'tc',  //  cuTlsClient
+    'em',  //  cuEmail
+    'cs',  //  cuCodeSign
+    'os',  //  cuOcspSign
+    'tm'); //  cuTimestamp
+
+  /// standard long identifier of Certificate usage
+  // - i.e. match OpenSSL PX509.ExtendedKeyUsage/KeyUsage text
+  CU_FULLTEXT: array[TCryptCertUsage] of RawUtf8 = (
+    'CA',                            // cuCA
+    'Encipher Only',                 // cuEncipherOnly
+    'CRL Sign',                      // cuCrlSign
+    'Certificate Sign',              // cuKeyCertSign
+    'Key Agreement',                 // cuKeyAgreement
+    'Data Encipherment',             // cuDataEncipherment
+    'Key Encipherment',              // cuKeyEncipherment
+    'Non Repudiation',               // cuNonRepudiation
+    'Digital Signature',             // cuDigitalSignature
+    'Decipher Only',                 // cuDecipherOnly
+    'TLS Web Server Authentication', // cuTlsServer
+    'TLS Web Client Authentication', // cuTlsClient
+    'E-mail Protection',             // cuEmail
+    'Code Signing',                  // cuCodeSign
+    'OCSP Signing',                  // cuOcspSign
+    'Time Stamping');                // cuTimestamp
+
+function ToText(a: TCryptAsymAlgo): PShortString; overload;
+function ToText(a: TCryptKeyAlgo): PShortString; overload;
+function ToText(r: TCryptCertRevocationReason): PShortString; overload;
+function ToText(u: TCryptCertUsage): PShortString; overload;
+function ToText(u: TCryptCertUsages; from_cu_text: boolean = false): ShortString; overload;
+function ToText(v: TCryptCertValidity): PShortString; overload;
+
+/// return the first usage set, or cuKeyCertSign if [] was supplied
+function GetFirstUsage(u: TCryptCertUsages): TCryptCertUsage;
+
+/// check for one KeyUsage bit presence - if any is set (see RFC 5280 6.1.4)
+// - one is typically cuKeyCertSign, cuCrlSign or cuDigitalSignature
+function HasCertUsage(const one: TCryptCertUsage; const usages: TCryptCertUsages): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// check both cA=TRUE and keyCertSign - RFC 5280 6.1.4 compliant
+function IsCertAuthority(usages: TCryptCertUsages): boolean;
+
+type
   TCryptCert = class;
   TCryptCertAlgo = class;
 
@@ -2681,7 +2843,8 @@ type
     /// returns true e.g. after TCryptCertAlgo.New but before Generate()
     function IsVoid: boolean;
     /// the Key Usages of this Certificate
-    function GetUsage: TCryptCertUsages;
+    // - could optionally return the pathLenConstraint limit as 32-bit integer
+    function GetUsage(PathLen: PInteger = nil): TCryptCertUsages;
     /// verbose Certificate information, returned as huge text/JSON blob
     function GetPeerInfo: RawUtf8;
     /// the signature algorithm as engine-specific plain text
@@ -2863,6 +3026,8 @@ type
     // - for RSA, x is set to the Exponent (e), and y to the Modulus (n)
     // - return false if there is no compliant key information in the provider
     function GetKeyParams(out x, y: RawByteString): boolean;
+    /// returns the raw X.509 extensions as binary OID and Value pairs
+    function GetExtensions: TCryptCustomExts;
   end;
 
   /// a dynamic array of Certificate interface instances
@@ -2912,7 +3077,7 @@ type
     function GetNotAfter: TDateTime; virtual; abstract;
     function IsValidDate(date: TDateTime): boolean; virtual;
     function IsVoid: boolean; virtual;
-    function GetUsage: TCryptCertUsages; virtual; abstract;
+    function GetUsage(PathLen: PInteger = nil): TCryptCertUsages; virtual; abstract;
     function GetPeerInfo: RawUtf8; virtual; abstract;
     function GetSignatureInfo: RawUtf8; virtual; abstract;
     function GetDigest(Algo: THashAlgo): RawUtf8; virtual;
@@ -2962,6 +3127,7 @@ type
     function Handle: pointer; virtual; abstract;
     function PrivateKeyHandle: pointer; virtual;
     function GetKeyParams(out x, y: RawByteString): boolean; virtual;
+    function GetExtensions: TCryptCustomExts; virtual;
   end;
 
   /// meta-class of the abstract parent to implement ICryptCert interface
@@ -3120,7 +3286,7 @@ type
     // intermediates (not part of the store), then eventually validating the
     // last items of the chain with the store trusted certificates
     function IsValidChain(const chain: ICryptCertChain;
-      date: TDateTime = 0): TCryptCertValidity;
+      date: TDateTime = 0; ignore: TCryptCertValidities = []): TCryptCertValidity;
     /// verify the digital signature of a given memory buffer
     // - this signature should have come from a previous ICryptCert.Sign() call
     // - will check internal properties of the certificate (e.g. validity dates),
@@ -3179,8 +3345,8 @@ type
        RevocationDate: TDateTime): boolean; virtual; abstract;
     function IsValid(const cert: ICryptCert;
       date: TDateTime): TCryptCertValidity; virtual; abstract;
-    function IsValidChain(const chain: ICryptCertChain;
-      date: TDateTime): TCryptCertValidity; virtual;
+    function IsValidChain(const chain: ICryptCertChain; date: TDateTime;
+      ignore: TCryptCertValidities): TCryptCertValidity; virtual;
     function Verify(const Signature: RawByteString; Data: pointer; Len: integer;
       IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
         overload; virtual; abstract;
@@ -3358,6 +3524,9 @@ function FindCustomExtsAsn(o: PCryptCustomExt; n: integer; const b: TAsnObject):
 /// search and decode Authority Information Access (1.3.6.1.5.5.7.1.1) extension content
 function FindAia(const ext: TCryptCustomExts; var ocsp, issuers: TRawUtf8DynArray): boolean;
 
+/// search and decode Crl Distribution Points (2.5.29.31) extension content
+function FindCdp(const ext: TCryptCustomExts): TRawUtf8DynArray;
+
 type
   /// maintains a list of ICryptCert, easily reachable per TCryptCertUsage
   // - could be seen as a basic certificates store or "PKI of the poor" (tm)
@@ -3414,153 +3583,6 @@ type
     function FromBinary(algo: TCryptCertAlgo; const bin: RawByteString): TCryptCertUsages;
   end;
 
-
-const
-  /// our units generate RSA keypairs with 2048-bit by default
-  // - anything lower than 2048-bit is unsafe and should not be used
-  // - 2048-bit is today's norm, creating 112-bit of security
-  // - 3072-bit is supposed to be supported up to 2030, with 128-bit of security
-  // - 4096-bit has no security advantage, just slower process
-  // - 7680-bit or 8192-bit are highly impractical (e.g. generation can be more
-  // than 30 secs) and offers only 192-bit of security
-  // - see also OpenSslDefaultRsaBits() and RSA_INTERNAL_DEFAULT_GENERATION_BITS
-  RSA_DEFAULT_GENERATION_BITS = 2048;
-
-  /// the JWT algorithm names according to our known asymmetric algorithms
-  // - as implemented e.g. by mormot.crypt.jwt
-  CAA_JWT: array[TCryptAsymAlgo] of RawUtf8 = (
-    'ES256',      // caaES256
-    'ES384',      // caaES384
-    'ES512',      // caaES512
-    'ES256K',     // caaES256K
-    'RS256',      // caaRS256
-    'RS384',      // caaRS384
-    'RS512',      // caaRS512
-    'PS256',      // caaPS256
-    'PS384',      // caaPS384
-    'PS512',      // caaPS512
-    'EdDSA');     // caaEdDSA
-
-  /// the JWS ECC curve names according to our known asymmetric algorithms
-  // - see https://www.iana.org/assignments/jose/jose.xhtml#web-key-elliptic-curve
-  CAA_CRV: array[TCryptAsymAlgo] of RawUtf8 = (
-    'P-256',     // caaES256
-    'P-384',     // caaES384
-    'P-521',     // caaES512, note that P-521 is not a typo ;)
-    'secp256k1', // caaES256K
-    '',          // caaRS256
-    '',          // caaRS384
-    '',          // caaRS512
-    '',          // caaPS256
-    '',          // caaPS384
-    '',          // caaPS512
-    'Ed25519');  // caaEdDSA
-
-  /// the THashAlgo according to our known asymmetric algorithms
-  CAA_HF: array[TCryptAsymAlgo] of THashAlgo = (
-    hfSHA256,     // caaES256
-    hfSHA384,     // caaES384
-    hfSHA512,     // caaES512
-    hfSHA256,     // caaES256K
-    hfSHA256,     // caaRS256
-    hfSHA384,     // caaRS384
-    hfSHA512,     // caaRS512
-    hfSHA256,     // caaPS256
-    hfSHA384,     // caaPS384
-    hfSHA512,     // caaPS512
-    hfSHA512);    // caaEdDSA - SHA-512 is included in the algorithm
-
-  /// the TCryptKeyAlgo according to our known asymmetric algorithms
-  CAA_CKA: array[TCryptAsymAlgo] of TCryptKeyAlgo = (
-    ckaEcc256,    // caaES256
-    ckaEcc384,    // caaES384
-    ckaEcc512,    // caaES512
-    ckaEcc256K,   // caaES256K
-    ckaRsa,       // caaRS256
-    ckaRsa,       // caaRS384
-    ckaRsa,       // caaRS512
-    ckaRsaPss,    // caaPS256
-    ckaRsaPss,    // caaPS384
-    ckaRsaPss,    // caaPS512
-    ckaEdDSA);    // caaEdDSA
-
-  /// the known asymmetric algorithms which implement ECC cryptography
-  CAA_ECC = [caaES256, caaES384, caaES512, caaES256K, caaEdDSA];
-
-  /// the known asymmetric algorithms which implement RSA cryptography
-  CAA_RSA = [caaRS256, caaRS384, caaRS512, caaPS256, caaPS384, caaPS512];
-
-  /// the known asymmetric algorithms which expects no ASN1_SEQ in JWT/JWS
-  CAA_RAWSIGNATURE = CAA_RSA + [caaEdDSA];
-
-  /// the known key algorithms which implement ECC cryptography
-  CKA_ECC = [ckaEcc256, ckaEcc384, ckaEcc512, ckaEcc256k, ckaEdDSA];
-
-  /// the known key algorithms which implement RSA cryptography
-  CKA_RSA = [ckaRsa, ckaRsaPss];
-
-  /// such a Certificate could be used for anything
-  CU_ALL = [low(TCryptCertUsage) .. high(TCryptCertUsage)];
-
-  /// such a Certificate could be used for a TLS server authentication
-  CU_TLS_SERVER = [cuTlsServer, cuKeyAgreement, cuKeyEncipherment];
-
-  /// such a Certificate could be used for a TLS client authentication
-  CU_TLS_CLIENT = [cuTlsClient, cuKeyAgreement, cuKeyEncipherment];
-
-  /// TCryptCertValidity results indicating a valid digital signature
-  CV_VALIDSIGN =
-    [cvValidSigned, cvValidSelfSigned];
-
-  /// a two-char identifier of Certificate usage
-  // - as used by ToText(u: TCryptCertUsages, from_cu_text=true)
-  CU_TEXT: array[TCryptCertUsage, 0..1] of AnsiChar = (
-    'ca',  //  cuCA
-    'eo',  //  cuEncipherOnly
-    'rs',  //  cuCrlSign
-    'ks',  //  cuKeyCertSign
-    'ka',  //  cuKeyAgreement
-    'de',  //  cuDataEncipherment
-    'ke',  //  cuKeyEncipherment
-    'nr',  //  cuNonRepudiation
-    'ds',  //  cuDigitalSignature
-    'do',  //  cuDecipherOnly
-    'ts',  //  cuTlsServer
-    'tc',  //  cuTlsClient
-    'em',  //  cuEmail
-    'cs',  //  cuCodeSign
-    'os',  //  cuOcspSign
-    'tm'); //  cuTimestamp
-
-  /// standard long identifier of Certificate usage
-  // - i.e. match OpenSSL PX509.ExtendedKeyUsage/KeyUsage text
-  CU_FULLTEXT: array[TCryptCertUsage] of RawUtf8 = (
-    'CA',                            // cuCA
-    'Encipher Only',                 // cuEncipherOnly
-    'CRL Sign',                      // cuCrlSign
-    'Certificate Sign',              // cuKeyCertSign
-    'Key Agreement',                 // cuKeyAgreement
-    'Data Encipherment',             // cuDataEncipherment
-    'Key Encipherment',              // cuKeyEncipherment
-    'Non Repudiation',               // cuNonRepudiation
-    'Digital Signature',             // cuDigitalSignature
-    'Decipher Only',                 // cuDecipherOnly
-    'TLS Web Server Authentication', // cuTlsServer
-    'TLS Web Client Authentication', // cuTlsClient
-    'E-mail Protection',             // cuEmail
-    'Code Signing',                  // cuCodeSign
-    'OCSP Signing',                  // cuOcspSign
-    'Time Stamping');                // cuTimestamp
-
-function ToText(a: TCryptAsymAlgo): PShortString; overload;
-function ToText(a: TCryptKeyAlgo): PShortString; overload;
-function ToText(r: TCryptCertRevocationReason): PShortString; overload;
-function ToText(u: TCryptCertUsage): PShortString; overload;
-function ToText(u: TCryptCertUsages; from_cu_text: boolean = false): ShortString; overload;
-function ToText(v: TCryptCertValidity): PShortString; overload;
-
-/// return the first usage set, or cuKeyCertSign if [] was supplied
-function GetFirstUsage(u: TCryptCertUsages): TCryptCertUsage;
 
 /// fast case-insensitive check of the 'CN' Relative Distinguished Name identifier
 function IsCN(const Rdn: RawUtf8): boolean;
@@ -3833,7 +3855,7 @@ type
 
 const
   /// the supported trailer markers of a PEM text instance
-  // - only the first 10 chars after -----BEGIN will be used for recognition
+  // - use chars after '-----BEGIN' and before '----' for recognition
   PEM_BEGIN: array[TPemKind] of RawUtf8 = (
     '-----BEGIN PRIVACY-ENHANCED MESSAGE-----'#13#10,
     '-----BEGIN CERTIFICATE-----'#13#10,
@@ -3910,6 +3932,7 @@ const
   // - is stored as prefix to CKA_OID[ckaEcc256..ckaEcc256k] parameter
   ASN1_OID_X962_PUBLICKEY  = '1.2.840.10045.2.1';
 
+  ASN1_OID_CDP         = '2.5.29.31';
   ASN1_OID_AIA         = '1.3.6.1.5.5.7.1.1';
   ASN1_OID_AIA_OCSP    = '1.3.6.1.5.5.7.48.1';
   ASN1_OID_AIA_ISSUERS = '1.3.6.1.5.5.7.48.2';
@@ -4178,7 +4201,11 @@ function AsnNextGeneralName(var Pos: integer; const Buffer: TAsnObject;
 procedure AsnDecIp(p: PAnsiChar; len: integer; var text: RawUtf8);
 
 /// decode Authority Information Access (1.3.6.1.5.5.7.1.1) extension content
-function AsnDecAia(const ext: TAsnObject; var ocsp, issuers: TRawUtf8DynArray): boolean;
+function AsnDecAia(const ext: TAsnObject; var ocsp, issuers: TRawUtf8DynArray;
+  nofilter: boolean = false): boolean;
+
+/// decode Crl Distribution Points (2.5.29.31) extension content
+function AsnDecCdp(const ext: TAsnObject; nofilter: boolean = false): TRawUtf8DynArray;
 
 /// serialize a TSecurityDescriptor instance into JSON
 function SecurityDescriptorToJson(const SD: TSecurityDescriptor): RawUtf8;
@@ -8293,8 +8320,8 @@ type
 constructor TCryptRandomEntropy.Create(const name: RawUtf8);
 begin
   fSource := TAesPrngGetEntropySource(InternalResolve(name, RndAlgosText));
-  RandomByteString(16, fNonce); // good enough for per-instance naming
-  inherited Create(name);       // should be done after InternalResolve()
+  RandomBytes(FastNewRawByteString(fNonce, 16), 16); // good enough
+  inherited Create(name); // should be done after InternalResolve()
 end;
 
 procedure TCryptRandomEntropy.Get(dst: pointer; dstlen: PtrInt);
@@ -8327,12 +8354,12 @@ type
 
 procedure TCryptRandomLecuyerPrng.Get(dst: pointer; dstlen: PtrInt);
 begin
-  SharedRandom.Fill(dst, dstlen); // global TLecuyer gsl_rng_taus2 generator
+  ThreadRandom.Fill(dst, dstlen); // per-thread TLecuyer gsl_rng_taus2 generator
 end;
 
 function TCryptRandomLecuyerPrng.Get32: cardinal;
 begin
-  result := SharedRandom.Next;
+  result := ThreadRandom.Next;
 end;
 
 { TCryptRandom32 }
@@ -9438,16 +9465,9 @@ begin
 end;
 
 function TCryptCert.IsValidDate(date: TDateTime): boolean;
-var
-  na, nb: TDateTime;
 begin
-  if date = 0 then
-    date := NowUtc;
-  na := GetNotAfter;
-  nb := GetNotBefore;
-  result := (not IsVoid) and
-            ((na <= 0) or (na + CERT_DEPRECATION_THRESHOLD > date)) and
-            ((nb <= 0) or (nb < date + CERT_DEPRECATION_THRESHOLD));
+  result := (Handle <> nil) and
+            IsCertValidDate(date, GetNotAfter, GetNotBefore);
 end;
 
 function TCryptCert.IsVoid: boolean;
@@ -9654,6 +9674,16 @@ begin
   result := false; // unsupported
 end;
 
+function TCryptCert.GetExtensions: TCryptCustomExts;
+var
+  fields: TCryptCertFields; // fallback e.g. for OpenSSL
+begin
+  if GetFields(fields, {withexts=}true) then
+    result := fields.CustomExts
+  else
+    result := nil;
+end;
+
 
 { TCryptStore }
 
@@ -9759,11 +9789,14 @@ begin
   end;
 end;
 
-function TCryptStore.IsValidChain(const chain: ICryptCertChain;
-  date: TDateTime): TCryptCertValidity;
+function TCryptStore.IsValidChain(const chain: ICryptCertChain; date: TDateTime;
+  ignore: TCryptCertValidities): TCryptCertValidity;
 var
   i, n: PtrInt;
   c: ICryptCertChain;
+  u: array of TCryptCertUsages;
+  p: TIntegerDynArray;
+  plen: integer;
 begin
   // we need something to validate
   result := cvBadParameter;
@@ -9772,7 +9805,8 @@ begin
     exit;
   // ensure main certificate is not deprecated
   result := cvInvalidDate;
-  if not chain[0].IsValidDate(date) then
+  if not (result in ignore) and
+     not chain[0].IsValidDate(date) then
     exit;
   // compute the exact authority sequence (if not supplied in proper order)
   result := cvUnknownAuthority;
@@ -9782,21 +9816,44 @@ begin
      ((n = 1) and
       not c[0].IsSelfSigned) then
     exit;
+  // cache some parameters of the chain
+  SetLength(u, n);
+  SetLength(p, n);
+  for i := 0 to n - 1 do
+    u[i] := c[i].GetUsage(@p[i]);
   // check the usages of all intermediate certificates
   result := cvWrongUsage;
-  for i := 1 to n - 1 do
-    if c[i].GetUsage * [cuKeyCertSign, cuCA] = [] then
-      exit;
+  if not (result in ignore) then
+    for i := 1 to n - 2 do // skip u[0] leaf and u[n-1]trust anchor
+      if not IsCertAuthority(u[i]) then
+        exit; // check cA=TRUE and keyCertSign
+  // check pathLenConstraint according to RFC 5280
+  result := cvExhaustedPathLen;
+  plen := 0;
+  if not (result in ignore) then
+    // apply each CA's constraint (if any) against the path already seen
+    for i := 1 to n - 1 do            // skip u[0] leaf (but check trust anchor)
+      if cuCA in u[i] then            // only count cA certificates
+      begin
+        if (p[i] >= 0) and            // has pathLenConstraint
+           (plen > p[i]) then         // cvExhaustedPathLen
+          exit;
+        if (i < n - 1) and            // still an intermediate (no trust anchor)
+           not c[i].IsSelfSigned then // self-issued are exempt
+          inc(plen);
+      end;
   // ensure no certificate in the sequence has been explicitly revoked
   result := cvRevoked;
-  for i := 0 to n - 1 do
-    if IsRevoked(c[i]) <> crrNotRevoked then
-      exit;
+  if not (result in ignore) then
+    for i := 0 to n - 1 do
+      if IsRevoked(c[i]) <> crrNotRevoked then
+        exit;
   // check the cascaded dates (before any digital signature verification)
   result := cvDeprecatedAuthority;
-  for i := 1 to n - 1 do
-    if not c[i].IsValidDate(c[i - 1].GetNotBefore) then
-      exit;
+  if not (result in ignore) then
+    for i := 1 to n - 1 do
+      if not c[i].IsValidDate(c[i - 1].GetNotBefore) then
+        exit;
   // check the cascaded digital signatures
   for i := 0 to n - 2 do
   begin
@@ -10218,6 +10275,11 @@ begin
             AsnDecAia(aia, ocsp, issuers);
 end;
 
+function FindCdp(const ext: TCryptCustomExts): TRawUtf8DynArray;
+begin
+  result := AsnDecCdp(FindCustomExts(ext, ASN1_OID_CDP));
+end;
+
 
 { TCryptCertPerUsage }
 
@@ -10400,6 +10462,23 @@ begin
     if result in u then
       exit;
   result := cuKeyCertSign;
+end;
+
+function HasCertUsage(const one: TCryptCertUsage; const usages: TCryptCertUsages): boolean;
+begin // RFC 5280 6.1.4: if KeyUsage is present, the bit must be set
+  result := true;
+  if one in usages then
+    exit;
+  if (one in CU_KEY_USAGE) and
+     (usages * CU_KEY_USAGE = []) then // no KeyUsage means OK
+    exit;
+  result := false;
+end;
+
+function IsCertAuthority(usages: TCryptCertUsages): boolean;
+begin
+  result := (cuCA in usages) and                 // cA=TRUE should be present
+            HasCertUsage(cuKeyCertSign, usages); // could emit signatures
 end;
 
 function IsCN(const Rdn: RawUtf8): boolean;
@@ -10663,10 +10742,16 @@ begin
     -----BEGIN ENCRYPTED PRIVATE KEY-----  }
 end;
 
+var
+  PEM_LEN: array[TPemKind] of byte; // number of meaningful chars
+
 function PemHeader(lab: PUtf8Char): TPemKind;
 begin
+  if PEM_LEN[low(TPemKind)] = 0 then // compute once
+    for result := low(result) to high(result) do
+      PEM_LEN[result] := PosEx('--', PEM_BEGIN[result], 14) - 12;
   for result := succ(low(result)) to high(result) do
-    if IdemPropNameUSameLenNotNull(@PEM_BEGIN[result][12], lab, 10) then
+    if IdemPropNameUSameLenNotNull(@PEM_BEGIN[result][12], lab, PEM_LEN[result]) then
       exit;
   result := low(result);
 end;
@@ -11664,10 +11749,11 @@ begin
   end;
 end;
 
-function AsnDecAia(const ext: TAsnObject; var ocsp, issuers: TRawUtf8DynArray): boolean;
+function AsnDecAia(const ext: TAsnObject; var ocsp, issuers: TRawUtf8DynArray;
+  nofilter: boolean): boolean;
 var
   pos: integer;
-  oid, v: RawByteString;
+  oid, v: RawUtf8;
 begin // see xeAuthorityInformationAccess in TXTbsCertificate.AddNextExtensions
   result := false;
   ocsp := nil;
@@ -11675,19 +11761,48 @@ begin // see xeAuthorityInformationAccess in TXTbsCertificate.AddNextExtensions
   pos := 1;
   if AsnNext(pos, ext) = ASN1_SEQ then
     while (AsnNext(pos, ext) = ASN1_SEQ) and
-          (AsnNext(pos, ext, @oid) = ASN1_OBJID) and
-          (AsnNext(pos, ext, @v) = ASN1_CTX6) do
+          (AsnNext(pos, ext, @oid) = ASN1_OBJID) and // accessMethod
+          AsnNextGeneralName(pos, ext, v) do
     begin
       result := true;
       if oid{%H-} = ASN1_OID_AIA_OCSP then
       begin
-        if IsHttp(v{%H-}) then
+        if nofilter or
+           IsHttp(v{%H-}) then
           AddRawUtf8(ocsp, v);
       end
       else if oid = ASN1_OID_AIA_ISSUERS then
-        if IsHttp(v) or
+        if nofilter or
+           IsHttp(v) or
            IsLdap(v) then
           AddRawUtf8(issuers, v);
+    end;
+end;
+
+function AsnDecCdp(const ext: TAsnObject; nofilter: boolean): TRawUtf8DynArray;
+var
+  point, fullname, c0: RawByteString;
+  one: RawUtf8;
+  pos, ppoint, p: integer;
+begin // see xeCrlDistributionPoints in TXTbsCertificate.AddNextExtensions
+  result := nil;
+  pos := 1;
+  if AsnNext(pos, ext) = ASN1_SEQ then
+    while AsnNextRaw(pos, ext, point) = ASN1_SEQ do // DistributionPoint SEQ
+    begin
+      ppoint := 1;
+      while ppoint <= Length(point) do
+        if AsnNextRaw(ppoint, point, fullname) = ASN1_CTC0 then
+        begin // distributionPoint [0] DistributionPointName OPTIONAL
+          p := 1;
+          if AsnNextRaw(p, fullname, c0) <> ASN1_CTC0 then
+            continue; // nameRelativeToCRLIssuer [1] is intentionally ignored
+          p:= 1;  // parse fullName [0] GeneralNames
+          while AsnNextGeneralName(p, c0, one) do
+            if nofilter or
+               IsHttp(one) then
+              AddRawUtf8(result, one);
+        end; // reasons [1] / cRLIssuer [2] are intentionally ignored
     end;
 end;
 
@@ -11734,7 +11849,7 @@ end;
 class procedure TSynMustacheCryptoHelpers.PasswordGenerate(const Value: variant;
   out Result: variant);
 begin // {{ passwordgenerate len }}
-  RawUtf8ToVariant(TAesPrng.Main.RandomPassword(AnyVariantToIntegerDef(Value)));
+  RawUtf8ToVariant(TAesPrng.Main.RandomPassword(AnyVariantToIntegerDef(Value, 24)));
 end;
 
 // some callbacks for custom JSON serialization of security related types

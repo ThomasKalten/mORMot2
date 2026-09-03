@@ -1834,9 +1834,9 @@ type
     fServer: IRestOrmServer;
     fRouter: TRestRouter;
     fRouterSafe: TRWLightLock;
+    fServiceReleaseTimeoutMicrosec: integer;
     fOnNotifyCallback: TOnRestServerClientCallback;
     fAuthenticationBearerHeader: PAesSignature;
-    fServiceReleaseTimeoutMicrosec: integer;
     procedure SetNoAjaxJson(const Value: boolean);
     function GetNoAjaxJson: boolean;
       {$ifdef HASINLINE}inline;{$endif}
@@ -8375,7 +8375,7 @@ begin
   call.Init;
   LibraryRequestString(call.Url, Url, UrlLen);
   LibraryRequestString(call.Method, Method, MethodLen);
-  call.LowLevelConnectionID := PtrInt(GlobalLibraryRequestServer);
+  call.LowLevelConnectionID := PtrUInt(GlobalLibraryRequestServer);
   call.LowLevelConnectionFlags := [llfSecured]; // in-process call
   call.InHead := 'RemoteIP: 127.0.0.1';
   call.LowLevelRemoteIP := '127.0.0.1';

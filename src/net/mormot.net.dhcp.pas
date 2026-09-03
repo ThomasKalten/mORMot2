@@ -861,11 +861,11 @@ type
   public
     /// simple but not-rentrant lock to protect Entry[0..Count-1] values
     Safe: TLightLock;
+    /// the broadcast IP of this scope for doBroadcastAddress option 28
+    Broadcast: TNetIP4;
     /// define the subnet of this scope
     // - Subnet.mask is the doSubnetMask option 1 of this scope
     Subnet: TIp4SubNet;
-    /// the broadcast IP of this scope for doBroadcastAddress option 28
-    Broadcast: TNetIP4;
     /// the gateway IP of this scope for doRouter option 3
     Gateway: TNetIP4;
     /// the server IP of this scope for doServerIdentifier option 54
@@ -1876,9 +1876,6 @@ const
 
   ARPHRD_ETHER = 1; // from linux/if_arp.h
 
-var
-  DhcpClientId: integer; // thread-safe global random-initialized sequence
-
 function DhcpNew(var dhcp: TDhcpPacket; dmt: TDhcpMessageType; xid: cardinal;
   const addr: TNetMac; serverid: TNetIP4 = 0): PAnsiChar;
 begin
@@ -1887,11 +1884,7 @@ begin
   dhcp.htype := ARPHRD_ETHER;
   dhcp.hlen := SizeOf(addr);
   if xid = 0 then
-  begin
-    if DhcpClientId = 0 then
-      DhcpClientId := Random32Not0;
-    xid := InterlockedIncrement(DhcpClientId);
-  end;
+    xid := NetRandom32;
   dhcp.xid := xid;
   dhcp.flags := DHCP_BROADCAST_FLAG; // not unicast in this userland UDP socket API unit
   PNetMac(@dhcp.chaddr)^ := addr;
@@ -6625,7 +6618,7 @@ begin
       EnsureBound(ds, mac);
     end;
   finally
-    fScopeSafe.WriteLock;
+    fScopeSafe.WriteUnLock;
   end;
 end;
 

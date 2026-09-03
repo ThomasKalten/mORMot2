@@ -300,6 +300,9 @@ const
      rkWString
     ];
 
+  /// maps heap-allocated string types with PStrRec header - not WinAPI BSTR
+  rkStrRecTypes = rkStringTypes {$ifdef OSWINDOWS} - [rkWString] {$endif};
+
   /// maps types with proper TRttiProp.RttiOrd field
   // - i.e. rkOrdinalTypes excluding the 64-bit values
   rkHasRttiOrdTypes =
@@ -1911,7 +1914,7 @@ function FastRecordClear(Value: pointer; Info: PRttiInfo): PtrInt;
 procedure RecordClearSeveral(v: PAnsiChar; info: PRttiInfo; n: PtrInt);
 
 /// efficient finalization of successive RawUtf8 items from a (dynamic) array
-procedure StringClearSeveral(v: PPointer; n: PtrInt);
+procedure StringClearSeveral(v: PPointer; n: PtrInt; siz: PtrInt = SizeOf(RawUtf8));
 
 /// low-level finalization of a dynamic array of RawUtf8
 // - faster than RTL Finalize() or setting nil
@@ -2603,9 +2606,9 @@ type
     fName: RawUtf8;
     fProps: TRttiCustomProps;
     fPrivateSlotsSafe: TLightLock; // topmost position to force aarch64 alignment
+    fArrayFirstField, fArrayFirstFieldSort: TRttiParserType;
     fSetRandom: TRttiCustomRandom;
     // used by mormot.core.json.pas
-    fArrayFirstField, fArrayFirstFieldSort: TRttiParserType;
     fJsonLoad: pointer; // contains a TRttiJsonLoad - used if fJsonReader=nil
     fJsonSave: pointer; // contains a TRttiJsonSave - used if fJsonWriter=nil
     fJsonReader, fJsonWriter: TMethod; // TOnRttiJsonRead/TOnRttiJsonWrite
@@ -3177,11 +3180,11 @@ var
 { ************************ TRttiMap Field Mapping (e.g. DTO/Domain Objects) }
 
 type
-  /// pointer to a TRttiMap reference, for fluid-interface initialization
+  /// pointer to a TRttiMap reference, for fluent-interface initialization
   PRttiMap = ^TRttiMap;
 
   /// customizable field mapping between classes and records
-  // - Init/Map overloaded methods return self to allow proper fluid-calling
+  // - Init/Map overloaded methods return self to allow proper fluent-calling
   // - records should have field-level extended RTTI (since Delphi 2010 / FPC
   // trunk), or have been properly defined with Rtti.RegisterFromText() on
   // oldest Delphi or FPC
@@ -3214,15 +3217,15 @@ type
     // !  map.Init(TypeInfo(TMyRecordA), TypeInfo(TMyRecordB));
     function Init(A, B: PRttiInfo): PRttiMap; overload;
     /// use RTTI field names to map the content
-    // - returns self to continue manual calls to Map() in a fluid interface,
+    // - returns self to continue manual calls to Map() in a fluent interface,
     // e.g. to tune the default mapping made by this method
     function AutoMap: PRttiMap;
     /// map two fields by name
     // - if any field A or B name is '', this field will be ignored
-    // - returns self to continue manual calls to Map() in a fluid interface
+    // - returns self to continue manual calls to Map() in a fluent interface
     function Map(const A, B: RawUtf8): PRttiMap; overload;
     /// map fields by A,B pairs of names
-    // - returns self to continue manual calls to Map() in a fluid interface
+    // - returns self to continue manual calls to Map() in a fluent interface
     function Map(const ABPairs: array of RawUtf8): PRttiMap; overload;
     /// thread-safe copy mapped B fields values into A
     // - A and B are either a TObject instance or a @record pointer, depending
@@ -3458,6 +3461,8 @@ type
   TSynMonitorAbstract = class(TObjectWithRttiMethods)
   protected
     fSafe: TLightLock; // our fast non-reentrant lock
+    fProcessing: boolean;
+    fTaskStatus: (taskNotStarted,taskStarted);
     fName: RawUtf8;
   public
     /// initialize the instance nested class properties
@@ -6792,24 +6797,47 @@ begin
   if fields.Count = 0 then
     exit;
   fin := @RTTI_FINALIZE;
-  repeat
-    f := fields.Fields;
-    i := fields.Count;
+  case fields.Count of
+    0:
+      exit;
+    1: // optimized for a record with a single managed field - especially string
+      begin
+        p := fields.Fields^.{$ifdef HASDIRECTTYPEINFO}TypeInfo{$else}TypeInfoRef^{$endif};
+        if p^.Kind in rkStrRecTypes then
+          StringClearSeveral(pointer(v + fields.Fields^.Offset), n, fields.Size)
+        else
+        begin
+          fin := @fin[p^.Kind];
+          {$ifdef FPC_OLDRTTI}
+          if Assigned(fin) then
+          {$endif FPC_OLDRTTI}
+            repeat
+              TRttiFinalizer(fin)(v + fields.Fields^.Offset, p);
+              inc(v, fields.Size);
+              dec(n);
+            until n = 0;
+        end;
+      end;
+  else // generic case with several managed fields
     repeat
-      p := f^.{$ifdef HASDIRECTTYPEINFO}TypeInfo{$else}TypeInfoRef^{$endif};
-      {$ifdef FPC_OLDRTTI}
-      if Assigned(fin[p^.Kind]) then
-      {$endif FPC_OLDRTTI}
-        fin[p^.Kind](v + f^.Offset, p);
-      inc(f);
-      dec(i);
-    until i = 0;
-    inc(v, fields.Size);
-    dec(n);
-  until n = 0;
+      f := fields.Fields;
+      i := fields.Count;
+      repeat
+        p := f^.{$ifdef HASDIRECTTYPEINFO}TypeInfo{$else}TypeInfoRef^{$endif};
+        {$ifdef FPC_OLDRTTI}
+        if Assigned(fin[p^.Kind]) then
+        {$endif FPC_OLDRTTI}
+          fin[p^.Kind](v + f^.Offset, p);
+        inc(f);
+        dec(i);
+      until i = 0;
+      inc(v, fields.Size);
+      dec(n);
+    until n = 0;
+  end;
 end;
 
-procedure StringClearSeveral(v: PPointer; n: PtrInt);
+procedure StringClearSeveral(v: PPointer; n, siz: PtrInt);
 var
   p: PStrRec;
 begin
@@ -6823,7 +6851,7 @@ begin
          StrCntDecFree(p^.refCnt) then
         FreeMem(p); // works for both rkLString + rkUString
     end;
-    inc(v);
+    inc(PByte(v), siz);
     dec(n);
   until n = 0;
 end;
@@ -7181,7 +7209,7 @@ end;
 
 { RTTI_FINALIZE[] implementation functions }
 
-function _StringClear(V: PPointer; Info: PRttiInfo): PtrInt;
+function _StringClear(V: PPointer; Info: PRttiInfo): PtrInt; {$ifdef OSPOSIX}inline;{$endif}
 var
   p: PStrRec;
 begin
@@ -7199,13 +7227,13 @@ end;
 
 function _WStringClear(V: PWideString; Info: PRttiInfo): PtrInt;
 begin
+  {$ifdef OSWINDOWS}
   if V^ <> '' then
-    {$ifdef FPC}
-    Finalize(V^);
-    {$else}
-    V^ := '';
-    {$endif FPC}
+    V^ := ''; // let RTL call SysFreeString() for this BSTR instance
   result := SizeOf(V^);
+  {$else}
+  result := _StringClear(pointer(V), Info); // PStrRec UnicodeString on OSPOSIX
+  {$endif OSWINDOWS}
 end;
 
 function _VariantClear(V: PVarData; Info: PRttiInfo): PtrInt;
@@ -7708,7 +7736,7 @@ begin
   {$endif FPC}
     rkLString: // PT_INFO[ptRawUtf8/ptRawJson] have been found above
       begin
-        cp := Info^.AnsiStringCodePage;
+        cp := Info^.AnsiStringCodePage; // use TypeInfo() on Delphi 7/2007
         if cp = CP_UTF8 then
           result := ptRawUtf8
         else if cp = CP_WINANSI then
@@ -7729,10 +7757,10 @@ begin
     rkUString:
       result := ptUnicodeString;
   {$endif HASVARUSTRING}
-  {$ifdef FPC_OR_UNICODE}
-    {$ifdef UNICODE}
+  {$ifdef ISDELPHIUNICODE}
     rkProcedure,
-    {$endif UNICODE}
+  {$endif ISDELPHIUNICODE}
+  {$ifdef FPC_OR_UNICODE}
     rkClassRef,
     rkPointer:
       result := ptPtrInt;
@@ -9763,20 +9791,14 @@ begin
       // rec: { a,b: integer }
       pt := ptRecord;
       ee := eeCurly;
-      repeat
-        inc(P)
-      until (P^ > ' ') or
-            (P^ = #0);
+      P := IgnoreAndGotoNextNotSpace(P);
     end
     else if P^ = '[' then
     begin
       // arr: [ a,b:integer ]
       pt := ptDynArray;
       ee := eeSquare;
-      repeat
-        inc(P)
-      until (P^ > ' ') or
-            (P^ = #0);
+      P := IgnoreAndGotoNextNotSpace(P);
     end
     else
     begin
